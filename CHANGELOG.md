@@ -55,7 +55,9 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   fallback lists. This deliberately differs from `cli/lib/dispatch.sh`, which
   falls back for an explicit `--runtime` too (recorded for K-143). The probe
   now ends when the dispatch is cancelled, bounds the agy keyring lookup to
-  two seconds, and a daemon reuses its answer for 30 seconds.
+  two seconds, and a daemon reuses its answer for 30 seconds (5 seconds for a
+  runtime that could not run, so a retry right after `codex login` is not told
+  the old answer for long).
 
 - **Models are resolved per runtime; non-Claude model ids survive (K-132
   P0a).** The default model is no longer the literal `sonnet` for every

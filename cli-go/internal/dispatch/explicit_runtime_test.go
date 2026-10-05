@@ -381,8 +381,11 @@ func TestRoute_CancelEndsAProbeInFlight(t *testing.T) {
 }
 
 func TestDefaultRuntimeProbe_ReusesAnswersForTheTTL(t *testing.T) {
-	origOnce, origTTL, origClock := probeOnce, probeTTL, probeClock
-	t.Cleanup(func() { probeOnce, probeTTL, probeClock = origOnce, origTTL, origClock; resetProbeCache() })
+	origOnce, origTTL, origNeg, origClock := probeOnce, probeTTL, probeNegativeTTL, probeClock
+	t.Cleanup(func() {
+		probeOnce, probeTTL, probeNegativeTTL, probeClock = origOnce, origTTL, origNeg, origClock
+		resetProbeCache()
+	})
 	resetProbeCache()
 	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
 	probeClock = func() time.Time { return now }
@@ -390,7 +393,7 @@ func TestDefaultRuntimeProbe_ReusesAnswersForTheTTL(t *testing.T) {
 	calls := 0
 	probeOnce = func(ctx context.Context, name string) probeResult {
 		calls++
-		return probeResult{Reason: "not signed in"}
+		return probeResult{OK: true} // a runtime that works
 	}
 
 	for i := 0; i < 5; i++ {
@@ -412,6 +415,59 @@ func TestDefaultRuntimeProbe_ReusesAnswersForTheTTL(t *testing.T) {
 	_ = defaultRuntimeProbe(context.Background(), "agy")
 	if calls != 3 {
 		t.Errorf("answer outlived the window: %d calls", calls)
+	}
+}
+
+// A runtime that could not run is remembered only briefly, so a retry right after
+// the operator signs in or installs the CLI is not told the old answer for long.
+func TestDefaultRuntimeProbe_RemembersAnUnavailableRuntimeBriefly(t *testing.T) {
+	origOnce, origTTL, origNeg, origClock := probeOnce, probeTTL, probeNegativeTTL, probeClock
+	t.Cleanup(func() {
+		probeOnce, probeTTL, probeNegativeTTL, probeClock = origOnce, origTTL, origNeg, origClock
+		resetProbeCache()
+	})
+	resetProbeCache()
+	now := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	probeClock = func() time.Time { return now }
+	probeTTL = 30 * time.Second
+	probeNegativeTTL = 5 * time.Second
+	signedIn := false
+	calls := 0
+	probeOnce = func(ctx context.Context, name string) probeResult {
+		calls++
+		if signedIn {
+			return probeResult{OK: true}
+		}
+		return probeResult{Reason: "not signed in"}
+	}
+
+	// Inside the short window the "no" is reused: a stuck keyring is not asked
+	// again on every dispatch.
+	for i := 0; i < 4; i++ {
+		if p := defaultRuntimeProbe(context.Background(), "codex"); p.OK {
+			t.Fatal("a signed-out codex probed OK")
+		}
+	}
+	if calls != 1 {
+		t.Errorf("probed %d times inside the window, want 1", calls)
+	}
+
+	// The operator runs `codex login`. Within seconds the daemon notices.
+	signedIn = true
+	now = now.Add(4 * time.Second)
+	if p := defaultRuntimeProbe(context.Background(), "codex"); p.OK {
+		t.Errorf("answer for a runtime that could not run expired early")
+	}
+	now = now.Add(2 * time.Second) // 6 seconds after the "no"
+	if p := defaultRuntimeProbe(context.Background(), "codex"); !p.OK {
+		t.Errorf("a retry 6 seconds after codex login still says not signed in: %+v", p)
+	}
+	// And the new answer is a "yes", which is remembered for the long window.
+	callsAfter := calls
+	now = now.Add(20 * time.Second)
+	_ = defaultRuntimeProbe(context.Background(), "codex")
+	if calls != callsAfter {
+		t.Errorf("a working runtime was probed again inside the long window")
 	}
 }
 

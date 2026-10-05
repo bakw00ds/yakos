@@ -141,9 +141,10 @@ The first candidate whose CLI is on PATH and that looks signed in wins:
 If nothing passes, dispatch fails fast naming each skipped runtime and why
 (e.g. `agy: not signed in; run: yakos auth login agy`). A fallback prints
 one line on stderr and is recorded in the dispatch-log (`runtime_chosen_by`,
-`fallback_from`). The probe's answer is reused for 30 seconds by a long-lived
-daemon, and the agy keyring lookup in it is bounded to 2 seconds and ends
-when the dispatch is cancelled. `gemini` is no longer a Go runtime; use
+`fallback_from`). A long-lived daemon reuses the probe's answer for 30 seconds
+(5 seconds for a runtime that could not run, so a retry right after a login is
+not told the old answer for long), and the agy keyring lookup in it is bounded
+to 2 seconds and ends when the dispatch is cancelled. `gemini` is no longer a Go runtime; use
 `agy`. Upgrade impact: [UPGRADING.md](../UPGRADING.md).
 
 #### A runtime you name does not fall back

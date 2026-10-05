@@ -260,7 +260,8 @@ func probeMachine(ctx context.Context, name string) probeResult {
 	return probeResult{OK: true}
 }
 
-// probeTTL is how long a runtime's probe answer is reused. What the probe reads
+// probeTTL is how long a runtime's probe answer is reused (a runtime that cannot
+// run is remembered for less: probeNegativeTTL). What the probe reads
 // (PATH, the environment, a few files and, for agy, the OS keyring) does not
 // change between the turns of a conversation, and the keyring read can be slow,
 // so every dispatch of a long-lived daemon should not pay for it again. The
@@ -273,6 +274,13 @@ func probeMachine(ctx context.Context, name string) probeResult {
 // a change of it, which only a test or an operator's os.Setenv makes, is never
 // answered from the past.
 var probeTTL = 30 * time.Second
+
+// probeNegativeTTL is how long a runtime that could NOT run is remembered, at
+// most. A daemon that kept saying "not signed in" for the whole 30 seconds would
+// tell an operator who has just run `codex login` or installed the CLI that
+// nothing changed; a few seconds still spares a stuck keyring lookup (up to two
+// seconds each) from being repeated on every dispatch.
+var probeNegativeTTL = 5 * time.Second
 
 // probeClock is the clock the cache reads. Tests replace it.
 var probeClock = time.Now
@@ -307,7 +315,11 @@ func cachedProbe(name string) (probeResult, bool) {
 	probeCache.Lock()
 	defer probeCache.Unlock()
 	e, ok := probeCache.m[key]
-	if !ok || probeClock().Sub(e.at) >= probeTTL {
+	ttl := probeTTL
+	if !e.res.OK && probeNegativeTTL < ttl {
+		ttl = probeNegativeTTL
+	}
+	if !ok || probeClock().Sub(e.at) >= ttl {
 		return probeResult{}, false
 	}
 	return e.res, true
