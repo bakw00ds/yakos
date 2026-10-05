@@ -318,3 +318,56 @@ func TestChatDispatch_UnreadableTranscriptFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+// The share endpoint's cold-start owner check (no hub entry yet: a restart, or
+// the first share call) fails closed the same way. Before, a transcript that
+// could not be read skipped the check, so any operator could claim a
+// conversation they do not own as the owner of its share state.
+func TestChatShare_UnreadableTranscriptFailsClosed(t *testing.T) {
+	root := routingYakosRoot(t)
+	svc := dispatch.NewService(dispatch.ServiceConfig{YakosRoot: root, WorkspaceRoot: t.TempDir()})
+	ts, tok, workDir := newTwoOperatorServer(t, root, svc)
+	store := consoleui.NewTranscripts(workDir)
+	const conv = "conv-share-cold"
+	share := func(op string) (int, string) {
+		return asOperator(t, "POST", ts.URL+"/api/chat/share", tok, op, map[string]any{"conversationId": conv, "shared": true})
+	}
+
+	// alice's conversation, readable: the check works as before.
+	if err := store.Append(consoleui.TranscriptEntry{SessionID: "s1", ConversationID: conv, OperatorID: "alice", Role: consoleui.RoleUser, Text: "hi"}); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := share("mallory"); code != http.StatusForbidden {
+		t.Fatalf("mallory shares alice's readable conversation: %d %s, want 403", code, body)
+	}
+
+	// The transcript becomes unreadable (a directory opens, then fails to read).
+	transcript := filepath.Join(workDir, "chats", conv+".ndjson")
+	saved := transcript + ".saved"
+	if err := os.Rename(transcript, saved); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(transcript, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, op := range []string{"alice", "mallory"} {
+		if code, body := share(op); code != http.StatusInternalServerError {
+			t.Errorf("%s shares a conversation whose transcript cannot be read: %d %s, want 500: the cold-start check passed it", op, code, body)
+		}
+	}
+
+	// A refusal leaves nothing behind: once the transcript is back, alice owns the
+	// share state and mallory is still refused.
+	if err := os.Remove(transcript); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(saved, transcript); err != nil {
+		t.Fatal(err)
+	}
+	if code, body := share("alice"); code != http.StatusOK {
+		t.Fatalf("alice after the repair: %d %s, want 200", code, body)
+	}
+	if code, body := share("mallory"); code != http.StatusForbidden {
+		t.Errorf("mallory after alice shared: %d %s, want 403", code, body)
+	}
+}

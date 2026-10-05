@@ -162,7 +162,9 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   another operator's (403, like the transcript and share endpoints), and the
   stored native session is handed out and replaced only for the operator whose
   turn produced it. The gate fails closed: a transcript that exists but cannot
-  be read refuses the dispatch (500, reason logged) instead of passing it.
+  be read refuses the dispatch (500, reason logged) instead of passing it, and
+  so does the share endpoint's check of who owns a conversation that has no
+  live session.
 
 - **The state-file default runtime is trusted only when no one else could have
   written it (K-132 P0a, sec-324 F2).** `~/.yakos-state/default-runtime` steers

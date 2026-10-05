@@ -1506,16 +1506,25 @@ func (ch *chatHandlers) handleChatShare(w http.ResponseWriter, r *http.Request) 
 	// (hub restarted, or this is the very first share call for this conversation):
 	// consult the transcript's first user-turn to determine the true owner.
 	// If the transcript exists and its owner does not match effectiveOperatorID,
-	// reject 403 before writing to the hub.  If the transcript is empty or
-	// unreadable (new conversation not yet dispatched), we allow the call —
+	// reject 403 before writing to the hub.  If there is no transcript (a new
+	// conversation not yet dispatched) or it has no user turn, we allow the call:
 	// SetConversationShared will record effectiveOperatorID as the owner and
 	// subsequent calls will enforce it.
+	//
+	// A transcript that exists but cannot be read fails closed, like the dispatch
+	// gate: passing would let any operator claim a conversation they do not own
+	// as the owner of its share state. 500, and the reason is logged once.
 	if _, _, hasEntry := ch.hub.GetConversationShared(req.ConversationID); !hasEntry {
-		if transcriptOwner, err := ch.transcripts.FirstUserOwner(req.ConversationID); err == nil && transcriptOwner != "" {
-			if transcriptOwner != effectiveOperatorID {
-				http.Error(w, "forbidden: conversation owned by different operator", http.StatusForbidden)
-				return
-			}
+		transcriptOwner, ownerErr := ch.transcripts.FirstUserOwner(req.ConversationID)
+		if ownerErr != nil {
+			slog.Error("consoleui: cannot establish the conversation owner; refusing the share call",
+				"conversation", req.ConversationID, "err", ownerErr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if transcriptOwner != "" && transcriptOwner != effectiveOperatorID {
+			http.Error(w, "forbidden: conversation owned by different operator", http.StatusForbidden)
+			return
 		}
 	}
 
