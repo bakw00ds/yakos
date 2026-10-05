@@ -238,7 +238,18 @@ func TestModelHint(t *testing.T) {
 	if got := ModelHint("claude"); got != "haiku|sonnet|opus|fable" {
 		t.Errorf("ModelHint(claude) = %q", got)
 	}
-	if got := ModelHint("codex"); !strings.Contains(got, "alias") || !strings.Contains(got, "model id") {
-		t.Errorf("ModelHint(codex) = %q", got)
+	// The hint names every alias the table has, on each runtime that takes one, so
+	// an alias added to AliasNames cannot be missing from what an error tells the
+	// operator to use.
+	for _, rt := range []string{"codex", "agy"} {
+		got := ModelHint(rt)
+		if !strings.Contains(got, "alias") || !strings.Contains(got, "model id") {
+			t.Errorf("ModelHint(%s) = %q", rt, got)
+		}
+		for _, name := range AliasNames {
+			if !strings.Contains(got, name) {
+				t.Errorf("ModelHint(%s) = %q, which does not name the alias %q", rt, got, name)
+			}
+		}
 	}
 }
