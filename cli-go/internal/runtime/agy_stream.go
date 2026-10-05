@@ -30,15 +30,16 @@ package runtime
 // this run: with --conversation the second turn of a recorded pair reports 25950
 // input tokens, which is the first turn's 12859 plus the second turn's own
 // 13091, and its num_turns is 2. Taken as the run's usage it would count every
-// earlier turn again each time a conversation is resumed. So ParseResult.Usage
-// is the sum of the usage carried by the DONE steps seen in THIS stream, which
-// is the run's own tokens (it equals the result frame's on every first-turn
-// recording), and the frame's total is kept apart in ParseResult.CumulativeUsage
-// for reference. The frame still supplies the duration. A stream whose steps
-// carry no usage at all (the single --output-format json envelope has no steps)
-// falls back to the frame's counts on a first turn, num_turns of 1 or less. On a
-// later turn they cannot be told from the earlier turns' tokens, so Usage keeps
-// zero tokens and CumulativeUsage holds the total.
+// earlier turn again each time a conversation is resumed. The parser therefore
+// exposes both figures and leaves the choice to its caller, which knows whether
+// the run began a conversation. ParseResult.Usage is the sum of the usage
+// carried by the DONE steps seen in THIS stream: the run's own tokens, equal to
+// the result frame's on every first-turn recording, with the frame's duration,
+// and zero when no step carried usage (the single --output-format json envelope
+// has no steps). ParseResult.CumulativeUsage is the frame's total.
+// internal/dispatch reports the total for a run that began a new conversation,
+// where it is the run's own and survives a step line lost to corruption, and
+// the step sum for a resumed run.
 //
 // agy's input_tokens already EXCLUDES cache_read_tokens (a second-turn step
 // reports 278 input and 30214 cache read), which is the package's Usage
@@ -103,27 +104,25 @@ func (t *agyTally) add(u Usage) {
 
 // agyFrame is what a result frame reported about usage.
 type agyFrame struct {
-	usage    Usage // the counts as reported, a conversation total; DurationMs from duration_seconds
-	numTurns int   // turns in the conversation so far, 1 on a first turn
-	have     bool  // the frame carried a usage object
+	usage Usage // the counts as reported, a conversation total; DurationMs from duration_seconds
+	have  bool  // the frame carried a usage object
 }
 
 // own is the usage of the run whose DONE steps the tally holds, given the result
 // frame that closed it (the zero frame when there was none). The steps' sum is
 // the run's own tokens whatever the conversation did before it; the frame's
 // counts are not, they are the conversation's running total. The frame
-// therefore supplies only the duration. The exception is a stream whose steps
-// carried no usage: the frame's counts are then all there is, and on a first
-// turn they are the run's own. On a later turn they are not separable, so only
-// the duration is kept.
+// therefore supplies only the duration. With no step usage there is no figure of
+// the run's own, and the zero value says so: the frame's total is still in
+// ParseResult.CumulativeUsage for a caller that knows the run began the
+// conversation.
 func (t agyTally) own(f agyFrame) Usage {
-	own := t.sum
-	if !f.have {
-		return own
+	if !t.seen {
+		return Usage{}
 	}
-	own.DurationMs = f.usage.DurationMs
-	if !t.seen && f.numTurns <= 1 {
-		return f.usage
+	own := t.sum
+	if f.have {
+		own.DurationMs = f.usage.DurationMs
 	}
 	return own
 }
@@ -171,7 +170,6 @@ type agyResult struct {
 	Response        string          `json:"response"`
 	Error           json.RawMessage `json:"error"`
 	DurationSeconds float64         `json:"duration_seconds"`
-	NumTurns        int             `json:"num_turns"`
 	Usage           *agyUsage       `json:"usage"`
 }
 
@@ -330,7 +328,7 @@ func (p *agyLineParser) result(r agyResult) []NativeEvent {
 	p.resp.add(r.Response)
 	var frame agyFrame
 	if r.Usage != nil {
-		frame = agyFrame{usage: r.Usage.usage(), numTurns: r.NumTurns, have: true}
+		frame = agyFrame{usage: r.Usage.usage(), have: true}
 		frame.usage.DurationMs = int64(r.DurationSeconds * 1000)
 		p.frame = frame
 	}

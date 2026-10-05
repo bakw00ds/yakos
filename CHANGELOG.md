@@ -47,17 +47,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **agy usage is the run's own, not the conversation's.** With
     `--conversation` a result frame reports the whole conversation's tokens so
     far (recorded: turn 2 reports turn 1's tokens plus its own), which would
-    count every earlier turn again each time a conversation is resumed. `Usage`
-    is therefore the sum of the usage carried by the DONE steps seen in the
-    stream, which is what the logs, the MCP and JSON-RPC results and the Flows
-    node log carry, and adding runs up needs no subtraction. The frame's total is
-    kept in `Result.CumulativeUsage` (and `ParseResult.CumulativeUsage`) for
-    reference; it is not logged or sent. A step line lost to corruption is
-    missing from the sum, and the single `--output-format json` envelope has no
-    steps, so on a first turn its counts stand in. The parser also takes agy's
-    slash-command reply (a `command_result` frame and a result with no session)
-    and a stream in a different schema, which now comes back as its raw lines
-    instead of empty.
+    count every earlier turn again each time a conversation is resumed. The
+    parser exposes both figures: `ParseResult.Usage` is the sum of the usage
+    carried by the DONE steps in the stream, and `ParseResult.CumulativeUsage`
+    is the frame's total. The dispatch layer picks the run's `Usage`, which is
+    what the logs, the MCP and JSON-RPC results and the Flows node log carry. For
+    a run that began a conversation (no `ConversationID` in the request) it is
+    the frame's total, which is that run's own and survives a step line lost to
+    corruption. For a resumed run it is the step sum, so adding runs up needs no
+    subtraction. A resumed run whose stream has no steps (the single
+    `--output-format json` envelope) reports no tokens. `Result.CumulativeUsage`
+    keeps the frame's total for reference and is not logged or sent. The parser
+    also takes agy's slash-command reply (a `command_result` frame and a result
+    with no session) and a stream in a different schema, which now comes back as
+    its raw lines instead of empty.
   - Flows splice the text, so the untrusted-output scan now examines the real
     payload (line-anchored patterns could not match inside JSON-escaped
     NDJSON), and each node's token usage is recorded in the per-run

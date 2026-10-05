@@ -194,21 +194,23 @@ type ParseResult struct {
 	// not tell the two apart (everything but claude).
 	TextAll string
 
-	// Usage is the token usage of THIS run; the zero value means the stream did
-	// not report any (killed run, harness without usage telemetry, plain text).
-	// Runs of one conversation can be added up as they are: a consumer never
-	// subtracts an earlier total. For agy it is rebuilt from the steps, because
-	// its result frame reports the whole conversation's tokens (see
-	// CumulativeUsage).
+	// Usage is the token usage of THIS run as the stream's own events add up; the
+	// zero value means the stream did not report any (killed run, harness without
+	// usage telemetry, plain text). For agy it is the sum of the DONE steps'
+	// usage, because the result frame totals the whole conversation (see
+	// CumulativeUsage). That sum falls short when a step line was lost and is
+	// empty for a stream without steps, so internal/dispatch decides which of the
+	// two figures it reports as the run's usage.
 	Usage Usage
 
 	// CumulativeUsage is the running total of the whole native conversation up to
 	// and including this run, for the harness that reports one: agy's result
-	// frame keeps counting across --conversation turns. It is a reference value,
-	// for display or to cross-check accounting. Do NOT add it up across runs:
-	// that counts the earlier turns again. Zero when the harness reports no
-	// total. Only the token counts are cumulative; DurationMs is passed through
-	// as the harness reports it.
+	// frame keeps counting across --conversation turns. For a run that began a
+	// new conversation it is also that run's own usage, and complete even when a
+	// step line was lost. Do NOT add it up across runs: for a resumed run it
+	// counts the earlier turns again. Zero when the harness reports no total.
+	// Only the token counts are cumulative; DurationMs is passed through as the
+	// harness reports it.
 	CumulativeUsage Usage
 
 	// SessionID is the harness-native session id, "" when none was seen. Pass it

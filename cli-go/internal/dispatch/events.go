@@ -113,17 +113,20 @@ type Result struct {
 	TaskBytes   int64
 	StderrTail  string // empty → null in JSON
 	StderrTrunc bool
-	// Usage is the token usage the runtime reported (input, output, cache read,
-	// cache creation, and the dollar cost for the one harness that reports it).
-	// Nil when the run reported none. Counts follow runtime.Usage's convention
-	// across every harness.
+	// Usage is the token usage of this run (input, output, cache read, cache
+	// creation, and the dollar cost for the one harness that reports it). Nil when
+	// the run reported none. Counts follow runtime.Usage's convention across every
+	// harness. It is what gets logged and summed, so adding runs up counts every
+	// token once. For agy, whose result frame totals the whole conversation, it
+	// is the frame's total when the run began a conversation (the request had no
+	// ConversationID), and the sum of the run's DONE steps when it resumed one.
 	Usage *cost.Usage
 
 	// CumulativeUsage is the running total of the whole native conversation up to
 	// and including this run, for the harness that reports one (agy), else nil.
-	// It is for reference and cross-checking: Usage is this run's own and is what
-	// gets logged and summed, and adding CumulativeUsage up across runs would
-	// count the earlier turns again. Not written to the dispatch records.
+	// It is for reference and cross-checking. Do not add it up across runs: for a
+	// resumed run it counts the earlier turns again. Not written to the dispatch
+	// records.
 	CumulativeUsage *cost.Usage
 
 	ModelChosenBy string

@@ -164,9 +164,8 @@ session id:
   cached remainder, `output_tokens` includes reasoning. `total_cost_usd` is
   present only for claude, the one harness that reports a dollar figure;
   codex and agy report tokens only. The counts are this call's own, so a
-  client can add calls up. For a resumed agy conversation that excludes the
-  earlier turns: the harness reports a running total, and the result does not
-  carry it. `usage` is omitted when the runtime reported none.
+  client can add calls up. agy also reports a conversation total, which the
+  result does not carry. `usage` is omitted when the runtime reported none.
 - **`session_id`** is the runtime's own id (claude `session_id`, codex
   `thread_id`, agy `conversation_id`). The tool does not accept a resume id
   yet; use `yakos dispatch` with `YAKOS_CONVERSATION_ID` to continue one.

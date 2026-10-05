@@ -542,8 +542,7 @@ func execWithStreaming(
 			pr := bufParser.Finish()
 			pr.LinesDropped += readerDropped
 			parsed = &pr
-			if pr.Usage != (runtime.Usage{}) {
-				u := pr.Usage
+			if u := runUsage(pr, newConversation(req)); u != (runtime.Usage{}) {
 				usageCost = &u
 			}
 			text := pr.Text
@@ -607,7 +606,7 @@ func execWithStreaming(
 	// K-135 typed output. A buffered runtime's parse is authoritative; for claude
 	// the streamed text is what the deltas delivered.
 	if parsed != nil {
-		result.applyParsed(adapter.Name(), *parsed)
+		result.applyParsed(adapter.Name(), *parsed, newConversation(req))
 	} else {
 		result.Runtime = adapter.Name()
 		result.Provider = providerForRuntime(result.Runtime)

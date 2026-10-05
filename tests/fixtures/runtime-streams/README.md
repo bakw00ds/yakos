@@ -64,12 +64,12 @@ Every parser reports tokens in the Anthropic convention (see `runtime.Usage`):
   (`num_turns` counts the conversation's turns). In the recorded
   `conversation-turn1/turn2` pair, turn 2 reports 25950 input and 719 output:
   turn 1's 12859 and 26 plus its own 13091 and 693. `ParseResult.Usage` is
-  therefore the sum of the usage carried by the DONE steps in the stream, which
-  is the run's own tokens (13091 and 693 for turn 2, and equal to the result
-  frame on every first-turn recording), and the frame's total is kept in
-  `ParseResult.CumulativeUsage` for reference. Adding runs up needs no
-  subtraction. A stream whose steps carry no usage (the single envelope) falls
-  back to the frame's counts on a first turn.
+  therefore the sum of the usage carried by the DONE steps in the stream (13091
+  and 693 for turn 2, equal to the result frame on every first-turn recording),
+  and the frame's total is exposed as `ParseResult.CumulativeUsage`. The
+  dispatch layer reports the total for a run that began a conversation and the
+  step sum for a resumed one, so adding runs up needs no subtraction. The single
+  envelope has no steps: its `Usage` is zero and only the total is exposed.
 
 ## Claude text
 

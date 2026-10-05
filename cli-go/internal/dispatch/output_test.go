@@ -82,9 +82,17 @@ func fakeRuntimeBinData(t *testing.T, bin string, data []byte, exitCode int) {
 
 func runOnce(t *testing.T, runtimeName string) (stdout []byte, res Result, logDir string) {
 	t.Helper()
+	return runOnceConv(t, runtimeName, "")
+}
+
+// runOnceConv is runOnce for a request that resumes the conversation named by
+// conversationID ("" starts a new one).
+func runOnceConv(t *testing.T, runtimeName, conversationID string) (stdout []byte, res Result, logDir string) {
+	t.Helper()
 	logDir = isolatedLogDir(t)
 	out, r, err := Run(context.Background(), Request{
 		AgentName: "unpinned", Task: "t", Project: t.TempDir(), YakosRoot: pinRoot(t), Runtime: runtimeName,
+		ConversationID: conversationID,
 	})
 	if err != nil {
 		t.Fatalf("Run: %v", err)
@@ -312,12 +320,12 @@ func TestRun_ForwardedSubagentTextIsNotTheAnswer(t *testing.T) {
 	}
 }
 
-// agy's result frame is a conversation total. Run reports the turn's own tokens
-// as Usage, which is what the dispatch record carries and what a consumer sums,
-// and keeps the total apart for reference.
+// agy's result frame is a conversation total. A turn that resumes a conversation
+// reports the sum of its own DONE steps as Usage, which is what the dispatch
+// record carries and what a consumer sums; the total stays in CumulativeUsage.
 func TestRun_AgyResumedTurnReportsAndLogsItsOwnUsage(t *testing.T) {
 	fakeRuntimeBin(t, "agy", "agy-stream-json-1.2.17-conversation-turn2.ndjson", "", 0)
-	_, res, logDir := runOnce(t, "agy")
+	_, res, logDir := runOnceConv(t, "agy", "390dbd9d-ac3e-4fc9-9383-8f11318029e0")
 	if res.Usage == nil || res.Usage.InputTokens != 13091 || res.Usage.OutputTokens != 693 {
 		t.Errorf("Usage = %+v, want the turn's own 13091 in / 693 out", res.Usage)
 	}
@@ -334,6 +342,79 @@ func TestRun_AgyResumedTurnReportsAndLogsItsOwnUsage(t *testing.T) {
 		if strings.Contains(k, "cumulative") || strings.Contains(k, "total_tokens") {
 			t.Errorf("the record must not carry the conversation total: %s", k)
 		}
+	}
+}
+
+// A run that began a conversation has no earlier turns, so the frame's total is
+// its own usage.
+func TestRun_AgyFreshTurnReportsTheFrameTotal(t *testing.T) {
+	fakeRuntimeBin(t, "agy", "agy-stream-json-1.2.17-conversation-turn1.ndjson", "", 0)
+	_, res, logDir := runOnce(t, "agy")
+	want := cost.Usage{InputTokens: 12859, OutputTokens: 26, DurationMs: 1994}
+	if res.Usage == nil || *res.Usage != want {
+		t.Errorf("Usage = %+v, want %+v", res.Usage, want)
+	}
+	if res.CumulativeUsage == nil || *res.CumulativeUsage != want {
+		t.Errorf("CumulativeUsage = %+v, want %+v", res.CumulativeUsage, want)
+	}
+	if u, ok := finishedUsage(t, logDir); !ok || u["input_tokens"] != float64(12859) {
+		t.Errorf("logged usage = %v", u)
+	}
+}
+
+// A first turn whose stream lost the step that carried most of the usage still
+// reports the right figure, because the frame's total is the run's own. The same
+// stream on a resumed turn can only report what its steps add up to.
+func TestRun_AgyDamagedStreamFirstTurnKeepsTheFrameTotal(t *testing.T) {
+	data := damagedAgyStream(t)
+	fakeRuntimeBinData(t, "agy", data, 0)
+
+	total := cost.Usage{InputTokens: 10418, OutputTokens: 589, CacheRead: 8113, DurationMs: 6880}
+	_, fresh, _ := runOnce(t, "agy")
+	if fresh.Usage == nil || *fresh.Usage != total {
+		t.Errorf("fresh turn: Usage = %+v, want the frame total %+v", fresh.Usage, total)
+	}
+
+	_, resumed, _ := runOnceConv(t, "agy", "c3b66b04-872b-4fbe-a3a4-058a026ef20a")
+	if want := (cost.Usage{InputTokens: 116, OutputTokens: 7, DurationMs: 6880}); resumed.Usage == nil || *resumed.Usage != want {
+		t.Errorf("resumed turn: Usage = %+v, want the surviving steps' sum %+v", resumed.Usage, want)
+	}
+	if resumed.CumulativeUsage == nil || *resumed.CumulativeUsage != total {
+		t.Errorf("resumed turn: CumulativeUsage = %+v, want %+v", resumed.CumulativeUsage, total)
+	}
+}
+
+// damagedAgyStream is the vendor's checkpoint example with its agent_response
+// step, which carries most of the usage, cut in half.
+func damagedAgyStream(t *testing.T) []byte {
+	t.Helper()
+	lines := strings.Split(strings.TrimRight(string(readFixtureBytes(t, "agy-stream-json-1.2.17-SYNTHETIC-checkpoint.ndjson")), "\n"), "\n")
+	lines[2] = lines[2][:len(lines[2])/2]
+	return []byte(strings.Join(lines, "\n") + "\n")
+}
+
+// The single JSON envelope has no steps. On a turn that began the conversation
+// the frame's counts are the run's usage. On a resumed turn they include the
+// earlier turns, so the run reports no tokens, writes no usage object, and the
+// total stays in CumulativeUsage.
+func TestRun_AgyEnvelopeUsageDependsOnWhetherTheRunBeganTheConversation(t *testing.T) {
+	fakeRuntimeBin(t, "agy", "agy-json-1.2.17-SYNTHETIC-envelope.ndjson", "", 0)
+	total := cost.Usage{InputTokens: 10415, OutputTokens: 657, CacheRead: 8113, DurationMs: 7160}
+
+	_, fresh, _ := runOnce(t, "agy")
+	if fresh.Usage == nil || *fresh.Usage != total {
+		t.Errorf("fresh turn: Usage = %+v, want %+v", fresh.Usage, total)
+	}
+
+	_, resumed, logDir := runOnceConv(t, "agy", "055a398f-db14-4c5f-abbb-1bf03f8120a7")
+	if resumed.Usage != nil {
+		t.Errorf("resumed turn: Usage = %+v, want none", resumed.Usage)
+	}
+	if resumed.CumulativeUsage == nil || *resumed.CumulativeUsage != total {
+		t.Errorf("resumed turn: CumulativeUsage = %+v, want %+v", resumed.CumulativeUsage, total)
+	}
+	if u, ok := finishedUsage(t, logDir); ok {
+		t.Errorf("the dispatch record must carry no usage object for a resumed envelope run: %v", u)
 	}
 }
 
@@ -387,10 +468,17 @@ func TestProviderForRuntime(t *testing.T) {
 
 func runBuffered(t *testing.T, name string, data []byte) ([]StreamChunk, Result) {
 	t.Helper()
+	return runBufferedConv(t, name, data, "")
+}
+
+// runBufferedConv is runBuffered for a turn that resumes the conversation named
+// by conversationID ("" starts a new one).
+func runBufferedConv(t *testing.T, name string, data []byte, conversationID string) ([]StreamChunk, Result) {
+	t.Helper()
 	isolatedLogDir(t)
 	var chunks []StreamChunk
 	res, err := execWithStreaming(context.Background(),
-		Request{AgentName: "chat-agent", Task: "t", Project: t.TempDir(), Runtime: name, ModelResolved: "sonnet", ModelChosenBy: "frontmatter"},
+		Request{AgentName: "chat-agent", Task: "t", Project: t.TempDir(), Runtime: name, ModelResolved: "sonnet", ModelChosenBy: "frontmatter", ConversationID: conversationID},
 		newLargePipeAdapter(t, name, data),
 		runtime.ChatDispatchRequest{UserText: "t"},
 		func(c StreamChunk) { chunks = append(chunks, c) })
@@ -473,6 +561,36 @@ func TestRunStream_AgyStreamJSONArrivesAsText(t *testing.T) {
 	}
 	if chunks[1].Usage == nil || chunks[1].Usage.InputTokens != 25958 || chunks[1].Usage.OutputTokens != 128 {
 		t.Errorf("summary usage = %+v", chunks[1].Usage)
+	}
+}
+
+// The chat path picks the usage the same way Run does: a turn that began a
+// conversation reports the frame's total, a resumed turn the sum of its steps.
+func TestRunStream_AgyUsageDependsOnWhetherTheTurnBeganTheConversation(t *testing.T) {
+	data := damagedAgyStream(t)
+	total := cost.Usage{InputTokens: 10418, OutputTokens: 589, CacheRead: 8113, DurationMs: 6880}
+	surviving := cost.Usage{InputTokens: 116, OutputTokens: 7, DurationMs: 6880}
+
+	for _, c := range []struct {
+		name, conversationID string
+		want                 cost.Usage
+	}{
+		{"new conversation", "", total},
+		{"resumed conversation", "c3b66b04-872b-4fbe-a3a4-058a026ef20a", surviving},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			chunks, res := runBufferedConv(t, "agy", data, c.conversationID)
+			summary := chunks[len(chunks)-1]
+			if summary.Type != "summary" || summary.Usage == nil || *summary.Usage != c.want {
+				t.Errorf("summary usage = %+v, want %+v", summary.Usage, c.want)
+			}
+			if res.Usage == nil || *res.Usage != c.want {
+				t.Errorf("Result.Usage = %+v, want %+v", res.Usage, c.want)
+			}
+			if res.CumulativeUsage == nil || *res.CumulativeUsage != total {
+				t.Errorf("Result.CumulativeUsage = %+v, want %+v", res.CumulativeUsage, total)
+			}
+		})
 	}
 }
 

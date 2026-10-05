@@ -198,7 +198,7 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	// callers that want the bytes. Usage is set only when the runtime reported
 	// some, so the dispatch_finished line below gains a usage object exactly
 	// when there is something to record.
-	res.applyOutput(adapter.Name(), dispatchOut)
+	res.applyOutput(adapter.Name(), dispatchOut, newConversation(req))
 
 	// --- 10. Write dispatch_finished (PR #40) ---
 	writeFinished(req, res, tsEnd, logPath)

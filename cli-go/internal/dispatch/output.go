@@ -37,16 +37,44 @@ func providerForRuntime(name string) string {
 	}
 }
 
+// newConversation reports whether the request starts a conversation: a
+// ConversationID is how a caller resumes one (the --conversation of the CLI), so
+// a request without it has nothing before it.
+func newConversation(req Request) bool {
+	return req.ConversationID == ""
+}
+
+// runUsage picks the usage to report for a run from the two figures a parser
+// can expose: Usage, the sum of the stream's own events, and CumulativeUsage, a
+// conversation total that agy's result frame keeps (it counts every turn of the
+// conversation, not only this run).
+//
+// A run that began a new conversation has no earlier turns, so the total is its
+// own tokens, and the more complete figure: it survives a step line lost to
+// corruption, and it is all a stream without steps (the single JSON envelope)
+// has. A resumed run's total also holds the turns before it, so only the steps'
+// sum is its own and reporting the total would count those turns again. A
+// resumed run whose stream carries no steps reports no tokens; Result's
+// CumulativeUsage still holds the total.
+func runUsage(pr runtime.ParseResult, newConversation bool) runtime.Usage {
+	if newConversation && pr.CumulativeUsage != (runtime.Usage{}) {
+		return pr.CumulativeUsage
+	}
+	return pr.Usage
+}
+
 // applyOutput parses a completed stdout capture with the runtime's LineParser
 // and records the outcome on r. The raw bytes are the caller's to keep.
-func (r *Result) applyOutput(runtimeName string, stdout []byte) {
-	r.applyParsed(runtimeName, runtime.ParseOutput(runtime.ParserFor(runtimeName), stdout))
+// newConversation says whether the run began a conversation (see runUsage).
+func (r *Result) applyOutput(runtimeName string, stdout []byte, newConversation bool) {
+	r.applyParsed(runtimeName, runtime.ParseOutput(runtime.ParserFor(runtimeName), stdout), newConversation)
 }
 
 // applyParsed records a parse on r. A parse that reported no usage leaves
 // Usage nil, so a log line written from r carries a usage object only when the
-// runtime reported one.
-func (r *Result) applyParsed(runtimeName string, pr runtime.ParseResult) {
+// runtime reported one. Which usage that is depends on whether the run began a
+// conversation (see runUsage).
+func (r *Result) applyParsed(runtimeName string, pr runtime.ParseResult, newConversation bool) {
 	r.Runtime = runtimeName
 	r.Provider = providerForRuntime(runtimeName)
 	r.Parsed = true
@@ -59,8 +87,7 @@ func (r *Result) applyParsed(runtimeName string, pr runtime.ParseResult) {
 	r.TextAllCapped = pr.TextAllCapped
 	r.LinesDropped = pr.LinesDropped
 	r.Error = pr.Error
-	if pr.Usage != (runtime.Usage{}) {
-		u := pr.Usage
+	if u := runUsage(pr, newConversation); u != (runtime.Usage{}) {
 		r.Usage = &u
 	}
 	if pr.CumulativeUsage != (runtime.Usage{}) {

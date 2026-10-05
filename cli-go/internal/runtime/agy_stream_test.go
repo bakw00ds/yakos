@@ -228,9 +228,8 @@ func readAgyRecording(t *testing.T, name string) agyRecording {
 }
 
 // Every agy recording and vendor example, against the rule: Usage is the DONE
-// steps' sum (the frame's counts only for a stream without step usage, on a first
-// turn), CumulativeUsage is the frame's counts, and on a first turn the two are
-// equal.
+// steps' sum (zero for a stream whose steps carry no usage), CumulativeUsage is
+// the frame's counts, and on a first turn with steps the two are equal.
 func TestAgyLineParser_OwnUsageIsTheStepSumOnEveryRecording(t *testing.T) {
 	for _, name := range []string{
 		agyRealOK, agyRealTool, agyConvTurn1, agyConvTurn2, agyEffortFail, agySandboxDenied,
@@ -242,11 +241,8 @@ func TestAgyLineParser_OwnUsageIsTheStepSumOnEveryRecording(t *testing.T) {
 			got := [3]int64{pr.Usage.InputTokens, pr.Usage.OutputTokens, pr.Usage.CacheRead}
 
 			var want [3]int64
-			switch {
-			case rec.stepsSeen:
+			if rec.stepsSeen {
 				want = [3]int64{rec.stepIn, rec.stepOut, rec.stepCache}
-			case rec.frame != nil && rec.numTurns <= 1:
-				want = [3]int64{rec.frame.in, rec.frame.out, rec.frame.cache}
 			}
 			if got != want {
 				t.Errorf("Usage tokens = %v, want %v", got, want)
@@ -262,7 +258,7 @@ func TestAgyLineParser_OwnUsageIsTheStepSumOnEveryRecording(t *testing.T) {
 			if total != [3]int64{rec.frame.in, rec.frame.out, rec.frame.cache} {
 				t.Errorf("CumulativeUsage tokens = %v, want the frame's %v", total, rec.frame)
 			}
-			if rec.numTurns <= 1 && got != total {
+			if rec.stepsSeen && rec.numTurns <= 1 && got != total {
 				t.Errorf("a first turn's own usage %v must equal its total %v", got, total)
 			}
 		})
@@ -453,30 +449,27 @@ func TestAgyLineParser_MultiTurnProcessReportsEachTurn(t *testing.T) {
 	}
 }
 
-// A single envelope has no steps, so its counts are all there is. On a first turn
-// they are the run's own. On a later turn they include the earlier turns and
-// cannot be told apart, so Usage keeps no tokens and only the total is reported.
-func TestAgyLineParser_EnvelopeUsageDependsOnTheTurn(t *testing.T) {
+// A single envelope has no steps, so there is no figure of the run's own: Usage
+// stays zero, first turn or not, and the frame's counts are exposed as the
+// conversation total, for the caller that knows the run began the conversation
+// (internal/dispatch reports it as the run's usage then).
+func TestAgyLineParser_EnvelopeExposesOnlyTheTotal(t *testing.T) {
 	envelope := func(numTurns string) []byte {
 		return []byte(`{"conversation_id":"c","status":"SUCCESS","response":"x","duration_seconds":2.5,"num_turns":` + numTurns +
 			`,"usage":{"input_tokens":1000,"output_tokens":50,"thinking_tokens":0,"cache_read_tokens":200,"total_tokens":1050}}`)
 	}
 	reported := Usage{InputTokens: 1000, OutputTokens: 50, CacheRead: 200, DurationMs: 2500}
-
-	first, _ := parse("agy", envelope("1"))
-	if first.Usage != reported || first.CumulativeUsage != reported {
-		t.Errorf("first turn: Usage %+v, CumulativeUsage %+v, want %+v for both", first.Usage, first.CumulativeUsage, reported)
-	}
-
-	later, evs := parse("agy", envelope("3"))
-	if want := (Usage{DurationMs: 2500}); later.Usage != want {
-		t.Errorf("later turn Usage = %+v, want only the duration %+v", later.Usage, want)
-	}
-	if later.CumulativeUsage != reported {
-		t.Errorf("later turn CumulativeUsage = %+v, want %+v", later.CumulativeUsage, reported)
-	}
-	if evs[0].Usage != later.Usage || evs[0].CumulativeUsage != later.CumulativeUsage {
-		t.Errorf("result event = %+v", evs[0])
+	for _, turns := range []string{"1", "3"} {
+		pr, evs := parse("agy", envelope(turns))
+		if pr.Usage != (Usage{}) {
+			t.Errorf("num_turns %s: Usage = %+v, want the zero value", turns, pr.Usage)
+		}
+		if pr.CumulativeUsage != reported {
+			t.Errorf("num_turns %s: CumulativeUsage = %+v, want %+v", turns, pr.CumulativeUsage, reported)
+		}
+		if evs[0].Usage != (Usage{}) || evs[0].CumulativeUsage != reported {
+			t.Errorf("num_turns %s: result event = %+v", turns, evs[0])
+		}
 	}
 }
 
@@ -546,8 +539,12 @@ func TestAgyLineParser_JSONEnvelope(t *testing.T) {
 	if pr.SessionID != "055a398f-db14-4c5f-abbb-1bf03f8120a7" {
 		t.Errorf("SessionID = %q", pr.SessionID)
 	}
-	if want := (Usage{InputTokens: 10415, OutputTokens: 657, CacheRead: 8113, DurationMs: 7160}); pr.Usage != want {
-		t.Errorf("Usage = %+v, want %+v", pr.Usage, want)
+	// No steps, so no figure of the run's own; the frame's counts are the total.
+	if pr.Usage != (Usage{}) {
+		t.Errorf("Usage = %+v, want the zero value (the envelope has no steps)", pr.Usage)
+	}
+	if want := (Usage{InputTokens: 10415, OutputTokens: 657, CacheRead: 8113, DurationMs: 7160}); pr.CumulativeUsage != want {
+		t.Errorf("CumulativeUsage = %+v, want %+v", pr.CumulativeUsage, want)
 	}
 	wantKinds(t, evs, EventResult)
 }
