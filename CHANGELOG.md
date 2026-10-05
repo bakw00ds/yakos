@@ -43,6 +43,17 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   `agy: not signed in; run: yakos auth login agy`. A fallback prints one
   line on stderr and is recorded in the dispatch-log (see
   `runtime_chosen_by` under Added).
+  **A runtime you name does not fall back.** `--runtime`, a console pane set
+  to a runtime, the `runtime` parameter of an MCP, JSON-RPC or REST call, and
+  a runtime name used as the agent (`yakos dispatch codex "..."`) are
+  operator intent, including intent about where the task goes. If that
+  runtime cannot run, dispatch fails naming the runtime, why, and the
+  fallbacks it did not use; only the CLI can opt in, with the new
+  `--runtime-fallback <list>`. Pins and `.yakos.yml` defaults keep walking the
+  fallback lists. This deliberately differs from `cli/lib/dispatch.sh`, which
+  falls back for an explicit `--runtime` too (recorded for K-143). The probe
+  now ends when the dispatch is cancelled, bounds the agy keyring lookup to
+  two seconds, and a daemon reuses its answer for 30 seconds.
 
 - **Models are resolved per runtime; non-Claude model ids survive (K-132
   P0a).** The default model is no longer the literal `sonnet` for every
@@ -63,7 +74,10 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   as an explicit `--model` or pane choice it is refused. A non-Claude id on an
   agent that resolves to claude is ignored, as before. The resolved id
   reaches the runtime request; the `-m`/`--model` flags themselves are wired
-  in the codex and agy adapters by a separate change.
+  in the codex and agy adapters by a separate change. The alias table now
+  maps every codex alias to nothing (the ChatGPT-login catalog changes faster
+  than a table can track, and codex rejects an id outside it) and agy to the
+  ids `agy models` lists.
 
 - **Flows nodes: the model is checked against the node's runtime and passed
   to dispatch as written (K-132 P0a).** Before, the engine turned an alias
@@ -94,6 +108,11 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   set only when `runtime_chosen_by` is `fallback`). Older readers ignore
   them.
 
+- **`yakos dispatch --runtime-fallback <list>` (K-132 P0a).** A comma
+  separated list of runtimes to try, in order, when the chosen one cannot
+  run. For a runtime you named it replaces the unused fallback lists; for any
+  other choice it is tried after them.
+
 - **Go dispatch reads the `.yakos.yml` routing keys (K-132 P0a).**
   `default-runtime`, `default-fallback` (inline or block list) and
   `per-domain` are read by a new tolerant reader (`internal/projectcfg`). A
@@ -116,7 +135,46 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   pass `--resume` (not in IDE review mode, where each turn gets its own
   worktree). A saved session that claude no longer has is forgotten, so the
   next turn starts fresh. Interactive chat sessions now pass `--model`
-  instead of relying on an env var the claude CLI ignores.
+  instead of relying on an env var the claude CLI ignores. A stored session
+  is forgotten when a failed resume says the session is gone (any wording
+  that calls a conversation or session "not found", not only claude's own),
+  and always after two failed resumes in a row, so a reworded message cannot
+  leave a dead id failing every follow-up. A single unrelated failure keeps it.
+
+- **CLI errors print one `dispatch:` prefix.** New errors from the dispatch
+  package already begin with it, which printed `dispatch: dispatch: ...`.
+
+### Security
+
+- **A conversation, and the claude session its follow-ups resume, belong to
+  the operator who started it (K-132 P0a, sec-324 F1).** After the owner's turn
+  ended, any operator who knew the `conversationId` (a shared pane hands it
+  out, and unsharing does not take it back) could dispatch into it, run
+  `claude --resume` on the owner's session, and read everything in it. The
+  console now refuses a dispatch into a conversation whose first user turn is
+  another operator's (403, like the transcript and share endpoints), and the
+  stored native session is handed out and replaced only for the operator whose
+  turn produced it.
+
+- **The state-file default runtime is trusted only when no one else could have
+  written it (K-132 P0a, sec-324 F2).** `~/.yakos-state/default-runtime` steers
+  every unpinned dispatch to a vendor. It is now read only as a regular file
+  owned by you, not group or world writable, in a directory with the same
+  properties and not a symlink; otherwise it is reported and ignored. Matters
+  where the state directory falls back to the shared temp directory.
+
+- **The sign-in probe cannot hang a dispatch (K-132 P0a, sec-324 F3).** The agy
+  OS-keyring lookup (a process spawn on macOS, a possible unlock prompt on
+  Linux) is bounded to two seconds, ends when the dispatch is cancelled, and
+  is shared among concurrent probes.
+
+- **A project cannot hijack the default pane with an agent named after a
+  runtime (K-132 P0a, sec-324 F4).** A cloned repository's
+  `.claude/agents/claude.md` with `runtime: codex` sent the console's default
+  pane (agent claude, runtime auto) to another vendor while the pane still said
+  claude. Agent files named `claude`, `codex` or `agy` are now skipped with a
+  warning and rejected by `yakos validate`. The chat summary event also
+  carries `runtime_resolved`, the runtime that actually ran the turn.
 
 ## [0.61.0.0] — 2026-10-03
 

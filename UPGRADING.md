@@ -8,8 +8,8 @@ CHANGELOG point here. Last updated for v0.39.
 
 ## Upgrading to the next release (unreleased)
 
-Changes since v0.61.0.0 that may need action. The first is a behavior
-change.
+Changes since v0.61.0.0 that may need action. The first two are behavior
+changes.
 
 ### 1. Agents with `runtime:` now run on that runtime
 
@@ -51,6 +51,22 @@ runtime: codex
 runtime-fallback: [claude]
 ```
 
+**A runtime you name yourself never falls back.** `--runtime codex`, a
+console pane set to codex, the `runtime` parameter of an MCP, JSON-RPC or
+REST call, and `yakos dispatch codex "..."` all mean "send this to codex".
+If codex cannot run, dispatch fails with the reason and the fallbacks it did
+not use, even when the agent or `.yakos.yml` lists some, because answering
+from another vendor is not what you asked for:
+
+```text
+dispatch: runtime codex was requested explicitly but cannot run: not signed in; run: yakos auth login codex. Not falling back to claude: an explicit runtime does not use the agent's or the project's fallback list
+dispatch: to allow a fallback for this run, pass --runtime-fallback claude
+```
+
+On the CLI, `--runtime codex --runtime-fallback claude` opts in. (The bash
+`yakos dispatch` still falls back for `--runtime`; this is a deliberate
+difference.) Pins and `.yakos.yml` defaults keep falling back as above.
+
 ### 3. Pins the Go dispatcher skips
 
 Agents that pin `runtime: claude-sdk`, `antigravity-sdk` or a plugin id are
@@ -63,7 +79,23 @@ path. Give such an agent a `runtime-fallback`, or use `YAKOS_IMPL=bash`.
 runtime selector or `yakos start`'s known runtimes.
 Change `runtime: gemini` pins to `runtime: agy`. `yakos validate` still
 accepts `runtime: gemini` in agent frontmatter, as a warning, for one more
-release.
+release. A dispatch to gemini, or to an agent still pinned to it, fails with
+`gemini was removed; use agy`.
+
+### 5. Agent files named after a runtime are skipped
+
+An agent whose file is named `claude.md`, `codex.md` or `agy.md` would shadow
+the runtime's own agent (what `yakos dispatch codex "..."` and the console's
+default pane resolve to), so a cloned repository could use one to send them to
+another vendor. The Go dispatcher now skips such a file with a warning, and
+`yakos validate` reports it as an error. Rename the file.
+
+### 6. The default runtime file must be yours
+
+`~/.yakos-state/default-runtime` (written by `yakos auth set-default`) is used
+only when it is a regular file owned by you that no one else can write, in a
+directory with the same properties, not a symlink. A file that fails this is
+ignored with a one-line notice. A file `yakos auth set-default` wrote passes.
 
 ## Upgrading to v0.61.0.0
 

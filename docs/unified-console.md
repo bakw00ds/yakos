@@ -521,7 +521,13 @@ the ring are not available without restarting the daemon.
 The Chat tab provides per-model REPL panes. Each pane is independently
 configured:
 
-- **Runtime:** auto / claude / codex / agy (`auto` resolves from the agent's `runtime:` pin)
+- **Runtime:** auto / claude / codex / agy (`auto` resolves from the agent's
+  `runtime:` pin, then the project's `.yakos.yml` defaults). A pane set to a
+  specific runtime means that runtime: if it is not installed or not signed
+  in, the turn fails with the reason and the fallbacks it did not use, and is
+  never answered from another vendor. The turn's summary event carries
+  `runtime_resolved`, the runtime that actually ran it, so an `auto` pane
+  shows where its agent went.
 - **Model:** `default` (the agent's own pin, else the runtime's own default:
   `sonnet` on claude, none on codex and agy so the harness picks), or for
   claude haiku / sonnet / opus / fable (fable requires explicit opt-in; see
@@ -537,7 +543,13 @@ so you know to wait for the full response.
 
 Each pane is **multi-turn** with a persisted transcript at
 `<work>/current/chats/<conversationID>.ndjson`. Refreshing the browser
-restores prior turns.
+restores prior turns. On claude, a follow-up turn resumes the conversation's
+native session (the id is kept in `<conversationID>.meta.json`), so the agent
+remembers the earlier turns. A conversation, and that session, belong to the
+operator who started it: another operator who learns the `conversationId`
+(for example from a shared pane) gets a 403 when dispatching into it, even
+after the owner unshared it. A session claude no longer has is forgotten, on a
+"not found" failure at once and otherwise after two failed resumes in a row.
 
 **Interactive mode and effort selector:** panes can be started in
 interactive mode (multi-turn with persistent session) and support an

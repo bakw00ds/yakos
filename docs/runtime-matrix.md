@@ -5,24 +5,29 @@ sessions on multiple agentic CLIs. This document tracks which features
 each adapter supports, what gets soft-degraded, and the operator-facing
 trade-offs.
 
-Last updated: 2026-10-05 (K-132 P0a — Go dispatch honors `runtime:`;
-v0.40.0.0 — unified console + Flows; fable tier added in v0.38; codex
-adapter shipped in v0.4.0; gemini in v0.4.1).
+Last updated: 2026-10-05 (K-132 P0a — Go dispatch honors `runtime:`, a
+named runtime does not fall back, gemini removed; v0.40.0.0 — unified
+console + Flows; fable tier added in v0.38; codex adapter shipped in
+v0.4.0).
 
 ## Capability matrix
 
-| Capability | claude | codex | gemini |
-|---|---|---|---|
-| Adapter shipping | v0.3 (always) | **v0.4.0** | **v0.4.1** |
-| `inline-agents` (CLI-flag JSON injection) | ✅ `--agents` | ❌ file-based only | ❌ file-based only |
-| `path-allowlist-hard` | ✅ `--add-dir` | ✅ `--add-dir` | ✅ `--include-directories` |
-| `hooks` | ✅ 7 events | ✅ 6 events | ✅ 11 events |
-| `mcp-flag` (CLI flag) | ✅ `--mcp-config` | ❌ via `config.toml` | ❌ inline in `settings.json` |
-| `system-prompt-flag` | ✅ `--system-prompt` / `--append-system-prompt` | ❌ via `AGENTS.md` / `-c` | ❌ via `GEMINI_SYSTEM_MD` env var |
-| `fork-headless` | ✅ `--fork-session` | ✅ `codex fork` | ⚠ unverified — interactive only |
-| Non-interactive print mode | ✅ `claude -p` | ✅ `codex exec` | ✅ `gemini -p` |
-| Default agent file location | (none — JSON injection) | `.codex/agents/*.toml` | `.gemini/agents/*.md` |
-| yakOS-emitted file prefix | n/a | `yakos-*.toml` | `yakos-*.md` |
+| Capability | claude | codex |
+|---|---|---|
+| Adapter shipping | v0.3 (always) | **v0.4.0** |
+| `inline-agents` (CLI-flag JSON injection) | ✅ `--agents` | ❌ file-based only |
+| `path-allowlist-hard` | ✅ `--add-dir` | ✅ `--add-dir` |
+| `hooks` | ✅ 7 events | ✅ 6 events |
+| `mcp-flag` (CLI flag) | ✅ `--mcp-config` | ❌ via `config.toml` |
+| `system-prompt-flag` | ✅ `--system-prompt` / `--append-system-prompt` | ❌ via `AGENTS.md` / `-c` |
+| `fork-headless` | ✅ `--fork-session` | ✅ `codex fork` |
+| Non-interactive print mode | ✅ `claude -p` | ✅ `codex exec` |
+| Default agent file location | (none — JSON injection) | `.codex/agents/*.toml` |
+| yakOS-emitted file prefix | n/a | `yakos-*.toml` |
+
+The `gemini` runtime was removed: the Gemini CLI was sunset on 2026-06-18 and
+its deprecation shim was past its removal date. Use `agy` (Antigravity CLI),
+which succeeded it.
 
 ✅ = supported. ❌ = not supported (degrade or workaround). ⚠ = unverified.
 
@@ -49,22 +54,6 @@ adapter shipped in v0.4.0; gemini in v0.4.1).
   v0.4.2).
 - Auth detected at `$CODEX_HOME/auth.json` or `OPENAI_API_KEY`.
 
-### gemini (v0.4.1)
-
-- Materializes to `<project>/.gemini/agents/yakos-<name>.md`
-  (markdown with YAML frontmatter — closest format to yakOS
-  source; minimal translation needed).
-- When `<project>/.mcp.json` is present, merges its `mcpServers`
-  block into `<project>/.gemini/settings.json` (gemini-cli has no
-  `--mcp-config` flag — MCP is inline). A timestamped backup is
-  written before the merge.
-- Exec's `gemini --include-directories <repo> --approval-mode=yolo`.
-- Dispatch (v0.4.2) uses gemini's native `@<agent-name>`
-  delegation syntax: `gemini -p "@yakos-<agent> <task>"`.
-- Auth: OAuth (free tier, `~/.gemini/` creds files),
-  `GEMINI_API_KEY` env, or Vertex AI
-  (`GOOGLE_GENAI_USE_VERTEXAI=true` + gcloud).
-
 ## Soft-degrade rules
 
 When the operator passes a flag the chosen runtime can't honor,
@@ -76,7 +65,7 @@ that flag. Examples:
 - `--bare` is claude-only. Same treatment.
 - `--strict-mcp` is claude-only.
 - `--continue` works only for claude. codex has session-resumption
-  via `codex resume` (different shape); gemini has `-r/--resume`.
+  via `codex resume` (different shape).
 
 Hard controls (path-allowlist, secret-scan) that depend on hooks
 behave differently per runtime:
@@ -87,8 +76,6 @@ behave differently per runtime:
   config.toml format. **Out of scope for v0.4.0** — operator can
   install yakOS hooks manually per
   [codex hooks docs](https://developers.openai.com/codex/hooks).
-- gemini: 11-event hook surface, JSON I/O. yakOS conversion
-  planned for v0.4.1.
 
 ## Auth model
 
@@ -98,7 +85,6 @@ into the runtime's own login flow:
 
 - claude: prints `/login` instructions (no headless login flag).
 - codex: exec's `codex login`.
-- gemini: prints OAuth / API key / Vertex AI options.
 
 `yakos auth status` reports per-runtime CLI presence + auth
 configuration without revealing credentials.
@@ -127,8 +113,8 @@ On every Go transport (daemon, MCP, console chat, Flows, `YAKOS_IMPL=go`
 CLI) the runtime is picked in this order, highest first, the same as
 `cli/lib/dispatch.sh`:
 
-1. An explicit runtime: `yakos dispatch --runtime`, `Params.Runtime`, or
-   a console pane set to a specific runtime.
+1. An explicit runtime: `yakos dispatch --runtime`, `Params.Runtime` (MCP,
+   JSON-RPC, REST), or a console pane set to a specific runtime.
 2. The agent's `runtime:` frontmatter.
 3. `.yakos.yml` `per-domain.<agent domain>`.
 4. `.yakos.yml` `default-runtime`.
@@ -137,11 +123,14 @@ CLI) the runtime is picked in this order, highest first, the same as
 7. `claude`.
 
 A bare agent name that is itself a runtime (`yakos dispatch codex "..."`)
-selects that runtime when the agent has no pin of its own.
+selects that runtime when the agent has no pin of its own, and counts as
+explicit. Agent files named after a runtime (`claude.md`, `codex.md`,
+`agy.md`) are skipped with a warning, and `yakos validate` rejects them,
+because one would shadow that runtime's own agent.
 
-The candidate chain is the chosen runtime, then the agent's
-`runtime-fallback`, then `.yakos.yml` `default-fallback`. The first
-candidate whose CLI is on PATH and that looks signed in wins:
+For a pin or a project default the candidate chain is the chosen runtime,
+then the agent's `runtime-fallback`, then `.yakos.yml` `default-fallback`.
+The first candidate whose CLI is on PATH and that looks signed in wins:
 
 | Runtime | Looks signed in when |
 |---|---|
@@ -152,8 +141,38 @@ candidate whose CLI is on PATH and that looks signed in wins:
 If nothing passes, dispatch fails fast naming each skipped runtime and why
 (e.g. `agy: not signed in; run: yakos auth login agy`). A fallback prints
 one line on stderr and is recorded in the dispatch-log (`runtime_chosen_by`,
-`fallback_from`). `gemini` is no longer a Go runtime; use `agy`. Upgrade
-impact: [UPGRADING.md](../UPGRADING.md).
+`fallback_from`). The probe's answer is reused for 30 seconds by a long-lived
+daemon, and the agy keyring lookup in it is bounded to 2 seconds and ends
+when the dispatch is cancelled. `gemini` is no longer a Go runtime; use
+`agy`. Upgrade impact: [UPGRADING.md](../UPGRADING.md).
+
+#### A runtime you name does not fall back
+
+A runtime the operator names (rule 1, or a runtime name used as the agent) is
+operator intent, including intent about where the task is sent, so it never
+quietly becomes another vendor. If it is not installed or not signed in,
+dispatch fails with the runtime, the reason, and the fallbacks it did not use:
+
+```
+dispatch: runtime codex was requested explicitly but cannot run: not signed in; run: yakos auth login codex. Not falling back to claude: an explicit runtime does not use the agent's or the project's fallback list
+dispatch: to allow a fallback for this run, pass --runtime-fallback claude
+```
+
+Only the CLI can opt in: `yakos dispatch ... --runtime codex --runtime-fallback
+claude`. For a named runtime the list replaces the (unused) agent and project
+lists; for any other choice it is tried after them. MCP, JSON-RPC, REST and
+the console have no opt-in. Pins, `.yakos.yml` defaults, `YAKOS_RUNTIME` and the
+state default keep walking the fallback lists, as `cli/lib/dispatch.sh` does.
+
+**Deliberate divergence from bash.** `cli/lib/dispatch.sh` walks the fallback
+lists for an explicit `--runtime` as well. The Go dispatcher does not. K-143
+(the parity matrix) must record this as intended rather than port the bash
+behavior back.
+
+The state default (`~/.yakos-state/default-runtime`) is trusted only when it is
+a regular file owned by you, not group or world writable, in a directory with
+the same properties (not a symlink). A file that fails this is reported and
+ignored.
 
 ## Model tiers
 
