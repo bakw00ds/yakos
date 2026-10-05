@@ -32,13 +32,10 @@ func twinSetup(t *testing.T) string {
 	if runtime.GOOS == "windows" {
 		t.Skip("the bash CLI is not run on Windows")
 	}
-	bin := resolveAuthBinary()
-	if _, err := os.Stat(bin); err != nil {
-		t.Skipf("Go yakos binary not found at %q: %v", bin, err)
-	}
+	bin := requireBinaryAt(t, resolveAuthBinary(), os.Getenv("CI"))
 	root := filepath.Dir(filepath.Dir(bin))
 	if _, err := os.Stat(filepath.Join(root, "cli", "yakos")); err != nil {
-		t.Skip("no bash CLI tree beside the binary")
+		skipOrFailInCI(t, os.Getenv("CI"), "no bash CLI tree beside the binary")
 	}
 	return bin
 }

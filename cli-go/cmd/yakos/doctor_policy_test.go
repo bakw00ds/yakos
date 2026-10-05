@@ -16,11 +16,7 @@ import (
 
 func policyBinary(t *testing.T) string {
 	t.Helper()
-	goBin := resolveGoBinary()
-	if _, err := os.Stat(goBin); err != nil {
-		t.Skipf("Go yakos binary not found at %q: %v", goBin, err)
-	}
-	return goBin
+	return requireBinaryAt(t, resolveGoBinary(), os.Getenv("CI"))
 }
 
 func writeStateFile(t *testing.T, home, name, body string, mode os.FileMode) {
