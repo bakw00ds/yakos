@@ -67,8 +67,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   agents or starts python, runs python under `env -u` for the same OAuth
   variables, and `claude-sdk-dispatch.py` repeats the check (exit 78). The claude
   CLI adapters, `launch` and `yakos start --runtime claude-sdk` are unchanged and
-  still forward `CLAUDE_CODE_OAUTH_TOKEN`, because they run Claude Code. See
-  UPGRADING.md.
+  still forward `CLAUDE_CODE_OAUTH_TOKEN`, because they run Claude Code.
+  `yakos auth` no longer says the claude login covers claude-sdk: `status`
+  reports whether `ANTHROPIC_API_KEY` is set (never its value) and that the SDK
+  engine does not use the claude login, `login` says how to set the key and
+  points subscription users at the claude runtime and the CLI engine, and
+  `logout` leaves `~/.claude/auth.json` alone. The bash and Go CLIs print the
+  same bytes. See UPGRADING.md.
 
 ### Changed
 

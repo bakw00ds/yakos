@@ -135,6 +135,13 @@ line (`claude-sdk: refusing to run: ANTHROPIC_API_KEY is not set; ...`) unless
 `--runtime claude`, which is Claude Code itself. `yakos start --runtime
 claude-sdk` is unchanged: it launches Claude Code.
 
+`yakos auth` follows: `yakos auth status claude-sdk` reports whether
+`ANTHROPIC_API_KEY` is set (never its value) and says the claude login is not
+used by the SDK engine, `yakos auth login claude-sdk` prints how to set the key
+instead of routing through the claude login flow, and `yakos auth logout
+claude-sdk` no longer removes `~/.claude/auth.json`; use `yakos auth logout
+claude` for that. The bash and Go CLIs print the same text.
+
 `yakos doctor --policy` lists an SDK sidecar that can be selected without a key,
 along with the other risky settings it finds (see CHANGELOG).
 
