@@ -21,6 +21,7 @@ package interactive_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -307,5 +308,83 @@ func TestSidecarBundle_RefusesToStartWithoutAnAPIKey(t *testing.T) {
 				t.Errorf("token material was echoed: %q", stderr.String())
 			}
 		})
+	}
+}
+
+// The second anchor also strips subscription OAuth variables from the process
+// environment the SDK (and the Claude Code it spawns) inherits, so a sidecar started
+// outside SDKEngine.Start is as clean as one started through it. `--check-env` is the
+// inspection seam: after the key gate and the strip it prints the variable NAMES the SDK
+// would inherit and exits, without starting the SDK or touching the network.
+func TestSidecarBundle_StripsOAuthMaterialBeforeTheSDKSeesTheEnvironment(t *testing.T) {
+	node, bundle := sidecarBundle(t)
+	const dotted = "GATE.DOTTED" // a name a shell cannot hold as a variable
+	banned := []string{
+		"CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_OAUTH_REFRESH_TOKEN",
+		"claude_code_oauth_scopes", // lowercase name, no token in the value
+		"ANTHROPIC_AUTH_TOKEN",     // an OAuth token filed as a gateway token
+		"GATE_MISFILED", "gate_lower_misfiled", dotted,
+	}
+	extra := []string{
+		"ANTHROPIC_API_KEY=" + gateAPIKey,
+		"CLAUDE_CODE_OAUTH_TOKEN=" + gateOAuthToken,
+		"CLAUDE_CODE_OAUTH_REFRESH_TOKEN=sk-ant-ort01-" + gateOAuthSecret,
+		"claude_code_oauth_scopes=user:inference",
+		"ANTHROPIC_AUTH_TOKEN=" + gateOAuthToken,
+		"GATE_MISFILED=Bearer " + gateOAuthToken,
+		"gate_lower_misfiled=SK-ANT-ORT01-" + gateOAuthSecret,
+		dotted + "=" + gateOAuthToken,
+		"GATE_BENIGN=hello",
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, node, bundle, "--check-env")
+	cmd.Env = envWithout(t.TempDir(), extra...)
+	cmd.Stdin = strings.NewReader("")
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("--check-env must exit 0 once the gate passes: %v\nstdout: %s\nstderr: %s", err, stdout.String(), stderr.String())
+	}
+	var got struct {
+		Names []string `json:"names"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("--check-env must print one JSON line of names, got %q (%v)", stdout.String(), err)
+	}
+	have := map[string]bool{}
+	for _, n := range got.Names {
+		have[n] = true
+	}
+	for _, name := range banned {
+		if have[name] {
+			t.Errorf("the SDK would inherit %s: the sidecar did not strip it", name)
+		}
+	}
+	for _, name := range []string{"ANTHROPIC_API_KEY", "GATE_BENIGN"} {
+		if !have[name] {
+			t.Errorf("%s was stripped: the key and unrelated variables must survive", name)
+		}
+	}
+	if strings.Contains(stdout.String()+stderr.String(), gateOAuthSecret) || strings.Contains(stdout.String()+stderr.String(), gateAPIKey) {
+		t.Errorf("--check-env printed a value: %q %q", stdout.String(), stderr.String())
+	}
+}
+
+func TestSidecarBundle_CheckEnvStillRefusesWithoutAKey(t *testing.T) {
+	node, bundle := sidecarBundle(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, node, bundle, "--check-env")
+	cmd.Env = envWithout(t.TempDir(), "CLAUDE_CODE_OAUTH_TOKEN="+gateOAuthToken)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 78 {
+		t.Fatalf("--check-env without a key must be refused with status 78, got %v\nstderr: %s", err, stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("a refused sidecar prints nothing on stdout, got %q", stdout.String())
 	}
 }

@@ -19768,12 +19768,31 @@ function apiKeyRefusal(env) {
   }
   return "";
 }
+function oauthEnvNames(env) {
+  return Object.keys(env).filter((name) => {
+    if (name.toUpperCase().startsWith("CLAUDE_CODE_OAUTH")) return true;
+    const value = env[name];
+    if (typeof value !== "string") return false;
+    const lower = value.toLowerCase();
+    return OAUTH_TOKEN_MARKERS.some((marker) => lower.includes(marker));
+  });
+}
+function scrubOAuthEnv(env) {
+  for (const name of oauthEnvNames(env)) {
+    delete env[name];
+  }
+}
 async function main() {
   const refusal = apiKeyRefusal(process.env);
   if (refusal !== "") {
     process.stderr.write(`[sidecar] refusing to start: ${refusal}
 `);
     process.exitCode = EXIT_API_KEY_REQUIRED;
+    return;
+  }
+  scrubOAuthEnv(process.env);
+  if (process.argv.includes("--check-env")) {
+    process.stdout.write(JSON.stringify({ names: Object.keys(process.env).sort() }) + "\n");
     return;
   }
   const options = {

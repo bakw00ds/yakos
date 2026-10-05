@@ -25,7 +25,10 @@
  * an API key: exit status 78 and a one-line reason on stderr that never contains
  * any part of a credential. The Go side (SDKEngine.Start) refuses first and also
  * strips subscription OAuth variables from this process's environment; this is
- * the second anchor for a sidecar launched any other way. The CLI engine is the
+ * the second anchor for a sidecar launched any other way, and it strips the same
+ * variables from process.env itself (CLAUDE_CODE_OAUTH* names in any case, and any
+ * value holding an OAuth token) before the SDK copies it. `--check-env` prints the
+ * variable names that remain and exits, for the tests. The CLI engine is the
  * interactive path for subscription users.
  *
  * AskUserQuestion flow:
@@ -442,6 +445,34 @@ function apiKeyRefusal(env) {
   return "";
 }
 
+/**
+ * oauthEnvNames returns the names in env that carry subscription OAuth material:
+ * any CLAUDE_CODE_OAUTH* name in any case, and any variable whose value contains an
+ * OAuth token marker, whatever its name. Names only; no value is read out.
+ */
+function oauthEnvNames(env) {
+  return Object.keys(env).filter((name) => {
+    if (name.toUpperCase().startsWith("CLAUDE_CODE_OAUTH")) return true;
+    const value = env[name];
+    if (typeof value !== "string") return false;
+    const lower = value.toLowerCase();
+    return OAUTH_TOKEN_MARKERS.some((marker) => lower.includes(marker));
+  });
+}
+
+/**
+ * scrubOAuthEnv deletes those variables from env (process.env in main). The SDK
+ * copies process.env for the Claude Code it spawns, so a sidecar started outside
+ * SDKEngine.Start, which strips the same variables before it spawns node, is as
+ * clean as one started through it. The Go side and claude-sdk-dispatch.py do the
+ * same.
+ */
+function scrubOAuthEnv(env) {
+  for (const name of oauthEnvNames(env)) {
+    delete env[name];
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -454,6 +485,17 @@ async function main() {
   if (refusal !== "") {
     process.stderr.write(`[sidecar] refusing to start: ${refusal}\n`);
     process.exitCode = EXIT_API_KEY_REQUIRED;
+    return;
+  }
+
+  // Then remove subscription OAuth variables from the environment the SDK will
+  // copy (see scrubOAuthEnv).
+  scrubOAuthEnv(process.env);
+
+  // Inspection seam for the tests: print the variable NAMES the SDK would inherit,
+  // one JSON line, and stop before the SDK starts. Never used by SDKEngine.
+  if (process.argv.includes("--check-env")) {
+    process.stdout.write(JSON.stringify({ names: Object.keys(process.env).sort() }) + "\n");
     return;
   }
 
