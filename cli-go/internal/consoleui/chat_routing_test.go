@@ -234,7 +234,7 @@ func TestSkillsHandler_ReportsAgentRuntime(t *testing.T) {
 // --resume call fail the way the real CLI does for an unknown session (recorded
 // from claude 2.1.289); sidFile is the session id it stamps on a good result.
 type fakeChatClaude struct {
-	argvLog, modeFile, sidFile string
+	argvLog, modeFile, sidFile, failFile string
 }
 
 func installFakeChatClaude(t *testing.T) *fakeChatClaude {
@@ -247,6 +247,7 @@ func installFakeChatClaude(t *testing.T) *fakeChatClaude {
 		argvLog:  filepath.Join(t.TempDir(), "argv.log"),
 		modeFile: filepath.Join(t.TempDir(), "mode"),
 		sidFile:  filepath.Join(t.TempDir(), "sid"),
+		failFile: filepath.Join(t.TempDir(), "failmsg"),
 	}
 	script := `#!/bin/sh
 { echo "--- call"; for a in "$@"; do printf '%s\n' "$a"; done; } >> '` + f.argvLog + `'
@@ -256,6 +257,11 @@ case " $* " in *" --resume "*) RESUMED=1 ;; esac
 if [ "$MODE" = "stale" ] && [ -n "$RESUMED" ]; then
   echo "No conversation found with session ID: gone" >&2
   printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"gone","total_cost_usd":0,"usage":{}}'
+  exit 1
+fi
+if [ "$MODE" = "fail" ] && [ -n "$RESUMED" ]; then
+  cat '` + f.failFile + `' >&2
+  printf '%s\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"session_id":"echo-of-the-resumed-id","total_cost_usd":0,"usage":{}}'
   exit 1
 fi
 printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"ok\",\"session_id\":\"$SID\",\"total_cost_usd\":0.001,\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}"
@@ -268,6 +274,15 @@ printf '%s\n' "{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\
 	t.Setenv("YAKOS_ROOT", "")
 	t.Setenv("YAKOS_DISPATCH_LOG", t.TempDir())
 	return f
+}
+
+// failResumes makes every --resume call fail with msg on stderr (mode "fail").
+func (f *fakeChatClaude) failResumes(t *testing.T, msg string) {
+	t.Helper()
+	if err := os.WriteFile(f.failFile, []byte(msg+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.set(t, "fail", "unused")
 }
 
 func (f *fakeChatClaude) set(t *testing.T, mode, sid string) {
@@ -359,7 +374,7 @@ func TestChatDispatch_ClaudeFollowUpsResumeTheConversation(t *testing.T) {
 	// Turn 1: no session yet, so no --resume; its result is remembered.
 	fake.set(t, "ok", "sess-A")
 	send("s-turn-1")
-	waitUntil(t, "turn 1 to store its session id", func() bool { return store.NativeSession(conv, "claude") == "sess-A" })
+	waitUntil(t, "turn 1 to store its session id", func() bool { return store.NativeSession(conv, "claude", "alice") == "sess-A" })
 	calls := fake.calls(t)
 	if len(calls) != 1 || hasResume(calls[0], "sess-A") {
 		t.Fatalf("turn 1 must not resume anything: %v", calls)
@@ -368,7 +383,7 @@ func TestChatDispatch_ClaudeFollowUpsResumeTheConversation(t *testing.T) {
 	// Turn 2: resumes turn 1's session; the new result replaces the stored id.
 	fake.set(t, "ok", "sess-B")
 	send("s-turn-2")
-	waitUntil(t, "turn 2 to store its session id", func() bool { return store.NativeSession(conv, "claude") == "sess-B" })
+	waitUntil(t, "turn 2 to store its session id", func() bool { return store.NativeSession(conv, "claude", "alice") == "sess-B" })
 	calls = fake.calls(t)
 	if len(calls) != 2 || !hasResume(calls[1], "sess-A") {
 		t.Fatalf("turn 2 must --resume sess-A: %v", calls)
@@ -378,7 +393,7 @@ func TestChatDispatch_ClaudeFollowUpsResumeTheConversation(t *testing.T) {
 	// does; the stale id is forgotten (the failed result's echo is not stored).
 	fake.set(t, "stale", "sess-C")
 	send("s-turn-3")
-	waitUntil(t, "the stale session id to be forgotten", func() bool { return store.NativeSession(conv, "claude") == "" })
+	waitUntil(t, "the stale session id to be forgotten", func() bool { return store.NativeSession(conv, "claude", "alice") == "" })
 	calls = fake.calls(t)
 	if len(calls) != 3 || !hasResume(calls[2], "sess-B") {
 		t.Fatalf("turn 3 must have tried --resume sess-B: %v", calls)
@@ -387,7 +402,7 @@ func TestChatDispatch_ClaudeFollowUpsResumeTheConversation(t *testing.T) {
 	// Turn 4: starts fresh, and is remembered again.
 	fake.set(t, "ok", "sess-D")
 	send("s-turn-4")
-	waitUntil(t, "turn 4 to store a fresh session id", func() bool { return store.NativeSession(conv, "claude") == "sess-D" })
+	waitUntil(t, "turn 4 to store a fresh session id", func() bool { return store.NativeSession(conv, "claude", "alice") == "sess-D" })
 	calls = fake.calls(t)
 	if len(calls) != 4 {
 		t.Fatalf("want 4 claude calls, got %d: %v", len(calls), calls)
@@ -412,14 +427,14 @@ func TestChatDispatch_ResumeIsPerConversation(t *testing.T) {
 	if got, body := postDispatch(t, ts, tok, map[string]any{"agent": "backend", "conversationId": "conv-one", "sessionId": "s-one"}); got != http.StatusAccepted {
 		t.Fatalf("status %d %s", got, body)
 	}
-	waitUntil(t, "conv-one to store", func() bool { return store.NativeSession("conv-one", "claude") == "sess-one" })
+	waitUntil(t, "conv-one to store", func() bool { return store.NativeSession("conv-one", "claude", "alice") == "sess-one" })
 
 	// A different conversation's first turn must not resume conv-one's session.
 	fake.set(t, "ok", "sess-two")
 	if got, body := postDispatch(t, ts, tok, map[string]any{"agent": "backend", "conversationId": "conv-two", "sessionId": "s-two"}); got != http.StatusAccepted {
 		t.Fatalf("status %d %s", got, body)
 	}
-	waitUntil(t, "conv-two to store", func() bool { return store.NativeSession("conv-two", "claude") == "sess-two" })
+	waitUntil(t, "conv-two to store", func() bool { return store.NativeSession("conv-two", "claude", "alice") == "sess-two" })
 	calls := fake.calls(t)
 	if len(calls) != 2 || hasResume(calls[1], "sess-one") {
 		t.Errorf("conv-two's first turn resumed another conversation's session: %v", calls)

@@ -425,7 +425,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	// This mirrors the resolution that RunStream performs internally, so an
 	// unknown agent name is rejected up front with a clear 400 instead of
 	// silently hanging after the 202.
-	// Bare runtime names (claude/codex/agy/gemini) are valid catch-alls and are
+	// Bare runtime names (claude/codex/agy) are valid catch-alls and are
 	// NOT rejected here — only names that resolve to nothing are rejected.
 	//
 	// When yakosRoot is empty the roster cannot be composed, so we only reject
@@ -522,6 +522,26 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	if req.ConversationID != "" {
 		if err := dispatch.ValidateIdentityField("conversation_id", req.ConversationID); err != nil {
 			http.Error(w, "invalid conversationId", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// --- A conversation belongs to the operator who started it ---
+	// The transcript's first user turn names that operator (the same anchor the
+	// transcript and share endpoints use). Dispatching into someone else's
+	// conversation would append to their transcript and, on claude, resume their
+	// native session, which carries everything they said and every tool result
+	// (sec-324 F1). The hub's own check only covers a turn that is still running;
+	// this one holds after it has ended and after a restart, and after the owner
+	// unshared a conversation a watcher still has the id of. A conversation with
+	// no transcript yet is new and nobody's.
+	{
+		convForOwner := req.ConversationID
+		if convForOwner == "" {
+			convForOwner = req.SessionID
+		}
+		if owner, err := ch.transcripts.FirstUserOwner(convForOwner); err == nil && owner != "" && owner != effectiveOperatorID {
+			http.Error(w, "forbidden: conversation owned by different operator", http.StatusForbidden)
 			return
 		}
 	}
@@ -770,6 +790,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				ev.DurationS = &durationS
 				ev.TotalCostUSD = &totalCostUSD
 				ev.ModelResolved = chunk.ModelResolved
+				ev.RuntimeResolved = chunk.RuntimeResolved
 
 				// Update fleet registry status from summary exit_code.
 				if ch.registry != nil {
@@ -789,7 +810,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				// in worktree mode: a per-turn worktree is a different working
 				// directory each time, and claude files sessions by directory.
 				if chunk.NativeSessionID != "" && chunk.RuntimeResolved == "claude" && capturedWorktreeOverride == "" {
-					if err := ch.transcripts.SetNativeSession(conversationID, "claude", chunk.NativeSessionID); err != nil {
+					if err := ch.transcripts.SetNativeSession(conversationID, "claude", chunk.NativeSessionID, capturedOperatorID); err != nil {
 						slog.Warn("consoleui: store native session id", "conversation", conversationID, "err", err)
 					}
 				}
@@ -1054,7 +1075,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		// conversation's native session, so it remembers the previous turn.
 		resumeID := ""
 		if runtimeName == "claude" && capturedWorktreeOverride == "" {
-			resumeID = ch.transcripts.NativeSession(conversationID, "claude")
+			resumeID = ch.transcripts.NativeSession(conversationID, "claude", capturedOperatorID)
 		}
 
 		params := dispatch.Params{
@@ -1088,11 +1109,10 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		// A saved session can disappear (claude prunes old ones, or the project
 		// moved). The failed resume leaves the stored id pointing at nothing, so
 		// forget it and let the next turn start a fresh session rather than fail
-		// the same way forever.
-		if resumeID != "" && res.ExitCode != 0 && strings.Contains(res.StderrTail, "No conversation found") {
-			if clrErr := ch.transcripts.ClearNativeSession(conversationID, "claude"); clrErr != nil {
-				slog.Warn("consoleui: clear native session id", "conversation", conversationID, "err", clrErr)
-			}
+		// the same way forever. See forgetDeadResume for how a dead session is
+		// recognised.
+		if resumeID != "" && ctx.Err() == nil {
+			ch.forgetDeadResume(conversationID, capturedOperatorID, res)
 		}
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
@@ -1137,6 +1157,57 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(DispatchResponse{SessionID: dispReq.SessionID})
+}
+
+// resumeFailureLimit is how many turns in a row may fail while resuming a stored
+// session before the id is forgotten whatever the failure said.
+const resumeFailureLimit = 2
+
+// resumeTargetGone reports whether text (the CLI's stderr tail) says the
+// conversation or session it was asked to resume does not exist. claude 2.1.289
+// prints "No conversation found with session ID: <id>"; the match is on the
+// meaning, a "conversation" or "session" that is "not found", "unknown", gone or
+// missing, so a reworded message still counts. A false positive costs the
+// remembered context of one conversation, and only on a turn that already failed.
+func resumeTargetGone(text string) bool {
+	t := strings.ToLower(text)
+	if !strings.Contains(t, "conversation") && !strings.Contains(t, "session") {
+		return false
+	}
+	for _, marker := range []string{
+		"not found", "no conversation", "no session", "no such", "does not exist",
+		"doesn't exist", "unknown", "expired", "could not find", "couldn't find",
+		"cannot find", "can't find", "not exist", "no longer",
+	} {
+		if strings.Contains(t, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// forgetDeadResume is called after a turn that resumed the conversation's stored
+// claude session. A failed turn (non-zero exit) is counted; the stored id is
+// forgotten when the failure says the session is gone, or when
+// resumeFailureLimit turns in a row have failed, so a CLI that rewords its
+// message cannot leave a dead id failing every follow-up. One failure that does
+// not look like a missing session (a rate limit, a network error) keeps the id.
+// A successful turn stores its own id, which resets the count.
+func (ch *chatHandlers) forgetDeadResume(conversationID, operatorID string, res dispatch.Result) {
+	if res.ExitCode == 0 {
+		return
+	}
+	n, err := ch.transcripts.NoteResumeFailure(conversationID, "claude", operatorID)
+	if err != nil {
+		slog.Warn("consoleui: count resume failure", "conversation", conversationID, "err", err)
+		return
+	}
+	if !resumeTargetGone(res.StderrTail) && n < resumeFailureLimit {
+		return
+	}
+	if clrErr := ch.transcripts.ClearNativeSession(conversationID, "claude", operatorID); clrErr != nil {
+		slog.Warn("consoleui: clear native session id", "conversation", conversationID, "err", clrErr)
+	}
 }
 
 // ---- POST /api/chat/cancel --------------------------------------------------
