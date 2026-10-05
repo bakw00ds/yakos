@@ -1,0 +1,13 @@
+{"type":"thread.started","thread_id":"00000000-0000-7000-8000-000000000001"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"Plan: add the file, then run the tests."}}
+{"type":"item.completed","item":{"id":"item_1","type":"agent_message","text":"Adding the file now."}}
+{"type":"item.completed","item":{"id":"item_2","type":"file_change","changes":[{"path":"src/new.go","kind":"add"},{"path":"src/old.go","kind":"update"}],"status":"completed"}}
+{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/zsh -lc 'go test ./...'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"/bin/zsh -lc 'go test ./...'","aggregated_output":"FAIL src 0.01s\n","exit_code":2,"status":"failed"}}
+{"type":"item.started","item":{"id":"item_4","type":"mcp_tool_call","server":"docs","tool":"search","arguments":{"query":"retry policy"},"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_4","type":"mcp_tool_call","server":"docs","tool":"search","arguments":{"query":"retry policy"},"result":{"content":[{"type":"text","text":"3 results"}]},"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_5","type":"web_search","query":"go context cancellation"}}
+{"type":"item.completed","item":{"id":"item_6","type":"todo_list","items":[{"text":"write tests","completed":false}]}}
+{"type":"item.completed","item":{"id":"item_7","type":"agent_message","text":"Tests fail with exit code 2."}}
+{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":400,"cache_write_input_tokens":100,"output_tokens":50,"reasoning_output_tokens":20}}
