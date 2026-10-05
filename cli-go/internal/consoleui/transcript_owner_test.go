@@ -54,6 +54,23 @@ func TestFirstUserOwner(t *testing.T) {
 		})
 	}
 
+	// "No transcript" and "a transcript that cannot be read" are different
+	// answers: the first is a new conversation, the second leaves the owner
+	// unknown and must not read as "nobody's" (the dispatch gate fails closed on it).
+	t.Run("an unreadable transcript is an error, not no owner", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, "chats", "conv-1.ndjson"), 0o700); err != nil { // a directory opens, then fails to read
+			t.Fatal(err)
+		}
+		got, err := consoleui.NewTranscripts(dir).FirstUserOwner("conv-1")
+		if err == nil {
+			t.Fatalf("FirstUserOwner = %q, nil; want an error for a transcript that cannot be read", got)
+		}
+		if got != "" {
+			t.Errorf("owner = %q alongside an error", got)
+		}
+	})
+
 	t.Run("an invalid conversation id is an error, not a path", func(t *testing.T) {
 		tr := consoleui.NewTranscripts(t.TempDir())
 		if _, err := tr.FirstUserOwner("../escape"); err == nil {

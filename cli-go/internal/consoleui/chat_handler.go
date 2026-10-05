@@ -535,12 +535,26 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	// this one holds after it has ended and after a restart, and after the owner
 	// unshared a conversation a watcher still has the id of. A conversation with
 	// no transcript yet is new and nobody's.
+	//
+	// The gate fails closed. A transcript that exists but cannot be read (a
+	// permissions problem, a damaged or replaced file) leaves the owner unknown,
+	// and passing would let anyone in, with only the stored-session owner check
+	// still standing between them and a resume. Only "there is no transcript"
+	// means a new conversation. It is a server-side fault, not a verdict about
+	// the caller, so the answer is 500, and the reason is logged once here.
 	{
 		convForOwner := req.ConversationID
 		if convForOwner == "" {
 			convForOwner = req.SessionID
 		}
-		if owner, err := ch.transcripts.FirstUserOwner(convForOwner); err == nil && owner != "" && owner != effectiveOperatorID {
+		owner, ownerErr := ch.transcripts.FirstUserOwner(convForOwner)
+		if ownerErr != nil {
+			slog.Error("consoleui: cannot establish the conversation owner; refusing the dispatch",
+				"conversation", convForOwner, "err", ownerErr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if owner != "" && owner != effectiveOperatorID {
 			http.Error(w, "forbidden: conversation owned by different operator", http.StatusForbidden)
 			return
 		}

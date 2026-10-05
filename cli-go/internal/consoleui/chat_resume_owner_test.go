@@ -16,7 +16,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -230,5 +232,89 @@ func TestChatDispatch_StoredSessionIsAlicesEvenWithoutATranscriptOwner(t *testin
 	}
 	if got := store.NativeSession(conv, "claude", "mallory"); got != "" {
 		t.Errorf("mallory was handed a session: %q", got)
+	}
+}
+
+// The owner gate fails closed. A transcript that exists but cannot be read leaves
+// the owner unknown; passing would let any operator into the conversation (only
+// the stored-session owner check would still stop a resume). Only "no transcript"
+// means a new conversation. Before, a read error skipped the check.
+func TestChatDispatch_UnreadableTranscriptFailsClosed(t *testing.T) {
+	cases := []struct {
+		name    string
+		breakIt func(t *testing.T, path string)
+		fix     func(t *testing.T, path string)
+	}{
+		{
+			// Works whoever runs the test: a directory opens, then fails to read.
+			"a directory where the transcript should be",
+			func(t *testing.T, path string) {
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+			func(t *testing.T, path string) {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			"a transcript with no read permission",
+			func(t *testing.T, path string) {
+				if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+					t.Skip("file modes do not stop this user from reading")
+				}
+				if err := os.WriteFile(path, []byte(`{"operator_id":"alice","role":"user","text":"hi"}`+"\\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chmod(path, 0); err != nil {
+					t.Fatal(err)
+				}
+			},
+			func(t *testing.T, path string) {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := routingYakosRoot(t)
+			fake := installFakeChatClaude(t)
+			svc := dispatch.NewService(dispatch.ServiceConfig{YakosRoot: root, WorkspaceRoot: t.TempDir()})
+			ts, tok, workDir := newTwoOperatorServer(t, root, svc)
+			store := consoleui.NewTranscripts(workDir)
+			const conv = "conv-unreadable"
+
+			chats := filepath.Join(workDir, "chats")
+			if err := os.MkdirAll(chats, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(chats, conv+".ndjson")
+			tc.breakIt(t, path)
+
+			// Even the operator who would own it is refused: the owner cannot be
+			// established, and that is not a verdict about the caller.
+			fake.set(t, "ok", "sess-1")
+			for _, op := range []string{"alice", "mallory"} {
+				code, body := asOperator(t, "POST", ts.URL+"/api/chat/dispatch", tok, op, chatTurn(conv, "s-"+op, "hello"))
+				if code != http.StatusInternalServerError {
+					t.Errorf("%s: status %d (%s), want 500: the owner gate passed an unreadable transcript", op, code, body)
+				}
+			}
+			if calls := fake.calls(t); len(calls) != 0 {
+				t.Fatalf("claude ran for a conversation whose owner could not be established: %v", calls)
+			}
+
+			// A refusal leaves nothing behind: once the transcript is readable (here:
+			// gone, so the conversation is new) the same conversation is accepted.
+			tc.fix(t, path)
+			if code, body := asOperator(t, "POST", ts.URL+"/api/chat/dispatch", tok, "alice", chatTurn(conv, "s-alice-again", "hello again")); code != http.StatusAccepted {
+				t.Fatalf("after the fix: status %d (%s), want 202", code, body)
+			}
+			waitForTurns(t, store, conv, 1)
+		})
 	}
 }
