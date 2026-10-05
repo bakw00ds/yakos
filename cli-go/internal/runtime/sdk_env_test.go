@@ -173,6 +173,43 @@ func TestSDKSidecarEnv_TheEscapeHatchCannotReAddOAuthMaterial(t *testing.T) {
 	}
 }
 
+func TestSDKSidecarEnv_YakosVariablesAreNotJudgedByValue(t *testing.T) {
+	// A YAKOS_ name is yakOS's own: the composed agent roster mentions token
+	// prefixes in prose, and the yakOS hooks the bundled CLI runs read YAKOS_
+	// variables. The strip must not delete them for that (the bash and python
+	// twins once emptied the roster this way and the dispatch died).
+	t.Setenv(passthroughEnvVar, "") // keep the escape hatch out of it
+	prose := "never paste a sk-ant-oat or SK-ANT-ORT token into a prompt"
+	env, err := SDKSidecarEnv([]string{
+		"PATH=/usr/bin", "ANTHROPIC_API_KEY=" + fakeAPIKey,
+		"YAKOS_AGENTS_JSON={\"probe\":{\"prompt\":\"" + prose + "\"}}",
+		"YAKOS_NOTE=" + prose,
+		// Not exempt: the name only contains YAKOS_, or spells it in lowercase.
+		"CLAUDE_YAKOS_NOTE=Bearer " + oauthToken,
+		"yakos_note=Bearer " + oauthToken,
+		"CLAUDE_NOTE=" + prose, // an ordinary name that mentions a prefix in prose goes too
+	})
+	if err != nil {
+		t.Fatalf("the API key is set: %v", err)
+	}
+	for _, name := range []string{"YAKOS_AGENTS_JSON", "YAKOS_NOTE"} {
+		if !envHas(env, name) {
+			t.Errorf("%s mentions a token prefix in prose and is yakOS's own: it must survive the strip", name)
+		}
+	}
+	if got := envValue(env, "YAKOS_NOTE"); got != prose {
+		t.Errorf("YAKOS_NOTE must reach the sidecar unchanged, got %q", got)
+	}
+	for _, name := range []string{"CLAUDE_YAKOS_NOTE", "yakos_note", "CLAUDE_NOTE"} {
+		if envHas(env, name) {
+			t.Errorf("%s is an ordinary name and its value is OAuth-looking: it must not reach the sidecar", name)
+		}
+	}
+	if strings.Contains(strings.Join(env, "\n"), oauthSecret) {
+		t.Error("OAuth token material is still present in the sidecar environment")
+	}
+}
+
 func TestSDKSidecarEnv_MatchesNamesLikeTheAllowlistDoes(t *testing.T) {
 	// Windows spells variables in any case; the allowlist is case-insensitive,
 	// so the gate and the strip must be too.

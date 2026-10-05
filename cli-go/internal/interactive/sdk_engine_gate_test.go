@@ -324,6 +324,8 @@ func TestSidecarBundle_StripsOAuthMaterialBeforeTheSDKSeesTheEnvironment(t *test
 		"claude_code_oauth_scopes", // lowercase name, no token in the value
 		"ANTHROPIC_AUTH_TOKEN",     // an OAuth token filed as a gateway token
 		"GATE_MISFILED", "gate_lower_misfiled", dotted,
+		// Not exempt from the value rule: the name only contains YAKOS_, or spells it in lowercase.
+		"GATE_YAKOS_MID", "yakos_gate_lower",
 	}
 	extra := []string{
 		"ANTHROPIC_API_KEY=" + gateAPIKey,
@@ -335,6 +337,11 @@ func TestSidecarBundle_StripsOAuthMaterialBeforeTheSDKSeesTheEnvironment(t *test
 		"gate_lower_misfiled=SK-ANT-ORT01-" + gateOAuthSecret,
 		dotted + "=" + gateOAuthToken,
 		"GATE_BENIGN=hello",
+		// yakOS's own variable: it mentions a token prefix in prose, as a composed agent
+		// roster can, and the strip must not delete it.
+		"YAKOS_GATE_PROSE=never paste a sk-ant-oat or SK-ANT-ORT token into a prompt",
+		"GATE_YAKOS_MID=Bearer " + gateOAuthToken,
+		"yakos_gate_lower=Bearer " + gateOAuthToken,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -361,9 +368,9 @@ func TestSidecarBundle_StripsOAuthMaterialBeforeTheSDKSeesTheEnvironment(t *test
 			t.Errorf("the SDK would inherit %s: the sidecar did not strip it", name)
 		}
 	}
-	for _, name := range []string{"ANTHROPIC_API_KEY", "GATE_BENIGN"} {
+	for _, name := range []string{"ANTHROPIC_API_KEY", "GATE_BENIGN", "YAKOS_GATE_PROSE"} {
 		if !have[name] {
-			t.Errorf("%s was stripped: the key and unrelated variables must survive", name)
+			t.Errorf("%s was stripped: the key, unrelated variables and yakOS's own variables must survive", name)
 		}
 	}
 	if strings.Contains(stdout.String()+stderr.String(), gateOAuthSecret) || strings.Contains(stdout.String()+stderr.String(), gateAPIKey) {

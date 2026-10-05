@@ -448,11 +448,17 @@ function apiKeyRefusal(env) {
 /**
  * oauthEnvNames returns the names in env that carry subscription OAuth material:
  * any CLAUDE_CODE_OAUTH* name in any case, and any variable whose value contains an
- * OAuth token marker, whatever its name. Names only; no value is read out.
+ * OAuth token marker, whatever its name except yakOS's own. A name that starts with
+ * YAKOS_ (exact case) is never judged by its value: the composed agent roster can
+ * mention a token prefix in prose, and the yakOS hooks the bundled CLI runs read
+ * YAKOS_ variables; nothing reads one as a credential. A name that only contains
+ * YAKOS_, or spells it in lowercase, is an ordinary name. Names only; no value is
+ * read out.
  */
 function oauthEnvNames(env) {
   return Object.keys(env).filter((name) => {
     if (name.toUpperCase().startsWith("CLAUDE_CODE_OAUTH")) return true;
+    if (name.startsWith("YAKOS_")) return false;
     const value = env[name];
     if (typeof value !== "string") return false;
     const lower = value.toLowerCase();

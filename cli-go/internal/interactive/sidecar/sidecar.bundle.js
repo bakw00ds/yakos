@@ -19771,6 +19771,7 @@ function apiKeyRefusal(env) {
 function oauthEnvNames(env) {
   return Object.keys(env).filter((name) => {
     if (name.toUpperCase().startsWith("CLAUDE_CODE_OAUTH")) return true;
+    if (name.startsWith("YAKOS_")) return false;
     const value = env[name];
     if (typeof value !== "string") return false;
     const lower = value.toLowerCase();
