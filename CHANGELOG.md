@@ -354,6 +354,14 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   from the prompt. Lines up to 1 MiB are now read whole, and a longer one makes
   composing the roster fail with an error naming the file and the line.
 
+- **claude chat refuses an agent persona over 64 KiB before it starts
+  (K-132 follow-up).** The persona is an argument of the claude command
+  (`--append-system-prompt`), and past the operating system's limit the exec
+  failed with a bare "argument list too long". codex and agy chat already
+  refused a persona over 64 KiB with a clear error. The console's claude chat
+  and an interactive claude session now do the same, before any process
+  starts. Only a persona over the limit is affected.
+
 - **Model aliases and the two general agents named models that do not exist.**
   `lib/settings/model-aliases.json`: the agy and antigravity-sdk columns now map to
   ids `agy models` lists (`cheap` `gemini-3.8-flash-low`, `balanced`

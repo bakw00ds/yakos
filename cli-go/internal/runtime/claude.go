@@ -216,7 +216,15 @@ func claudeModelFlag(agent, model string) string {
 //   - Runs in the project directory (cmd.Dir) so project settings, hooks and
 //     CLAUDE.md load as they do in a terminal and a resumed session is found:
 //     claude keys saved sessions by working directory.
+//   - Refuses a persona over MaxPersonaBytes before building argv (see below).
 func (a *ClaudeAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *exec.Cmd {
+	// The persona travels in argv (--append-system-prompt), so one over
+	// MaxPersonaBytes is refused before any argv is built: the returned command
+	// fails in Start with ErrPersonaTooLarge instead of the operating system's
+	// bare "argument list too long". codex and agy chat have the same cap.
+	if err := checkPersonaSize(req.AgentSystemPrompt); err != nil {
+		return rejectedCmd(ctx, "claude", err)
+	}
 	args := []string{
 		"--permission-mode", "bypassPermissions",
 		"--add-dir", req.Project,

@@ -33,6 +33,7 @@ package runtime
 // the CLI).
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -64,6 +65,13 @@ import (
 // Session.Close(), which closes stdin (clean exit) and kills the process group
 // on force-close.
 func InteractiveExecCmd(project, agentSystemPrompt, modelOverride, effort string) *exec.Cmd {
+	// The persona is an argv element (--append-system-prompt), so one over
+	// MaxPersonaBytes is refused before any argv is built: the returned command
+	// fails in Start with ErrPersonaTooLarge, which the session reports as its
+	// start error. The command never runs, so no context ties it to a request.
+	if err := checkPersonaSize(agentSystemPrompt); err != nil {
+		return rejectedCmd(context.Background(), "claude", err)
+	}
 	args := []string{
 		"--print",                          // required for non-interactive mode
 		"--input-format", "stream-json",    // bidirectional JSON framing
