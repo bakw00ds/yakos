@@ -51,8 +51,11 @@ import (
 //   - project: absolute path to the project directory (--add-dir)
 //   - agentSystemPrompt: agent body injected via --append-system-prompt; empty
 //     means no agent system prompt is appended (raw chat mode)
-//   - modelOverride: concrete model tier (haiku|sonnet|opus|fable); exported as
-//     YAKOS_MODEL_OVERRIDE in the subprocess env.  Empty → adapter default.
+//   - modelOverride: concrete model tier (haiku|sonnet|opus|fable) or alias;
+//     passed as --model <tier> (the claude CLI ignores the env var on its own)
+//     and also exported as YAKOS_MODEL_OVERRIDE for the hooks. A name that is
+//     not a claude tier is dropped with a log line, as on the other claude
+//     paths. Empty → the user's default model.
 //   - effort: reasoning effort level (low|medium|high|xhigh|max); passed as
 //     --effort if non-empty.  claude-only; empty → flag omitted.
 //
@@ -81,6 +84,11 @@ func InteractiveExecCmd(project, agentSystemPrompt, modelOverride, effort string
 	}
 	if effort != "" {
 		args = append(args, "--effort", effort)
+	}
+	// Before this the model reached the CLI only through YAKOS_MODEL_OVERRIDE,
+	// which claude does not read, so the pane's model picker had no effect.
+	if m := claudeModelFlag("(interactive)", modelOverride); m != "" {
+		args = append(args, "--model", m)
 	}
 
 	// Do NOT use exec.CommandContext: the session outlives the originating HTTP
