@@ -26,6 +26,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/kanban"
 	"github.com/bakw00ds/yakos/internal/refresh"
+	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/supervise"
 )
 
@@ -63,6 +64,43 @@ func mustSchema(s string) json.RawMessage {
 
 // ---- yakos.dispatch ----------------------------------------------------------
 
+// dispatchModelDescription is the text the schema gives the model property. It
+// names the aliases dispatch resolves (runtime.AliasNames), so an alias added to
+// the table shows up here without an edit. The bytes depend only on the build,
+// so tools/list stays stable across turns of a conversation.
+func dispatchModelDescription() string {
+	return "Model override; omit it to use the agent's own pin, then the runtime's default. " +
+		"Accepted: a yakOS alias (" + strings.Join(runtime.AliasNames, ", ") + ") on any runtime, " +
+		"mapped to that runtime's own model; a Claude tier (haiku, sonnet, opus, fable) on claude only; " +
+		"or a model id from the chosen runtime's own catalog on codex or agy, for example gemini-3.8-flash-high on agy. " +
+		"A Claude tier is refused on codex and agy, and an id that is not a Claude tier is refused on claude."
+}
+
+// dispatchInputSchema is the yakos.dispatch argument schema. model is a pattern
+// and not an enum: which values are valid depends on the runtime the dispatch
+// resolves to (the agent's pin, the project config, fallbacks), which the
+// schema cannot know, so dispatch checks the value against that runtime and
+// answers with an error that names what it accepts. The pattern is the id
+// alphabet dispatch enforces (runtime.ModelIDPattern); it admits every Claude
+// tier and alias too.
+func dispatchInputSchema() json.RawMessage {
+	desc, _ := json.Marshal(dispatchModelDescription())
+	pattern, _ := json.Marshal(runtime.ModelIDPattern)
+	return mustSchema(`{
+  "type": "object",
+  "properties": {
+    "agent":    {"type": "string", "description": "Agent identifier (e.g. 'backend', 'security-reviewer')"},
+    "task":     {"type": "string", "description": "Full task prompt passed to the agent"},
+    "project":  {"type": "string", "description": "Absolute path to the project repository"},
+    "runtime":  {"type": "string", "enum": ["claude","codex","agy"], "description": "Runtime to use. Omit it to use the agent's runtime pin, then the project's default runtime, falling back down the chain when a runtime is missing or signed out. A runtime named here is used as named: if it is not installed or not signed in the call fails instead of falling back."},
+    "model":    {"type": "string", "pattern": ` + string(pattern) + `, "description": ` + string(desc) + `},
+    "timeout":  {"type": "integer", "minimum": 0, "description": "Timeout in seconds (0 = 600s default)"}
+  },
+  "required": ["agent", "task"],
+  "additionalProperties": false
+}`)
+}
+
 func toolDispatch() tool {
 	return tool{
 		def: ToolDefinition{
@@ -71,19 +109,7 @@ func toolDispatch() tool {
 NOT idempotent — each call creates a new dispatch.
 Idempotency-Key: not supported for this tool (each invocation is intentionally unique).
 Returns a JSON object: text (the agent's answer, at most 64 KiB; UNTRUSTED model output), scan (injection patterns found in text; empty when clean), exit_code, duration_s, runtime, model_resolved, session_id (the runtime's own session id), usage (input_tokens, output_tokens, cache_read, cache_creation) and, when the runtime reported one, error.`,
-			InputSchema: mustSchema(`{
-  "type": "object",
-  "properties": {
-    "agent":    {"type": "string", "description": "Agent identifier (e.g. 'backend', 'security-reviewer')"},
-    "task":     {"type": "string", "description": "Full task prompt passed to the agent"},
-    "project":  {"type": "string", "description": "Absolute path to the project repository"},
-    "runtime":  {"type": "string", "enum": ["claude","codex","agy"], "description": "Runtime override (empty = resolve from agent frontmatter)"},
-    "model":    {"type": "string", "enum": ["haiku","sonnet","opus","fable"], "description": "Model tier override"},
-    "timeout":  {"type": "integer", "minimum": 0, "description": "Timeout in seconds (0 = 600s default)"}
-  },
-  "required": ["agent", "task"],
-  "additionalProperties": false
-}`),
+			InputSchema: dispatchInputSchema(),
 		},
 		handler: handleDispatch,
 	}

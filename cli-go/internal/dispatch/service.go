@@ -132,6 +132,13 @@ type Params struct {
 	// Only the claude adapter acts on this field; other runtimes ignore it.
 	Effort string
 
+	// ResumeSessionID is the native claude session id of the conversation this
+	// RunStream turn continues (the NativeSessionID of the previous turn's
+	// summary chunk). RunStream checks it with the identity-field alphabet and
+	// the claude adapter passes it as `--resume`. Ignored by Run and by other
+	// runtimes.
+	ResumeSessionID string
+
 	// isMCPStamped signals that this Params was built by the MCP transport
 	// layer, not by a human-facing transport (gRPC/REST/JSON-RPC/console).
 	// Only the MCP transport sets this to true; it is not derivable from the

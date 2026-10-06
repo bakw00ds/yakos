@@ -646,7 +646,7 @@ Unified console:
   http://127.0.0.1:7890/#token=<console-token> (default)
   Token stored at ~/.yakos-state/console-token (mode 0600).
   Tabs: Overview | Chat | Flows | Kanban | Cost | Performance
-  Chat: per-model REPL panes (claude/codex/agy/gemini × haiku/sonnet/opus/fable);
+  Chat: per-model REPL panes (claude/codex/agy, runtime auto by default);
         claude streams token-by-token, others arrive buffered.
   Flows: YAML DAG workflow builder and live SVG canvas with per-run cost.
 

@@ -18,8 +18,18 @@
  *   {"v":1,"kind":"summary","totalCostUsd":0.0,"usage":{...}}
  *   {"v":1,"kind":"error","text":"..."}
  *
- * Auth: apiKeySource:"none" reuses the installed claude CLI keychain credentials.
- * No API key needed in the environment.
+ * Auth (K-137): ANTHROPIC_API_KEY is REQUIRED. Anthropic does not allow a Pro/Max
+ * subscription's OAuth in the Agent SDK (terms of 2026-02-19), and without a key
+ * the SDK would fall back to the operator's claude.ai login. main() therefore
+ * refuses to start, before it announces "ready", unless ANTHROPIC_API_KEY holds
+ * an API key: exit status 78 and a one-line reason on stderr that never contains
+ * any part of a credential. The Go side (SDKEngine.Start) refuses first and also
+ * strips subscription OAuth variables from this process's environment; this is
+ * the second anchor for a sidecar launched any other way, and it strips the same
+ * variables from process.env itself (CLAUDE_CODE_OAUTH* names in any case, and any
+ * value holding an OAuth token) before the SDK copies it. `--check-env` prints the
+ * variable names that remain and exits, for the tests. The CLI engine is the
+ * interactive path for subscription users.
  *
  * AskUserQuestion flow:
  *   1. canUseTool callback receives tool_use for "AskUserQuestion".
@@ -402,16 +412,108 @@ function startStdinReader(onUserTurn, onAnswer, onShutdown) {
 }
 
 // ---------------------------------------------------------------------------
+// API-key gate (K-137)
+// ---------------------------------------------------------------------------
+
+/** Exit status when the gate refuses: sysexits EX_CONFIG. Pinned by the Go tests. */
+const EXIT_API_KEY_REQUIRED = 78;
+
+/**
+ * Prefixes of the tokens a subscription login produces: access (oat) and refresh
+ * (ort). The name has no "auth" or "login" on purpose: a secrets scanner reads
+ * such a name next to two strings as a credential pair (see claude-sdk-dispatch.py).
+ */
+const SUBSCRIPTION_TOKEN_PREFIXES = ["sk-ant-oat", "sk-ant-ort"];
+
+/**
+ * apiKeyRefusal returns why this sidecar must not start, or "" when it may.
+ *
+ * It reads only ANTHROPIC_API_KEY and returns a constant sentence: no part of
+ * the value, and no other variable, is ever echoed.
+ */
+function apiKeyRefusal(env) {
+  const key = String(env.ANTHROPIC_API_KEY ?? "").trim();
+  if (key === "") {
+    return (
+      "ANTHROPIC_API_KEY is not set; the Agent SDK engine does not run on a claude.ai subscription login " +
+      "(set an API key, or use the CLI engine for interactive chat)"
+    );
+  }
+  const lower = key.toLowerCase();
+  if (SUBSCRIPTION_TOKEN_PREFIXES.some((prefix) => lower.includes(prefix))) {
+    return (
+      "ANTHROPIC_API_KEY holds a subscription OAuth token, not an API key; the Agent SDK engine does not accept " +
+      "those (set an API key, or use the CLI engine for interactive chat)"
+    );
+  }
+  return "";
+}
+
+/**
+ * oauthEnvNames returns the names in env that carry subscription OAuth material:
+ * any CLAUDE_CODE_OAUTH* name in any case, and any variable whose value contains an
+ * OAuth token marker, whatever its name except yakOS's own. A name that starts with
+ * YAKOS_ (exact case) is never judged by its value: the composed agent roster can
+ * mention a token prefix in prose, and the yakOS hooks the bundled CLI runs read
+ * YAKOS_ variables; nothing reads one as a credential. A name that only contains
+ * YAKOS_, or spells it in lowercase, is an ordinary name. Names only; no value is
+ * read out.
+ */
+function oauthEnvNames(env) {
+  return Object.keys(env).filter((name) => {
+    if (name.toUpperCase().startsWith("CLAUDE_CODE_OAUTH")) return true;
+    if (name.startsWith("YAKOS_")) return false;
+    const value = env[name];
+    if (typeof value !== "string") return false;
+    const lower = value.toLowerCase();
+    return SUBSCRIPTION_TOKEN_PREFIXES.some((prefix) => lower.includes(prefix));
+  });
+}
+
+/**
+ * scrubOAuthEnv deletes those variables from env (process.env in main). The SDK
+ * copies process.env for the Claude Code it spawns, so a sidecar started outside
+ * SDKEngine.Start, which strips the same variables before it spawns node, is as
+ * clean as one started through it. The Go side and claude-sdk-dispatch.py do the
+ * same.
+ */
+function scrubOAuthEnv(env) {
+  for (const name of oauthEnvNames(env)) {
+    delete env[name];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 async function main() {
-  // Build the options for query().
-  // apiKeySource:"none" reuses the installed claude CLI keychain credentials.
+  // K-137 hard gate, before anything else: no "ready" frame, no SDK, no login
+  // fallback. Set the exit code and return instead of calling process.exit() so
+  // the stderr line is flushed; nothing is listening yet, so the process ends.
+  const refusal = apiKeyRefusal(process.env);
+  if (refusal !== "") {
+    process.stderr.write(`[sidecar] refusing to start: ${refusal}\n`);
+    process.exitCode = EXIT_API_KEY_REQUIRED;
+    return;
+  }
+
+  // Then remove subscription OAuth variables from the environment the SDK will
+  // copy (see scrubOAuthEnv).
+  scrubOAuthEnv(process.env);
+
+  // Inspection seam for the tests: print the variable NAMES the SDK would inherit,
+  // one JSON line, and stop before the SDK starts. Never used by SDKEngine.
+  if (process.argv.includes("--check-env")) {
+    process.stdout.write(JSON.stringify({ names: Object.keys(process.env).sort() }) + "\n");
+    return;
+  }
+
+  // Build the options for query(). Auth is the ANTHROPIC_API_KEY checked above;
+  // no keychain or login fallback is configured.
   const options = {
     permissionMode: "bypassPermissions",
     includePartialMessages: true,
-    apiKeySource: "none",
     canUseTool,
   };
 

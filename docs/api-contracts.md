@@ -172,8 +172,17 @@ Header: `Authorization: Bearer <token>`
 
 - `agent`: required
 - `task`: required
-- `runtime`: optional; empty = resolve from agent frontmatter
-- `model`: optional; accepted: `"haiku"`, `"sonnet"`, `"opus"`
+- `runtime`: optional; `claude`, `codex` or `agy`. Empty = the agent's
+  `runtime:` pin, then the project's `.yakos.yml` defaults, then claude. When
+  that runtime is not installed or not signed in, dispatch falls back down the
+  agent's and the project's fallback lists, or fails fast naming why each was
+  skipped. A runtime named here is used as named: if it cannot run, the call
+  fails (502, with the reason) instead of being answered by another runtime.
+- `model`: optional. On claude, a tier (`"haiku"`, `"sonnet"`, `"opus"`,
+  `"fable"`) or an alias (`"cheap"`, `"balanced"`, `"best"`, `"reasoning"`,
+  `"frontier"`). On codex and agy, an alias or a model id from that harness's
+  own catalog (for example `"gemini-3.8-flash-high"` on agy); a bare Claude tier
+  is refused there. Empty = the agent's own pin, then the runtime's default.
 - `timeout`: optional; 0 = 600s default
 
 **Response 202** (blocking — returns after runtime exits):

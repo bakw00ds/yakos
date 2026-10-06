@@ -9,7 +9,7 @@ package dispatch
 //
 //   dispatch: agent "claude" not found in composed set
 //
-// for any bare runtime name (claude/codex/agy/gemini), breaking the console
+// for any bare runtime name (claude/codex/agy), breaking the console
 // chat REPL.
 //
 // These tests exercise stream.go's resolution via RunStream using the
@@ -19,7 +19,7 @@ package dispatch
 // Test inventory:
 //   - TestStream_GenericAgent_Claude  — bare "claude" resolves, no error
 //   - TestStream_GenericAgent_Codex   — bare "codex" resolves, no error
-//   - TestStream_GenericAgent_Gemini  — bare "gemini" resolves, no error
+//   - TestStream_GenericAgent_Gemini  — bare "gemini" is retired (K-132): unknown agent
 //   - TestStream_GenericAgent_Agy     — bare "agy" resolves, no error
 //   - TestStream_UnknownAgent_StillErrors — unknown name still errors
 //   - TestStream_SpecialistAgent_StillResolves — real specialist unaffected
@@ -104,21 +104,32 @@ func TestStream_GenericAgent_Codex(t *testing.T) {
 	}
 }
 
-// TestStream_GenericAgent_Gemini verifies the gemini bare-runtime case.
+// TestStream_GenericAgent_Gemini pins the retirement of gemini (K-132): it is no
+// longer a runtime, so a bare "gemini" agent name is not a catch-all and falls
+// through to the unknown-agent error like any other name.
 func TestStream_GenericAgent_Gemini(t *testing.T) {
 	yakosRoot := buildMinimalYakosRoot(t)
 	svc := newStreamResolutionSvc(t, yakosRoot)
 
-	captured, err := runStreamCapture(context.Background(), svc, Params{
+	_, err := svc.RunStream(context.Background(), Params{
 		Agent:   "gemini",
 		Task:    "hello",
 		Project: t.TempDir(),
-	})
-	if err != nil {
-		t.Fatalf("RunStream with agent=gemini: unexpected error: %v", err)
+	}, func(_ StreamChunk) {})
+	if err == nil || !strings.Contains(err.Error(), "not found in composed set") {
+		t.Fatalf("RunStream with agent=gemini: want a not-found error, got %v", err)
 	}
-	if captured.AgentName != "gemini" {
-		t.Errorf("AgentName = %q, want %q", captured.AgentName, "gemini")
+
+	// An explicit gemini runtime override is rejected as an unknown runtime,
+	// not quietly run elsewhere.
+	_, err = svc.RunStream(context.Background(), Params{
+		Agent:   "backend",
+		Task:    "hello",
+		Project: t.TempDir(),
+		Runtime: "gemini",
+	}, func(_ StreamChunk) {})
+	if err == nil || !strings.Contains(err.Error(), "unknown runtime") {
+		t.Fatalf("RunStream with runtime=gemini: want an unknown-runtime error, got %v", err)
 	}
 }
 
@@ -201,7 +212,7 @@ func TestResolveAgent_DirectUnit(t *testing.T) {
 	})
 
 	t.Run("known runtime not in roster returns generic", func(t *testing.T) {
-		for _, name := range []string{"claude", "codex", "agy", "gemini"} {
+		for _, name := range []string{"claude", "codex", "agy"} {
 			name := name
 			t.Run(name, func(t *testing.T) {
 				agent, err := resolveAgent(roster, name, yakosRoot, "")
@@ -226,7 +237,10 @@ func TestResolveAgent_DirectUnit(t *testing.T) {
 	})
 }
 
-// TestResolveRuntime_DirectUnit tests resolveRuntime directly.
+// TestResolveRuntime_DirectUnit pins the pre-K-132 behaviour that must survive
+// the move to the full chain: an explicit override wins, a bare runtime name
+// runs on itself, and everything else defaults to claude. (The pins, project
+// config and fallbacks are covered in agent_resolution_test.go.)
 func TestResolveRuntime_DirectUnit(t *testing.T) {
 	cases := []struct {
 		agentName string
@@ -235,20 +249,33 @@ func TestResolveRuntime_DirectUnit(t *testing.T) {
 	}{
 		// Override always wins.
 		{"claude", "codex", "codex"},
-		{"backend", "gemini", "gemini"},
+		{"backend", "agy", "agy"},
 		// Known runtime as agent name → use agent name.
 		{"claude", "", "claude"},
 		{"codex", "", "codex"},
 		{"agy", "", "agy"},
-		{"gemini", "", "gemini"},
 		// Specialist agent, no override → default "claude".
 		{"backend", "", "claude"},
 		{"frontend", "", "claude"},
+		// "auto" is the console's spelling of "no override".
+		{"backend", "auto", "claude"},
+		{"codex", "auto", "codex"},
 	}
 	for _, tc := range cases {
-		got := resolveRuntime(tc.agentName, tc.override)
-		if got != tc.want {
-			t.Errorf("resolveRuntime(%q, %q) = %q, want %q", tc.agentName, tc.override, got, tc.want)
+		in := loadChainInput(nil, tc.agentName, "", tc.override, "", nil, false)
+		choice, _, err := chooseRuntime(context.Background(), in, nil)
+		if err != nil {
+			t.Errorf("resolve(%q, %q): %v", tc.agentName, tc.override, err)
+			continue
 		}
+		if choice.Runtime != tc.want {
+			t.Errorf("resolve(%q, %q) = %q, want %q", tc.agentName, tc.override, choice.Runtime, tc.want)
+		}
+	}
+
+	// gemini was retired: asking for it is an error, not a silent claude run.
+	in := loadChainInput(nil, "backend", "", "gemini", "", nil, false)
+	if _, _, err := chooseRuntime(context.Background(), in, nil); err == nil || !strings.Contains(err.Error(), "unknown runtime") {
+		t.Errorf("override gemini: want unknown-runtime error, got %v", err)
 	}
 }

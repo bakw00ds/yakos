@@ -43,6 +43,10 @@ func newDispatchDaemon(t *testing.T, bin, script string) *jsonrpc.Client {
 	}
 	t.Setenv("PATH", stubDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("HOME", t.TempDir())
+	// The fake runtime counts as signed in. Dispatch refuses a codex or agy that
+	// is not (K-132), and HOME is empty here, so no login file exists.
+	t.Setenv("OPENAI_API_KEY", "test-key")
+	t.Setenv("ANTIGRAVITY_API_KEY", "test-key")
 	t.Setenv("YAKOS_ROOT", "")
 	t.Setenv("YAKOS_DISPATCH_LOG", t.TempDir())
 

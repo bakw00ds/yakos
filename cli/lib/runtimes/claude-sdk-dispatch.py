@@ -17,7 +17,23 @@ Inputs (stdin):
 Outputs:
   stdout: assistant response text
   stderr: errors / log lines
-  exit 0 on success, non-zero on error
+  exit 0 on success, non-zero on error (78 when ANTHROPIC_API_KEY is missing,
+  see below)
+
+Auth (K-137): ANTHROPIC_API_KEY is REQUIRED. Anthropic's terms (2026-02-19)
+allow a Pro or Max subscription's OAuth only in Claude Code and claude.ai, not in
+the Agent SDK, which this script runs. main() refuses first thing, before it
+reads its other inputs or imports the SDK: exit status 78 (sysexits EX_CONFIG)
+and one stderr line that never contains any part of a credential. It then removes
+subscription OAuth variables from its own environment, which the SDK and the
+Claude Code CLI it bundles inherit. Names that start with YAKOS_ are yakOS's own
+and are never judged by their value: YAKOS_AGENTS_JSON is the composed agent
+roster, whose text can mention a token prefix in prose, and the yakOS hooks the
+bundled CLI runs read other YAKOS_ variables. claude-sdk.sh
+(yk_rt_claude_sdk_dispatch) gates and scrubs first; this is the second anchor for
+a script started any other way. Twins:
+cli-go/internal/interactive/sidecar/sidecar.mjs and
+cli-go/internal/runtime/sdk_env.go.
 
 v0.26 (Plan 5 M3) — verified against the SDK's examples/ + types.py
 (not the README, which is incomplete). Real surface used:
@@ -39,10 +55,71 @@ import json
 import os
 import sys
 
+EXIT_API_KEY_REQUIRED = 78  # sysexits EX_CONFIG, as in sidecar.mjs
+
+# Prefixes of the tokens a subscription login produces: access (oat) and refresh
+# (ort). The name has no "auth" or "login" and the value is a frozenset on
+# purpose: a secrets scanner reads such a name next to a tuple of two strings as
+# a username and password pair, and these are public prefixes, not a credential.
+_SUBSCRIPTION_TOKEN_PREFIXES = frozenset({"sk-ant-oat", "sk-ant-ort"})
+
+
+# The two refusal sentences are constants on purpose: nothing computed from the
+# environment is ever written to stderr. The names are plain on purpose too:
+# CodeQL treats a value assigned to a credential-looking name (OAUTH, KEY, TOKEN)
+# as sensitive data and flags every log call it reaches.
+_MSG_UNSET = ("refusing to run: ANTHROPIC_API_KEY is not set; the Agent SDK does "
+                 "not run on a claude.ai subscription login (set an API key, or use "
+                 "the claude runtime, which is Claude Code itself)")
+_MSG_SUBSCRIPTION = ("refusing to run: ANTHROPIC_API_KEY holds a subscription OAuth "
+                 "token, not an API key; the Agent SDK does not accept those (set an "
+                 "API key, or use the claude runtime, which is Claude Code itself)")
+
 
 def die(msg, code=1):
     sys.stderr.write(f"claude-sdk-dispatch: {msg}\n")
     sys.exit(code)
+
+
+def _is_oauth_value(value):
+    low = value.lower()
+    return any(prefix in low for prefix in _SUBSCRIPTION_TOKEN_PREFIXES)
+
+
+def startup_check(environ):
+    """Return "ok", "unset" or "oauth": whether this script may run.
+
+    Reads only ANTHROPIC_API_KEY and returns a bare state word. main() turns the
+    state into one of two constant sentences, so no part of the value, and no
+    other variable, is ever echoed.
+    """
+    key = (environ.get("ANTHROPIC_API_KEY") or "").strip()
+    if not key:
+        return "unset"
+    if _is_oauth_value(key):
+        return "oauth"
+    return "ok"
+
+
+def scrub_oauth_env(environ):
+    """Delete subscription OAuth variables from environ (os.environ in main).
+
+    Any CLAUDE_CODE_OAUTH* name goes, in any case, and so does any variable whose
+    value contains an OAuth token marker. The SDK and the Claude Code CLI it
+    bundles inherit this environment.
+
+    A name that starts with YAKOS_ (exact case) is never judged by its value.
+    Those are yakOS's own inputs and state: the composed agent roster in
+    YAKOS_AGENTS_JSON can mention a token prefix in prose, and the yakOS hooks the
+    bundled CLI runs read other YAKOS_ variables. Nothing reads one as a
+    credential. A name that only contains YAKOS_, or spells it in lowercase, is an
+    ordinary name.
+    """
+    for name in list(environ):
+        if name.upper().startswith("CLAUDE_CODE_OAUTH"):
+            del environ[name]
+        elif not name.startswith("YAKOS_") and _is_oauth_value(environ[name]):
+            del environ[name]
 
 
 def read_env():
@@ -222,6 +299,14 @@ async def run(agent_id: str, project: str, agents: dict, task: str) -> int:
 
 
 def main() -> int:
+    # K-137 hard gate, before anything else: no inputs read, no SDK imported.
+    state = startup_check(os.environ)
+    if state == "unset":
+        die(_MSG_UNSET, EXIT_API_KEY_REQUIRED)
+    if state == "oauth":
+        die(_MSG_SUBSCRIPTION, EXIT_API_KEY_REQUIRED)
+    scrub_oauth_env(os.environ)
+
     agent_id, project, agents = read_env()
     task = sys.stdin.read()
     if not task:

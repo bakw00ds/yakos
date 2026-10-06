@@ -28,9 +28,16 @@
 // slow down every plain `yakos doctor` run, and keeping the default report
 // unchanged preserves its bash/Go parity (doctor_parity_test.go CompareExact
 // cases) without needing a from-scratch bash port of the daemon handshake.
+//
+// `yakos doctor --policy` (Config.PolicyOnly, K-137) is a second opt-in
+// report-only mode: risky configurations, one line each with a severity and a
+// fix hint, produced by CheckPolicy (policy.go) so the console can call the same
+// checks. Like --preflight it skips every section above and stays out of the
+// default report; unlike it, the policy report never fails the run.
 package doctor
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"github.com/bakw00ds/yakos/internal/binver"
@@ -100,6 +107,10 @@ const (
 	// SectionRuntimeIsolation reports the codex CODEX_HOME profile and the
 	// sandbox policy for codex and agy (K-133).
 	SectionRuntimeIsolation
+
+	// SectionPolicy is the `yakos doctor --policy` report (K-137). Its findings
+	// are recorded on Report.Policy, not Report.Findings.
+	SectionPolicy
 )
 
 // Finding is one reported item: a severity level plus a human-readable message.
@@ -114,6 +125,10 @@ type Report struct {
 	Findings []Finding
 	Errors   int
 	Warnings int
+
+	// Policy holds the `--policy` findings, most severe first. They are never
+	// counted in Errors or Warnings: the policy report cannot fail a run.
+	Policy []PolicyFinding
 }
 
 // Config controls a doctor run.
@@ -163,6 +178,23 @@ type Config struct {
 	// PreflightOnly runs ONLY the Preflight section (the `--preflight` fast
 	// path) instead of the full doctor report. See preflight.go.
 	PreflightOnly bool
+
+	// PolicyOnly runs ONLY the policy report (`--policy`, K-137): risky
+	// configurations, one line each with a severity and a fix hint. Like
+	// PreflightOnly it skips every other section; it wins when both are set. The
+	// report never fails the run. See policy.go.
+	PolicyOnly bool
+
+	// PolicyBashTreePresent and PolicySDKSidecarSelectable are two machine facts
+	// only the caller can compute (they depend on where the binary lives and on
+	// the interactive package); they feed PolicyEnv. The second means the SDK
+	// engine is installed, not that a console enabled it. See policy.go.
+	PolicyBashTreePresent      bool
+	PolicySDKSidecarSelectable bool
+
+	// PolicyProbeRuntime is the sign-in probe the policy report uses for agy
+	// (cmd/yakos wraps auth.ProbeRuntime). Nil skips that check. See policy.go.
+	PolicyProbeRuntime func(ctx context.Context, id string) RuntimeProbe
 
 	// PreflightFast skips the Preflight sub-checks that make a network call
 	// (gh auth status) or dial the daemon socket — used by `yakos start`'s
@@ -223,6 +255,11 @@ func Run(cfg Config) (*Report, error) {
 
 	_, _ = fmt.Fprintln(r.w, "yakos doctor")
 	_, _ = fmt.Fprintln(r.w, "")
+
+	if cfg.PolicyOnly {
+		r.runPolicy()
+		return r.report, nil
+	}
 
 	if cfg.PreflightOnly {
 		r.runPreflight()

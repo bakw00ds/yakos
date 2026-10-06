@@ -255,12 +255,12 @@ var commandRegistry = []commandEntry{
 	},
 	{
 		Name:   "dispatch",
-		Specs:  specSet("dispatch", "--runtime", "--model", "--project", "--timeout", "--eval-run-id", "--allow-root"),
+		Specs:  specSet("dispatch", "--runtime", "--runtime-fallback", "--model", "--project", "--timeout", "--eval-run-id", "--allow-root"),
 		HelpFn: printDispatchHelp,
 	},
 	{
 		Name:   "doctor",
-		Specs:  specSet("doctor", "--probe-runtime", "--probe-decision", "--live", "--production", "--fix", "--preflight"),
+		Specs:  specSet("doctor", "--probe-runtime", "--probe-decision", "--live", "--production", "--fix", "--preflight", "--policy"),
 		HelpFn: doctor.PrintHelp,
 		AllowUndocumented: []flagAllow{
 			{Flag: "--production", Reason: "doctor.PrintHelp (internal/doctor) documents --probe-runtime and --fix but never mentions --production; doc gap in a package this PR does not own"},
@@ -421,7 +421,6 @@ var commandRegistry = []commandEntry{
 		HelpFn: internalstart.PrintHelp,
 		AllowUnparsed: []flagAllow{
 			{Flag: "--dangerously-bypass-approvals-and-sandbox", Reason: "start.PrintHelp prose describing CODEX's own bypass flag, not a yakos start flag; cmd_start.go / internal/start are off-limits for this PR"},
-			{Flag: "--approval-mode", Reason: "start.PrintHelp prose describing GEMINI's own approval-mode flag, not a yakos start flag"},
 			{Flag: "--permission-mode", Reason: "start.PrintHelp prose describing CLAUDE's own permission-mode flag, not a yakos start flag"},
 			{Flag: "--strict-mcp-config", Reason: "start.PrintHelp's `claude only — pass --strict-mcp-config` describes what --strict-mcp translates to for the claude runtime, not a second yakos start flag"},
 		},

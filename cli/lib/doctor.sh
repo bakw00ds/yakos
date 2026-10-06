@@ -72,6 +72,14 @@ EOF
             # invoked directly, or explicitly via YAKOS_IMPL=bash.
             ct_die "doctor: --preflight is Go-only; run 'YAKOS_IMPL=go yakos doctor --preflight'"
             ;;
+        --policy)
+            # Go-only (cli-go/internal/doctor/policy.go, K-137): it reads the
+            # router policy, the SDK sidecar and the dispatcher state this
+            # script does not know. main.go forces Go-native routing for
+            # `doctor --policy` under normal use; this only fires when the
+            # bash tree was invoked directly, or explicitly via YAKOS_IMPL=bash.
+            ct_die "doctor: --policy is Go-only; run 'YAKOS_IMPL=go yakos doctor --policy'"
+            ;;
         --*)
             ct_die "doctor: unknown flag '$arg'"
             ;;

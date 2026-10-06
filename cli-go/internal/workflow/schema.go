@@ -55,8 +55,10 @@ type Node struct {
 	// resolved from agent frontmatter when absent.
 	Runtime string `yaml:"runtime,omitempty"`
 
-	// Model is the model tier override (haiku|sonnet|opus|fable) or alias.
-	// Validated via runtime.ResolveAlias + runtime.ValidateTier at validate time.
+	// Model is the model override: a Claude tier (haiku|sonnet|opus|fable) or an
+	// alias (cheap|balanced|best|reasoning|frontier) on claude; an alias or a
+	// model id on codex and agy. Validated against Runtime at validate time and
+	// passed to dispatch verbatim, which resolves it for the runtime that runs.
 	// Optional; resolved from agent frontmatter when absent.
 	Model string `yaml:"model,omitempty"`
 

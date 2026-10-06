@@ -138,6 +138,12 @@ type SSEEvent struct {
 	// ModelResolved is set on summary events.
 	ModelResolved string `json:"model_resolved,omitempty"`
 
+	// RuntimeResolved is set on summary events: the runtime that actually ran
+	// the turn. A pane set to "auto" learns here where its agent really went (the
+	// agent's pin, the project's default or a fallback), so it is never left
+	// showing "claude" for a turn that ran on codex (sec-324 F4).
+	RuntimeResolved string `json:"runtime_resolved,omitempty"`
+
 	// ToolName is the human-readable tool name (Type=="tool_use" or "tool_result").
 	// Examples: "Bash", "Read", "Write".
 	ToolName string `json:"tool_name,omitempty"`

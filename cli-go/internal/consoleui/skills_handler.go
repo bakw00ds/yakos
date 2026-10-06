@@ -44,6 +44,7 @@ import (
 	"net/http"
 
 	"github.com/bakw00ds/yakos/internal/agentscompose"
+	"github.com/bakw00ds/yakos/internal/dispatch"
 )
 
 // skillsHandlers holds the dependencies for GET /api/skills.
@@ -113,14 +114,17 @@ func (sh *skillsHandlers) handleSkills(w http.ResponseWriter, r *http.Request) {
 		roster = nil
 	}
 
+	// The runtime each agent is headed for: its frontmatter pin, else the
+	// project and state defaults, else claude. The same chain the dispatcher
+	// uses (dispatch.RosterRuntimes), so the popover no longer shows
+	// general-codex as a claude agent (K-127).
+	runtimes := dispatch.RosterRuntimes(roster, sh.workspaceRoot)
+
 	agents := make([]agentSkill, 0, len(roster))
 	for _, a := range roster {
-		// Derive runtime: if the agent ID is a known runtime identifier
-		// (claude/codex/agy/gemini), use the ID itself; otherwise default
-		// to "claude".  Mirrors resolveRuntime in dispatch/resolve.go.
-		rt := "claude"
-		if agentscompose.IsKnownRuntime(a.ID) {
-			rt = a.ID
+		rt := runtimes[a.ID]
+		if rt == "" {
+			rt = "claude"
 		}
 
 		// SECURITY: only Name, Description, Runtime are serialised.

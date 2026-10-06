@@ -36,6 +36,9 @@
 #      sandboxed by default and agy gets --sandbox (which is not containment,
 #      K-158). Needs bin/yakos (`make build`); skipped when absent unless
 #      YAKOS_REQUIRE_GO_BINARY is set, which CI sets so it cannot be skipped.
+#  20. the claude-sdk runtime (the Python Agent SDK) refuses to run without an
+#      Anthropic API key and starts python without subscription OAuth variables:
+#      the bash twin of the Go SDK sidecar gate (K-137)
 set -eu
 
 REPO_ROOT="$(cd "$(dirname -- "$0")/.." && pwd -P)"
@@ -917,6 +920,10 @@ echo "fake $rt output"
 SHIM_EOF
         chmod +x "$t19/shim/$rt"
     done
+    # The shims stand in for signed-in CLIs. The Go dispatcher refuses a codex or agy
+    # that you name and that is not signed in (K-132), and HOME is empty here, so no
+    # login file exists. A test key counts as signed in.
+    export OPENAI_API_KEY="fixture-key" ANTIGRAVITY_API_KEY="fixture-key"
     t19_env() {
         env -u YAKOS_LIB HOME="$t19/home" YAKOS_DISPATCH_LOG="$t19/state" PATH="$t19/shim:$PATH" \
             YAKOS_IMPL=go YAKOS_ROOT="$REPO_ROOT" "$GO_BINARY" "$@"
@@ -1019,6 +1026,325 @@ SHIM_EOF
     else
         fail "a world-writable policy file unsandboxed codex"
     fi
+fi
+
+# ---- 20. claude-sdk hard gate: the bash twin of the Go sidecar gate (K-137) ----
+echo
+echo "Test 20: the claude-sdk runtime refuses to run without an Anthropic API key (K-137)"
+# Anthropic's terms (2026-02-19) allow a subscription's OAuth only in Claude Code and
+# claude.ai, not in the Agent SDK, and this runtime is the Python Agent SDK. The dispatch
+# verb must refuse before it composes agents or starts python, with a one-line reason that
+# carries no token material, and the python it does start must not inherit subscription
+# OAuth variables. Twins: cli-go/internal/runtime/sdk_env.go and sidecar.mjs.
+t20="$WORKDIR/t20"
+mkdir -p "$t20/home" "$t20/py" "$t20/proj" "$t20/root/lib/agents"
+t20_secret="T20SECRET0123456789"
+# A one-agent roster as the framework root. The real roster is about 196 KB, which the
+# adapter passes to python in one environment variable; Linux caps one string at 128 KiB
+# (MAX_ARG_STRLEN) and the exec fails with E2BIG, so a test of the gate must not depend on it.
+cat > "$t20/root/lib/agents/probe.md" <<'AGENT_EOF'
+---
+id: probe
+role: specialist
+domain: test
+mode: [feature]
+tools: [Read]
+model: haiku
+references: []
+---
+
+# Probe
+
+## Purpose
+
+A one-agent roster for the claude-sdk gate fixture.
+AGENT_EOF
+cat > "$t20/py/fakepython" <<'PY_EOF'
+#!/bin/sh
+# Stands in for the interpreter: records the NAMES of the variables it was started with.
+env | sed 's/=.*//' | sort > "$T20_SEEN"
+echo "fake sdk output"
+PY_EOF
+chmod +x "$t20/py/fakepython"
+
+if bash -n "$YAKOS_LIB/runtimes/claude-sdk.sh"; then
+    ok "claude-sdk.sh parses (bash -n)"
+else
+    fail "claude-sdk.sh does not parse"
+fi
+
+# t20_dispatch VAR=value...: the real dispatch verb, in an otherwise empty environment.
+t20_dispatch() {
+    rm -f "$t20/seen.env" "$t20/out" "$t20/err"
+    env -i HOME="$t20/home" PATH="$PATH" YAKOS_ROOT="$t20/root" YAKOS_LIB="$YAKOS_LIB" \
+        YAKOS_PYTHON="$t20/py/fakepython" T20_SEEN="$t20/seen.env" "$@" \
+        bash -c '. "$YAKOS_LIB/runtimes/claude-sdk.sh"; yk_rt_claude_sdk_dispatch "$1" probe "hello"' _ "$t20/proj" \
+        >"$t20/out" 2>"$t20/err"
+}
+
+# t20_expect_refusal <label> <text the reason must contain> [VAR=value...]
+t20_expect_refusal() {
+    local label="$1" want="$2" rc=0
+    shift 2
+    t20_dispatch "$@" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+        fail "$label: the dispatch ran without a usable API key"
+    elif [ -e "$t20/seen.env" ]; then
+        fail "$label: python was started although the gate refused"
+    elif ! grep -q 'ANTHROPIC_API_KEY' "$t20/err" || ! grep -q "$want" "$t20/err" || ! grep -q 'claude runtime' "$t20/err"; then
+        fail "$label: the reason must name ANTHROPIC_API_KEY and the claude runtime: $(cat "$t20/err")"
+    elif [ "$(grep -c . "$t20/err")" -ne 1 ]; then
+        fail "$label: the reason must be one line: $(cat "$t20/err")"
+    elif [ -s "$t20/out" ]; then
+        fail "$label: stdout must stay empty"
+    elif grep -q "$t20_secret" "$t20/err" "$t20/out"; then
+        fail "$label: token material was echoed"
+    else
+        ok "$label"
+    fi
+}
+
+t20_expect_refusal "no key: refused before python starts" "is not set"
+t20_expect_refusal "empty key: refused" "is not set" ANTHROPIC_API_KEY=
+t20_expect_refusal "blank key: refused" "is not set" "ANTHROPIC_API_KEY=   "
+t20_expect_refusal "a subscription token alone is not a key" "is not set" "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-$t20_secret"
+t20_expect_refusal "an OAuth token in the key slot is refused and not echoed" "OAuth token" "ANTHROPIC_API_KEY=sk-ant-oat01-$t20_secret"
+t20_expect_refusal "an OAuth refresh token in the key slot is refused" "OAuth token" "ANTHROPIC_API_KEY=SK-ANT-ORT01-$t20_secret"
+# The refusal comes before anything is composed. A framework root with no agents makes the
+# compose step fail with a message of its own, so the key reason still being the only line
+# shows the gate ran first. A gate placed after the compose step prints the compose error.
+mkdir -p "$t20/emptyroot/lib/agents"
+t20_expect_refusal "no key and nothing to compose: the refusal still comes first" "is not set" YAKOS_ROOT="$t20/emptyroot"
+
+t20_rc=0
+t20_dispatch "ANTHROPIC_API_KEY=sk-ant-api03-t20-fake-key" \
+    "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-$t20_secret" "CLAUDE_CODE_OAUTH_REFRESH_TOKEN=sk-ant-ort01-$t20_secret" \
+    "CLAUDE_CODE_OAUTH_SCOPES=user:inference" "claude_code_oauth_client_id=lowercase-name" \
+    "ANTHROPIC_AUTH_TOKEN=sk-ant-oat01-$t20_secret" "T20_MISFILED=Bearer sk-ant-ort01-$t20_secret" \
+    "T20.DOTTED=Bearer sk-ant-oat01-$t20_secret" "t20_lower_misfiled=SK-ANT-ORT01-$t20_secret" \
+    "YAKOS_T20_PROSE=never paste sk-ant-oat or SK-ANT-ORT tokens" \
+    "T20_YAKOS_MID=Bearer sk-ant-oat01-$t20_secret" "yakos_t20_lower=Bearer sk-ant-oat01-$t20_secret" \
+    "T20_BENIGN=hello" || t20_rc=$?
+if [ "$t20_rc" -ne 0 ] || ! grep -q 'fake sdk output' "$t20/out"; then
+    fail "with an API key the dispatch must reach python (exit $t20_rc): $(cat "$t20/err")"
+else
+    ok "with an API key the dispatch reaches python"
+    # claude_code_oauth_client_id is a lowercase name with a non-token value, T20.DOTTED a
+    # name a shell cannot hold as a variable (bash 5 passes it to children, bash 3.2 drops
+    # it, so the check is "never inherited" on both), t20_lower_misfiled a token in a
+    # lowercase name and upper-case token marker. A name that starts with YAKOS_ (exact case) is
+    # yakOS's own and is never judged by value (YAKOS_T20_PROSE mentions the prefixes in prose,
+    # as a composed agent roster can); a name that merely contains YAKOS_ (T20_YAKOS_MID) or
+    # spells it in lowercase (yakos_t20_lower) is an ordinary name and a token in it goes.
+    for banned in CLAUDE_CODE_OAUTH_TOKEN CLAUDE_CODE_OAUTH_REFRESH_TOKEN CLAUDE_CODE_OAUTH_SCOPES claude_code_oauth_client_id \
+                  ANTHROPIC_AUTH_TOKEN T20_MISFILED T20.DOTTED t20_lower_misfiled T20_YAKOS_MID yakos_t20_lower; do
+        if grep -qx "$banned" "$t20/seen.env"; then
+            fail "python inherited $banned (OAuth material must not reach the Agent SDK)"
+        else
+            ok "python does not inherit $banned"
+        fi
+    done
+    for kept in ANTHROPIC_API_KEY T20_BENIGN YAKOS_T20_PROSE; do
+        if grep -qx "$kept" "$t20/seen.env"; then
+            ok "python still receives $kept"
+        else
+            fail "python lost $kept"
+        fi
+    done
+fi
+
+# The listing the scrub is built from has two branches: NUL-delimited `env -0`, and `compgen -e`
+# where `env -0` is unavailable. A stand-in `env` that refuses -0 forces the second one. Both must
+# name the same identifier-named variables: OAuth names and values go, yakOS's own YAKOS_ names stay.
+t20_names() {
+    env -i HOME="$t20/home" PATH="$PATH" YAKOS_LIB="$YAKOS_LIB" \
+        "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-$t20_secret" "T20_MISFILED=Bearer sk-ant-ort01-$t20_secret" \
+        "claude_code_oauth_scopes=user:inference" "YAKOS_T20_PROSE=never paste sk-ant-oat tokens" \
+        "T20_YAKOS_MID=Bearer sk-ant-oat01-$t20_secret" "yakos_t20_lower=Bearer sk-ant-oat01-$t20_secret" \
+        T20_BENIGN=hello \
+        bash -c ". \"\$YAKOS_LIB/runtimes/claude-sdk.sh\"; $1 yk_rt_claude_sdk_oauth_env_names | LC_ALL=C sort | tr '\\n' ,"
+}
+t20_want_names="CLAUDE_CODE_OAUTH_TOKEN,T20_MISFILED,T20_YAKOS_MID,claude_code_oauth_scopes,yakos_t20_lower,"
+t20_got="$(t20_names '' 2>&1)" || true
+if [ "$t20_got" = "$t20_want_names" ]; then
+    ok "the OAuth listing (env -0) names OAuth variables and leaves YAKOS_ names alone"
+else
+    fail "the OAuth listing (env -0) = $t20_got, want $t20_want_names"
+fi
+t20_got="$(t20_names 'env() { if [ "${1:-}" = "-0" ]; then return 1; fi; command env "$@"; };' 2>&1)" || true
+if [ "$t20_got" = "$t20_want_names" ]; then
+    ok "the OAuth listing falls back to compgen -e and agrees with the env -0 branch"
+else
+    fail "the OAuth listing (compgen fallback) = $t20_got, want $t20_want_names"
+fi
+
+# Nothing to scrub: the empty scrub list must expand cleanly under `set -u` on bash 3.2.
+t20_rc=0
+t20_dispatch "ANTHROPIC_API_KEY=sk-ant-api03-t20-fake-key" || t20_rc=$?
+if [ "$t20_rc" -eq 0 ] && grep -q 'fake sdk output' "$t20/out"; then
+    ok "with an API key and no OAuth variables the dispatch reaches python"
+else
+    fail "with an API key and nothing to scrub the dispatch must reach python (exit $t20_rc): $(cat "$t20/err")"
+fi
+
+# The second anchor: claude-sdk-dispatch.py checks the key itself, before it reads its
+# other inputs or imports the SDK, so a python started any other way cannot bypass the
+# shell gate.
+if command -v python3 >/dev/null 2>&1; then
+    t20_py() {
+        rm -f "$t20/pyout" "$t20/pyerr"
+        env -i HOME="$t20/home" PATH="$PATH" "$@" python3 "$YAKOS_LIB/runtimes/claude-sdk-dispatch.py" \
+            </dev/null >"$t20/pyout" 2>"$t20/pyerr"
+    }
+    t20_py_expect_refusal() {
+        local label="$1" rc=0
+        shift
+        t20_py "$@" || rc=$?
+        if [ "$rc" -ne 78 ]; then
+            fail "claude-sdk-dispatch.py $label: exit $rc, want 78: $(cat "$t20/pyerr")"
+        elif [ -s "$t20/pyout" ]; then
+            fail "claude-sdk-dispatch.py $label: stdout must stay empty"
+        elif [ "$(grep -c . "$t20/pyerr")" -ne 1 ] || ! grep -q 'ANTHROPIC_API_KEY' "$t20/pyerr" || ! grep -q 'refusing to run' "$t20/pyerr"; then
+            fail "claude-sdk-dispatch.py $label: want one line naming ANTHROPIC_API_KEY: $(cat "$t20/pyerr")"
+        elif grep -q "$t20_secret" "$t20/pyerr"; then
+            fail "claude-sdk-dispatch.py $label: token material was echoed"
+        else
+            ok "claude-sdk-dispatch.py $label"
+        fi
+    }
+    t20_py_expect_refusal "refuses with no key, before reading its other inputs"
+    t20_py_expect_refusal "refuses a blank key" "ANTHROPIC_API_KEY=  "
+    t20_py_expect_refusal "refuses an OAuth token as the key and does not echo it" "ANTHROPIC_API_KEY=sk-ant-oat01-$t20_secret"
+    t20_rc=0
+    t20_py "ANTHROPIC_API_KEY=sk-ant-api03-t20-fake-key" || t20_rc=$?
+    if [ "$t20_rc" -eq 1 ] && grep -q 'YAKOS_AGENT_ID env var required' "$t20/pyerr"; then
+        ok "claude-sdk-dispatch.py lets an API key through to its normal input checks"
+    else
+        fail "claude-sdk-dispatch.py with a key must reach its input checks (exit $t20_rc): $(cat "$t20/pyerr")"
+    fi
+    # -B: importing the script must not leave a __pycache__ next to it in the checkout.
+    # End to end, offline: stand-in claude_agent_sdk and anyio modules (first on PYTHONPATH,
+    # so they win over real ones) let main() run. The stand-in query() records the NAMES in
+    # the environment the SDK would hand to Claude Code.
+    mkdir -p "$t20/fakesdk"
+    cat > "$t20/fakesdk/anyio.py" <<'PY_EOF'
+import asyncio
+
+
+def run(func, *args):
+    return asyncio.run(func(*args))
+PY_EOF
+    cat > "$t20/fakesdk/claude_agent_sdk.py" <<'PY_EOF'
+import os
+
+
+class AgentDefinition:
+    def __init__(self, **kw):
+        self.kw = kw
+
+
+class ClaudeAgentOptions:
+    def __init__(self, **kw):
+        self.kw = kw
+
+
+class TextBlock:
+    def __init__(self, text):
+        self.text = text
+
+
+class AssistantMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+class ResultMessage:
+    total_cost_usd = 0.0
+
+
+async def query(prompt, options):
+    with open(os.environ["T20_SEEN"], "w") as f:
+        f.write("\n".join(sorted(os.environ)) + "\n")
+    yield AssistantMessage([TextBlock("fake sdk text")])
+    yield ResultMessage()
+PY_EOF
+    t20_rc=0
+    rm -f "$t20/seen.env"
+    printf 'hello\n' | env -i HOME="$t20/home" PATH="$PATH" PYTHONPATH="$t20/fakesdk" T20_SEEN="$t20/seen.env" \
+        YAKOS_AGENT_ID=probe YAKOS_PROJECT_DIR="$t20/proj" \
+        YAKOS_AGENTS_JSON='{"probe":{"prompt":"p. Never paste a sk-ant-oat or sk-ant-ort token."}}' \
+        ANTHROPIC_API_KEY=sk-ant-api03-t20-fake-key \
+        "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-$t20_secret" "claude_code_oauth_scopes=user:inference" \
+        "T20_MISFILED=Bearer sk-ant-ort01-$t20_secret" T20_BENIGN=hello \
+        "T20_PROSE_NOTE=never paste sk-ant-oat tokens" "YAKOS_T20_NOTE=never paste sk-ant-oat tokens" \
+        "T20_YAKOS_MID=Bearer sk-ant-oat01-$t20_secret" "yakos_t20_lower=Bearer sk-ant-oat01-$t20_secret" \
+        python3 -B "$YAKOS_LIB/runtimes/claude-sdk-dispatch.py" >"$t20/pyout" 2>"$t20/pyerr" || t20_rc=$?
+    if [ "$t20_rc" -ne 0 ] || ! grep -q 'fake sdk text' "$t20/pyout"; then
+        fail "claude-sdk-dispatch.py with a key must run end to end against a stand-in SDK (exit $t20_rc): $(cat "$t20/pyerr")"
+    else
+        ok "claude-sdk-dispatch.py runs end to end with an API key"
+        # The roster above mentions the token prefixes in prose and still reached the SDK: the
+        # strip must not judge a YAKOS_ name by value. T20_PROSE_NOTE, which mentions them the
+        # same way under an ordinary name, goes with the other OAuth-looking values.
+        for banned in CLAUDE_CODE_OAUTH_TOKEN claude_code_oauth_scopes T20_MISFILED T20_PROSE_NOTE T20_YAKOS_MID yakos_t20_lower; do
+            if grep -qx "$banned" "$t20/seen.env"; then
+                fail "the SDK would inherit $banned from claude-sdk-dispatch.py"
+            else
+                ok "claude-sdk-dispatch.py hands the SDK no $banned"
+            fi
+        done
+        if grep -qx ANTHROPIC_API_KEY "$t20/seen.env" && grep -qx T20_BENIGN "$t20/seen.env"; then
+            ok "claude-sdk-dispatch.py still hands the SDK the key and the rest of the environment"
+        else
+            fail "claude-sdk-dispatch.py dropped the key or an unrelated variable"
+        fi
+        if grep -qx YAKOS_T20_NOTE "$t20/seen.env"; then
+            ok "claude-sdk-dispatch.py keeps a YAKOS_ variable that mentions a token prefix in prose"
+        else
+            fail "claude-sdk-dispatch.py dropped YAKOS_T20_NOTE: yakOS's own variables are not judged by value"
+        fi
+    fi
+    # The hand-off the real adapter uses: dispatch composes the roster from the framework root
+    # and passes it to the real script in YAKOS_AGENTS_JSON. A roster whose agent text mentions
+    # a token prefix in prose must reach the SDK; the strip once emptied it and the dispatch
+    # died with "YAKOS_AGENTS_JSON env var required".
+    mkdir -p "$t20/rootprose/lib/agents"
+    sed 's/^A one-agent roster for the claude-sdk gate fixture\.$/Never paste a sk-ant-oat or sk-ant-ort token into a prompt./' \
+        "$t20/root/lib/agents/probe.md" > "$t20/rootprose/lib/agents/probe.md"
+    cat > "$t20/py/sdkpython" <<'PY_EOF'
+#!/bin/sh
+# Runs the real claude-sdk-dispatch.py against the stand-in SDK modules.
+PYTHONPATH="$T20_FAKESDK" exec python3 -B "$@"
+PY_EOF
+    chmod +x "$t20/py/sdkpython"
+    t20_rc=0
+    t20_dispatch "ANTHROPIC_API_KEY=sk-ant-api03-t20-fake-key" YAKOS_ROOT="$t20/rootprose" \
+        YAKOS_PYTHON="$t20/py/sdkpython" T20_FAKESDK="$t20/fakesdk" || t20_rc=$?
+    if [ "$t20_rc" -eq 0 ] && grep -q 'fake sdk text' "$t20/out"; then
+        ok "a roster that mentions a token prefix in prose reaches the SDK through the real dispatch"
+    else
+        fail "a roster that mentions a token prefix in prose must reach the SDK (exit $t20_rc): $(cat "$t20/err")"
+    fi
+    t20_scrubbed="$(python3 -B - "$YAKOS_LIB/runtimes/claude-sdk-dispatch.py" <<'PY_EOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("claude_sdk_dispatch", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+env = {"ANTHROPIC_API_KEY": "sk-ant-api03-k", "CLAUDE_CODE_OAUTH_TOKEN": "x",
+       "claude_code_oauth_scopes": "y", "MISFILED": "Bearer sk-ant-oat01-z", "PATH": "/usr/bin",
+       "YAKOS_AGENTS_JSON": '{"a": "never paste sk-ant-oat tokens"}',
+       "T_YAKOS_MID": "Bearer sk-ant-oat01-z", "yakos_lower": "Bearer sk-ant-oat01-z"}
+mod.scrub_oauth_env(env)
+print(",".join(sorted(env)))
+PY_EOF
+)" || t20_scrubbed="python failed: $t20_scrubbed"
+    if [ "$t20_scrubbed" = "ANTHROPIC_API_KEY,PATH,YAKOS_AGENTS_JSON" ]; then
+        ok "claude-sdk-dispatch.py scrub_oauth_env drops OAuth names and values, keeps the rest and YAKOS_ names"
+    else
+        fail "claude-sdk-dispatch.py scrub_oauth_env left: $t20_scrubbed"
+    fi
+else
+    echo "  [skip] python3 not installed; the claude-sdk-dispatch.py second anchor is not exercised"
 fi
 
 # ---- summary -----------------------------------------------------------------

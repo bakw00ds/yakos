@@ -216,11 +216,13 @@ func TestValidate_ValidModelAlias(t *testing.T) {
 }
 
 func TestValidate_InvalidModel(t *testing.T) {
+	// A node that names claude takes only tiers and aliases; an id is a model
+	// for some other runtime. (Per-runtime rules: engine_model_test.go.)
 	wf := &workflow.Workflow{
 		Version: 1,
 		Name:    "bad-model",
 		Nodes: []workflow.Node{
-			{ID: "a", Agent: "x", Prompt: "p", OutputLimit: 100, Model: "gpt-zillion"},
+			{ID: "a", Agent: "x", Prompt: "p", OutputLimit: 100, Runtime: "claude", Model: "gpt-zillion"},
 		},
 	}
 	if err := workflow.Validate(wf); err == nil {

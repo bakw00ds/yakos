@@ -1,0 +1,22 @@
+### agy-pinned
+{"agy-pinned":{"description":"Fixture agent agy-pinned for the cache-stability byte check.","prompt":"# agy-pinned\n\n## Purpose\n\nFixture agent agy-pinned for the cache-stability byte check."}}
+### aliased
+{"aliased":{"description":"Fixture agent aliased for the cache-stability byte check.","model":"sonnet","prompt":"# aliased\n\n## Purpose\n\nFixture agent aliased for the cache-stability byte check.","tools":["Read"]}}
+### best-tier
+{"best-tier":{"description":"Fixture agent best-tier for the cache-stability byte check.","model":"opus","prompt":"# best-tier\n\n## Purpose\n\nFixture agent best-tier for the cache-stability byte check.","tools":["Read","Grep"]}}
+### cheapest
+{"cheapest":{"description":"Fixture agent cheapest for the cache-stability byte check.","model":"haiku","prompt":"# cheapest\n\n## Purpose\n\nFixture agent cheapest for the cache-stability byte check."}}
+### codex-pinned
+{"codex-pinned":{"description":"Fixture agent codex-pinned for the cache-stability byte check.","prompt":"# codex-pinned\n\n## Purpose\n\nFixture agent codex-pinned for the cache-stability byte check.","tools":["Read","Edit","Write","Bash","Grep","SendMessage"]}}
+### commented-tier
+{"commented-tier":{"description":"Fixture agent commented-tier for the cache-stability byte check.","prompt":"# commented-tier\n\n## Purpose\n\nFixture agent commented-tier for the cache-stability byte check."}}
+### foreign-model
+{"foreign-model":{"description":"Fixture agent foreign-model for the cache-stability byte check.","prompt":"# foreign-model\n\n## Purpose\n\nFixture agent foreign-model for the cache-stability byte check.","tools":["Read","Bash"]}}
+### frontier-tier
+{"frontier-tier":{"description":"Fixture agent frontier-tier for the cache-stability byte check.","model":"fable","prompt":"# frontier-tier\n\n## Purpose\n\nFixture agent frontier-tier for the cache-stability byte check."}}
+### no-model
+{"no-model":{"description":"Fixture agent no-model for the cache-stability byte check.","prompt":"# no-model\n\n## Purpose\n\nFixture agent no-model for the cache-stability byte check.","tools":["Read"]}}
+### plain-claude
+{"plain-claude":{"description":"Fixture agent plain-claude for the cache-stability byte check.","model":"sonnet","prompt":"# plain-claude\n\n## Purpose\n\nFixture agent plain-claude for the cache-stability byte check.","tools":["Read","Edit","Bash"]}}
+### quoted-tier
+{"quoted-tier":{"description":"Fixture agent quoted-tier for the cache-stability byte check.","prompt":"# quoted-tier\n\n## Purpose\n\nFixture agent quoted-tier for the cache-stability byte check."}}

@@ -302,7 +302,7 @@ func (s *Server) handleDispatchCreate(w http.ResponseWriter, r *http.Request) {
 		Timeout: req.Timeout,
 	})
 	if err != nil {
-		writeError(w, http.StatusBadGateway, "dispatch: "+err.Error())
+		writeError(w, http.StatusBadGateway, dispatch.PrefixedMessage(err))
 		return
 	}
 

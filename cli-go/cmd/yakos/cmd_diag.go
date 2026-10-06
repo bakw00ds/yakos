@@ -9,13 +9,16 @@ import (
 	"path/filepath"
 	goruntime "runtime"
 
+	"github.com/bakw00ds/yakos/internal/auth"
 	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/doctor"
 	"github.com/bakw00ds/yakos/internal/envcfg"
 	"github.com/bakw00ds/yakos/internal/install"
+	"github.com/bakw00ds/yakos/internal/interactive"
 	"github.com/bakw00ds/yakos/internal/metrics"
 	"github.com/bakw00ds/yakos/internal/metricsdash"
+	"github.com/bakw00ds/yakos/internal/passthrough"
 	"github.com/bakw00ds/yakos/internal/refresh"
 	"github.com/bakw00ds/yakos/internal/status"
 	"github.com/bakw00ds/yakos/internal/telemetry"
@@ -370,11 +373,13 @@ func runStatus(args []string) {
 //
 //	yakos doctor [<project-path>] [--probe-runtime] [--production]
 //	yakos doctor --preflight
+//	yakos doctor --policy
 //	yakos doctor --help
 //
 // Exits 0 when no errors found (warnings/info/drift are OK).
 // Exits 1 when one or more error-severity findings are reported.
 // The --fix flag is recognised but rejected (Phase 1 scope constraint).
+// --policy (K-137) is a report of risky configurations and always exits 0.
 //
 // --preflight has no bash equivalent: it runs the CLI↔daemon build
 // handshake (internal/daemonclient) and network gh-auth checks that bash
@@ -382,8 +387,14 @@ func runStatus(args []string) {
 // forces Go-native routing for `doctor --preflight` regardless of
 // YAKOS_IMPL/shadow-mode so it reaches this implementation even on hosts
 // where plain `yakos doctor` still routes to bash (see selectImpl callers
-// in main.go).
+// in main.go). --policy is Go-only for the same reason: its checks read the
+// router policy, the sidecar and the dispatcher state that bash doctor.sh does
+// not know.
 func runDoctor(yakosRoot string, args []string) {
+	// The executable's root is what main.go's YAKOS_IMPL gate routes with; the
+	// policy report needs it unchanged, before YAKOS_ROOT and the lib cascade
+	// below replace yakosRoot.
+	exeRoot := yakosRoot
 	help := false
 	probeRuntime := false
 	probeDecision := false
@@ -391,6 +402,7 @@ func runDoctor(yakosRoot string, args []string) {
 	production := false
 	fix := false
 	preflight := false
+	policy := false
 
 	fs := &cliflag.Set{Cmd: "doctor", Specs: []cliflag.Spec{
 		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
@@ -400,6 +412,7 @@ func runDoctor(yakosRoot string, args []string) {
 		{Name: "--production", Kind: cliflag.Bool, Bool: &production},
 		{Name: "--fix", Kind: cliflag.Bool, Bool: &fix},
 		{Name: "--preflight", Kind: cliflag.Bool, Bool: &preflight},
+		{Name: "--policy", Kind: cliflag.Bool, Bool: &policy},
 	}}
 	rest, err := fs.Parse(args)
 	if err != nil {
@@ -419,6 +432,12 @@ func runDoctor(yakosRoot string, args []string) {
 		fmt.Fprintln(os.Stderr, "  Use 'YAKOS_IMPL=bash yakos doctor --fix' to reach the bash implementation.")
 		os.Exit(1)
 	}
+	// --policy is a report on its own, like --preflight: refuse a mix instead of
+	// silently dropping one of the modes.
+	if policy && (preflight || probeRuntime || probeDecision || production) {
+		fmt.Fprintln(os.Stderr, "doctor: --policy runs on its own; it cannot be combined with --preflight, --probe-runtime, --probe-decision or --production")
+		os.Exit(1)
+	}
 
 	projectPath := ""
 	for _, arg := range rest {
@@ -431,6 +450,10 @@ func runDoctor(yakosRoot string, args []string) {
 			os.Exit(1)
 		}
 		projectPath = arg
+	}
+	if policy && projectPath != "" {
+		fmt.Fprintln(os.Stderr, "doctor: --policy reads your user-level setup and takes no project path")
+		os.Exit(1)
 	}
 
 	// Resolve YAKOS_ROOT from env, then cascade to materialized/embedded lib.
@@ -463,8 +486,12 @@ func runDoctor(yakosRoot string, args []string) {
 		ProbeDecisionLive: live,
 		Production:        production,
 		PreflightOnly:     preflight,
+		PolicyOnly:        policy,
 		Writer:            os.Stdout,
 		ErrWriter:         os.Stderr,
+	}
+	if policy {
+		applyPolicyFacts(&cfg, yakosRoot, exeRoot)
 	}
 
 	report, err := doctor.Run(cfg)
@@ -476,6 +503,29 @@ func runDoctor(yakosRoot string, args []string) {
 		os.Exit(1)
 	}
 	os.Exit(0)
+}
+
+// authProbeRuntime is auth.ProbeRuntime. A test replaces it so the policy report's
+// agy check never reads the real OS keyring.
+var authProbeRuntime = auth.ProbeRuntime
+
+// policyProbeRuntime adapts auth.ProbeRuntime to the probe the policy report takes.
+func policyProbeRuntime(ctx context.Context, id string) doctor.RuntimeProbe {
+	r := authProbeRuntime(ctx, id)
+	return doctor.RuntimeProbe{CLIPresent: r.CLIPresent, Authed: r.Authed, Note: r.Note}
+}
+
+// applyPolicyFacts sets what the --policy report needs and the doctor package
+// cannot compute itself: where the binary lives, what the interactive package
+// can start, and the sign-in probe.
+func applyPolicyFacts(cfg *doctor.Config, yakosRoot, exeRoot string) {
+	cfg.PolicyBashTreePresent = passthrough.BashYakosExists(exeRoot)
+	// Installed (node and the bundle), not enabled: only a running console knows
+	// whether it was started with --console-structured-questions, so here a
+	// missing key is reported as the low heads-up, not the medium finding.
+	_, sdkErr := interactive.NewSDKEngineFactory(yakosRoot)
+	cfg.PolicySDKSidecarSelectable = sdkErr == nil
+	cfg.PolicyProbeRuntime = policyProbeRuntime
 }
 
 // runRefresh implements `yakos refresh` natively in Go.

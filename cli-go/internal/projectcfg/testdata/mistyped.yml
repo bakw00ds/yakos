@@ -1,0 +1,5 @@
+default-runtime: 5
+default-fallback: codex
+per-domain:
+  - ui
+  - docs

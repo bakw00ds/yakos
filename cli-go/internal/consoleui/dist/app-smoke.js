@@ -280,6 +280,230 @@ async function treeRescanTest() {
   if (fetched.join() !== '.') ftFail('unrendered top-level dir must reload the root: ' + fetched);
 }
 
+// ── K-132 (P0a): runtime pins — pane runtime/model selectors + dispatch body ──
+function chatFail(m) { process.stderr.write('FAIL: chat-pane: ' + m + '\n'); process.exit(1); }
+function chatPaneTest() {
+  var cp = global.__yakosChatPanes;
+  if (!cp) chatFail('window.__yakosChatPanes not exposed');
+  function same(what, got, want) {
+    if (JSON.stringify(got) !== JSON.stringify(want)) {
+      chatFail(what + ': got ' + JSON.stringify(got) + ', want ' + JSON.stringify(want));
+    }
+  }
+  function has(what, hay, needle) {
+    if (hay.indexOf(needle) < 0) chatFail(what + ': missing ' + needle + ' in ' + hay);
+  }
+  function lacks(what, hay, needle) {
+    if (hay.indexOf(needle) >= 0) chatFail(what + ': unexpected ' + needle + ' in ' + hay);
+  }
+  function mkPane(id, runtime, model) {
+    var p = cp.makePane(id, 'conv-' + id);
+    if (runtime !== undefined) p.runtime = runtime;
+    if (model !== undefined) p.model = model;
+    return p;
+  }
+  // The model <select> contents alone, so "no opus" cannot be satisfied by another control.
+  function modelSelect(html) {
+    var m = /<select class="pane-model-select"[^>]*>([\s\S]*?)<\/select>/.exec(html);
+    if (!m) chatFail('no model select in header: ' + html);
+    return m[1];
+  }
+
+  // Constants: 'auto' first (the default), 'gemini' gone.
+  same('RUNTIMES', cp.RUNTIMES, ['auto', 'claude', 'codex', 'agy']);
+  same('MODEL_TIERS', cp.MODEL_TIERS, ['haiku', 'sonnet', 'opus', 'fable']);
+  same('MODEL_ALIASES', cp.MODEL_ALIASES, ['cheap', 'balanced', 'best', 'reasoning', 'frontier']);
+
+  // New panes follow the agent's own pin: runtime 'auto', no model override.
+  var fresh = mkPane('smoke-fresh');
+  same('makePane defaults', [fresh.runtime, fresh.model], ['auto', '']);
+
+  // modelOptionsFor: tiers are claude-only; aliases are valid on every runtime.
+  ['claude', 'codex', 'agy', 'auto', 'gemini', undefined].forEach(function(r) {
+    var o = cp.modelOptionsFor(r);
+    same('modelOptionsFor(' + r + ') leads with the default', o[0], '');
+    if (o.indexOf('balanced') < 0) chatFail('modelOptionsFor(' + r + ') lacks the balanced alias: ' + o);
+    if ((o.indexOf('opus') >= 0) !== (r === 'claude')) chatFail('modelOptionsFor(' + r + ') has the wrong tier set: ' + o);
+  });
+
+  // normalizePaneItem: a persisted pane from an older build is made valid again.
+  [
+    // [label, persisted record, runtime, model]
+    ['stale gemini pane', { runtime: 'gemini', model: 'opus' }, 'auto', ''],
+    ['codex pane holding a claude tier', { runtime: 'codex', model: 'opus' }, 'codex', ''],
+    ['codex pane keeps an alias', { runtime: 'codex', model: 'balanced' }, 'codex', 'balanced'],
+    ['claude pane keeps its tier', { runtime: 'claude', model: 'opus' }, 'claude', 'opus'],
+    ['claude pane keeps an alias', { runtime: 'claude', model: 'cheap' }, 'claude', 'cheap'],
+    ['legacy claude/sonnet pane', { runtime: 'claude', model: 'sonnet' }, 'claude', 'sonnet'],
+    ['auto pane holding a tier', { runtime: 'auto', model: 'sonnet' }, 'auto', ''],
+    ['missing runtime', { model: 'balanced' }, 'auto', 'balanced'],
+    ['unknown model id', { runtime: 'claude', model: 'gpt-5' }, 'claude', ''],
+    ['non-string fields', { runtime: 7, model: {} }, 'auto', ''],
+    ['empty record', {}, 'auto', ''],
+    ['null record', null, 'auto', ''],
+  ].forEach(function(c) {
+    var n = cp.normalizePaneItem(c[1]);
+    same('normalizePaneItem: ' + c[0], [n.runtime, n.model], [c[2], c[3]]);
+  });
+  function rest(n) { return [n.agent, n.effort, n.interactive]; }
+  same('normalizePaneItem defaults', rest(cp.normalizePaneItem({})), ['claude', '', false]);
+  same('normalizePaneItem keeps agent/effort/interactive',
+    rest(cp.normalizePaneItem({ agent: 'reviewer', effort: 'high', interactive: true })), ['reviewer', 'high', true]);
+  same('normalizePaneItem rejects an unknown effort', cp.normalizePaneItem({ effort: 'extreme' }).effort, '');
+  // Every selection the header can offer survives a save + reload unchanged.
+  cp.RUNTIMES.forEach(function(r) {
+    cp.modelOptionsFor(r).forEach(function(m) {
+      var n = cp.normalizePaneItem({ runtime: r, model: m });
+      same('reload round-trip ' + r + '/' + (m || 'default'), [n.runtime, n.model], [r, m]);
+    });
+  });
+
+  // Restore from localStorage goes through normalizePaneItem: a pane persisted
+  // by an older build (gemini, or a claude tier on a codex pane) comes back valid.
+  localStorage.setItem('yakos_chat_panes_v1', JSON.stringify([
+    { id: 'p-old', conversationId: 'c-old', runtime: 'gemini', model: 'opus', agent: 'claude' },
+    { id: 'p-mix', conversationId: 'c-mix', runtime: 'codex', model: 'opus', agent: 'reviewer', effort: 'high', interactive: true },
+    { id: 'p-ok', conversationId: 'c-ok', runtime: 'claude', model: 'sonnet' },
+    { id: 'p-new', conversationId: 'c-new', runtime: 'auto', model: 'balanced' },
+    { runtime: 'codex', model: 'balanced' },
+  ]));
+  var restored = cp.loadPanes();
+  localStorage.removeItem('yakos_chat_panes_v1');
+  same('restored panes', restored.map(function(p) { return [p.id, p.runtime, p.model, p.agent, p.effort, p.interactive]; }), [
+    ['p-old', 'auto', '', 'claude', '', false],
+    ['p-mix', 'codex', '', 'reviewer', 'high', true],
+    ['p-ok', 'claude', 'sonnet', 'claude', '', false],
+    ['p-new', 'auto', 'balanced', 'claude', '', false],
+  ]);
+
+  // Header: runtime options come from RUNTIMES, model options from the runtime.
+  var autoHtml = cp.buildPaneHeaderHTML(fresh);
+  has('default header', autoHtml, '<option value="auto" selected title="');
+  has('default header', autoHtml, '<option value="claude">claude</option>');
+  has('default header', autoHtml, 'value="codex"');
+  has('default header', autoHtml, 'value="agy"');
+  lacks('default header', autoHtml, 'value="gemini"');
+  has('default header', autoHtml, 'aria-label="Model">');
+  var autoModels = modelSelect(autoHtml);
+  has('default pane model options', autoModels, '<option value="" selected>default</option>');
+  has('default pane model options', autoModels, 'value="balanced"');
+  lacks('default pane model options', autoModels, 'value="opus"');
+  var codexHtml = cp.buildPaneHeaderHTML(mkPane('smoke-codex', 'codex', 'balanced'));
+  has('codex header', codexHtml, '<option value="codex" selected');
+  var codexModels = modelSelect(codexHtml);
+  has('codex model options', codexModels, '<option value="">default</option>');
+  has('codex model options', codexModels, '<option value="balanced" selected>balanced</option>');
+  lacks('codex model options', codexModels, 'value="opus"');
+  var claudeModels = modelSelect(cp.buildPaneHeaderHTML(mkPane('smoke-claude', 'claude', 'opus')));
+  has('claude model options', claudeModels, '<option value="opus" selected>opus</option>');
+  has('claude model options', claudeModels, 'value="balanced"');
+  // 'auto' counts as a streaming runtime: the idle cost label is the en-dash,
+  // not "cost unavailable" (the real runtime is unknown until dispatch).
+  has('auto pane cost label', autoHtml, 'id="pane-cost-smoke-fresh">–</span>');
+  has('codex pane cost label', codexHtml, 'id="pane-cost-smoke-codex">cost unavailable</span>');
+
+  // Runtime change: a model the new runtime rejects resets to default and one it
+  // still accepts is kept; the pick is persisted and the header re-rendered so
+  // the model select shows the new runtime's options.  A fake header + runtime
+  // select stand in for the DOM.
+  var fakeHeader = { innerHTML: '' };
+  var fakeSel = { focused: 0, addEventListener: function() {}, focus: function() { this.focused++; } };
+  var realGetById = document.getElementById;
+  document.getElementById = function(id) {
+    if (id === 'pane-header-smoke-rt') return fakeHeader;
+    if (id === 'pane-runtime-smoke-rt') return fakeSel;
+    return null;
+  };
+  try {
+    var rt = mkPane('smoke-rt', 'claude', 'opus');
+    cp.changeRuntime(rt, 'codex');
+    same('claude->codex', [rt.runtime, rt.model], ['codex', '']);
+    has('header re-rendered', fakeHeader.innerHTML, '<option value="codex" selected');
+    lacks('re-rendered model options', modelSelect(fakeHeader.innerHTML), 'value="opus"');
+    var savedRaw = localStorage.getItem('yakos_chat_panes_v1');
+    if (!savedRaw) chatFail('runtime change did not persist the pane state');
+    var saved = JSON.parse(savedRaw);
+    same('persisted pane', [saved[0].id, saved[0].runtime, saved[0].model], ['smoke-rt', 'codex', '']);
+    rt.model = 'balanced';
+    cp.changeRuntime(rt, 'agy');
+    same('codex->agy keeps an alias', [rt.runtime, rt.model], ['agy', 'balanced']);
+    cp.changeRuntime(rt, 'claude');
+    same('agy->claude keeps an alias', [rt.runtime, rt.model], ['claude', 'balanced']);
+    rt.model = 'haiku';
+    cp.changeRuntime(rt, 'claude');
+    same('re-picking claude keeps its tier', [rt.runtime, rt.model], ['claude', 'haiku']);
+    cp.changeRuntime(rt, 'auto');
+    same('claude->auto drops a tier', [rt.runtime, rt.model], ['auto', '']);
+    // Re-rendering replaces the runtime select, so focus must go back to it, but
+    // only when it was the focused control.
+    document.activeElement = { id: 'pane-runtime-smoke-rt' };
+    cp.changeRuntime(rt, 'codex');
+    same('focus restored to the runtime select', fakeSel.focused, 1);
+    document.activeElement = { id: 'pane-model-smoke-rt' };
+    cp.changeRuntime(rt, 'agy');
+    same('focus not taken from another control', fakeSel.focused, 1);
+  } finally {
+    document.getElementById = realGetById;
+    delete document.activeElement;
+    localStorage.removeItem('yakos_chat_panes_v1');
+  }
+
+  // Dispatch body: 'auto' is sent as '' so the server resolves the runtime.
+  var b = cp.buildDispatchBody(fresh, 'write tests', 'sess-1');
+  same('auto pane dispatches runtime ""', b.runtime, '');
+  same('default pane dispatches model ""', b.model, '');
+  same('base dispatch fields', Object.keys(b).sort(),
+    ['agent', 'conversationId', 'model', 'operatorId', 'runtime', 'sessionId', 'task']);
+  same('carried dispatch fields', [b.agent, b.task, b.sessionId, b.conversationId],
+    ['claude', 'write tests', 'sess-1', 'conv-smoke-fresh']);
+  if (typeof b.operatorId !== 'string' || !b.operatorId) chatFail('dispatch body lacks operatorId: ' + b.operatorId);
+  [['claude', 'opus'], ['codex', 'balanced'], ['agy', '']].forEach(function(c) {
+    var d = cp.buildDispatchBody(mkPane('smoke-d-' + c[0], c[0], c[1]), 't', 's');
+    same(c[0] + ' pane dispatches its runtime and model', [d.runtime, d.model], c);
+  });
+  var ep = mkPane('smoke-eff', 'claude', 'sonnet');
+  ep.effort = 'high';
+  ep.interactive = true;
+  var eb = cp.buildDispatchBody(ep, 't', 's');
+  same('effort + interactive are sent when set', [eb.effort, eb.interactive], ['high', true]);
+  ep.effort = '';
+  ep.interactive = false;
+  eb = cp.buildDispatchBody(ep, 't', 's');
+  same('effort + interactive are omitted when unset', ['effort' in eb, 'interactive' in eb], [false, false]);
+  // worktreeMode is IDE-pane-only and needs review mode (off here): never sent.
+  ep.ideEmbedded = true;
+  same('no worktreeMode without review mode', 'worktreeMode' in cp.buildDispatchBody(ep, 't', 's'), false);
+
+  // Send path: sendPaneMessage must dispatch the buildDispatchBody result, and
+  // show the "tool output not available" notice for an explicit non-claude
+  // runtime only ('auto' may resolve to claude, so it claims nothing).
+  var posted = [];
+  var realFetch = global.fetch;
+  global.fetch = function(url, o) {
+    posted.push({ url: url, body: JSON.parse(o.body) });
+    return Promise.resolve({ ok: true, status: 202, headers: { get: function() { return null; } } });
+  };
+  var realGetById2 = document.getElementById;
+  document.getElementById = function(id) { return /^pane-input-/.test(id) ? { value: 'ship it' } : null; };
+  try {
+    [['auto', '', 0], ['claude', 'claude', 0], ['codex', 'codex', 1], ['agy', 'agy', 1]].forEach(function(c) {
+      var sp = mkPane('smoke-s-' + c[0], c[0], '');
+      cp.sendPaneMessage(sp);
+      clearInterval(sp.elapsedTimer);
+      var last = posted[posted.length - 1];
+      same(c[0] + ' send posts to the dispatch endpoint', last && last.url, '/api/chat/dispatch');
+      same(c[0] + ' send posts the runtime the server should resolve', [last.body.runtime, last.body.task, last.body.conversationId],
+        [c[1], 'ship it', 'conv-smoke-s-' + c[0]]);
+      same(c[0] + ' send shows the buffered-runtime notice only for explicit non-claude runtimes',
+        sp.messages.filter(function(m) { return m._isRuntimeAffordance; }).length, c[2]);
+    });
+  } finally {
+    global.fetch = realFetch;
+    document.getElementById = realGetById2;
+  }
+}
+try { chatPaneTest(); } catch (e) { chatFail(String(e && e.stack || e)); }
+
 treeRescanTest().then(function() {
   process.stdout.write(
     'PASS: app.js loaded without error; data-theme="' + _themeAttr +

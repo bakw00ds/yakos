@@ -41,9 +41,11 @@ import (
 	runtimeenv "github.com/bakw00ds/yakos/internal/runtime"
 )
 
-// KnownRuntimes is the ordered list of built-in runtime IDs. Mirrors
-// YK_RT_KNOWN_BUILTIN in runtime-resolve.sh.
-var KnownRuntimes = []string{"claude", "claude-sdk", "codex", "agy", "antigravity-sdk", "gemini"}
+// KnownRuntimes is the ordered list of built-in runtime IDs `yakos start` can
+// launch. It mirrors YK_RT_KNOWN_BUILTIN in runtime-resolve.sh minus gemini: the
+// deprecation shim is past its removal date, so `--runtime gemini` is rejected
+// as unknown and agy is the successor (K-132).
+var KnownRuntimes = []string{"claude", "claude-sdk", "codex", "agy", "antigravity-sdk"}
 
 // Config controls all inputs to the start command.
 type Config struct {
@@ -326,7 +328,7 @@ func Run(cfg Config) (*Banner, error) {
 
 	// Warn on auth not configured even if not bailing.
 	if !authOk && !cfg.DryRun && !cfg.PrintAgents {
-		_, _ = fmt.Fprintf(ew, "WARN: %q auth not detected; the runtime may prompt or fail. Run 'yakos auth login %s' to fix.\n", runtime, runtime)
+		_, _ = fmt.Fprintf(ew, "WARN: %q auth not detected; the runtime may prompt or fail. Run 'yakos auth login %s' to fix.\n", runtime, authLoginTarget(runtime))
 	}
 
 	// Skip PATH check when a test has injected ExecFn, when --no-repl is set
@@ -716,6 +718,18 @@ func checkRuntimeAuth(rt string, env map[string]string) bool {
 	}
 }
 
+// authLoginTarget is the runtime to name in a "yakos auth login <id>" hint.
+// `yakos start --runtime claude-sdk` launches Claude Code, which runs on the
+// claude login, and `yakos auth login claude-sdk` no longer logs anything in
+// (the Agent SDK needs ANTHROPIC_API_KEY, K-137), so that hint names claude.
+// cli/lib/start.sh does the same (AUTH_LOGIN_TARGET).
+func authLoginTarget(rt string) string {
+	if rt == "claude-sdk" {
+		return "claude"
+	}
+	return rt
+}
+
 // runtimeBinary returns the CLI binary name for a runtime ID.
 func runtimeBinary(rt string) string {
 	switch rt {
@@ -818,7 +832,7 @@ func printBanner(w io.Writer, name, projectRepo, controlDir, runtime, caps strin
 
 	authStr := "OK"
 	if !authOk {
-		authStr = fmt.Sprintf("NOT CONFIGURED (run: yakos auth login %s)", runtime)
+		authStr = fmt.Sprintf("NOT CONFIGURED (run: yakos auth login %s)", authLoginTarget(runtime))
 	}
 
 	permStr := "bypassPermissions"
@@ -1210,16 +1224,15 @@ format, and exec's the session. <name> is inferred from the cwd if
 not supplied.
 
 Runtime selection:
-    --runtime <id>        claude (default) | codex | gemini | agy
+    --runtime <id>        claude (default) | codex | agy
                           Falls back to YAKOS_RUNTIME env or
                           ~/.yakos-state/default-runtime.
 
 Permission mode:
     --safe                Prompts on (claude: --permission-mode default;
-                          codex: default sandbox; gemini: default).
+                          codex: default sandbox).
     (default)             bypass — claude bypassPermissions / codex
-                          --dangerously-bypass-approvals-and-sandbox /
-                          gemini --approval-mode=yolo.
+                          --dangerously-bypass-approvals-and-sandbox.
     --allow-root          Opt-in: allow bypass mode when running as root
                           (e.g. inside a container). Has no effect with --safe.
 
@@ -1300,7 +1313,7 @@ Examples:
     yakos start                       # auto-detect, claude (default)
     yakos start myapp
     yakos start myapp --runtime codex
-    yakos start myapp --runtime gemini --safe
+    yakos start myapp --runtime agy
     yakos start myapp --dry-run
     yakos start myapp --allow-root    # container/root bypass mode
     yakos start myapp --no-repl       # web console only, no REPL

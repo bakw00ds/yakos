@@ -4,11 +4,20 @@
 //
 // # Storage layout
 //
-//	<workDir>/chats/<conversationId>.ndjson
+//	<workDir>/chats/<conversationId>.ndjson      the transcript
+//	<workDir>/chats/<conversationId>.meta.json   per-conversation meta (below)
 //
 // Each NDJSON line is a TranscriptEntry.  New lines are appended with O_APPEND
 // so concurrent writers from the same process are safe; flock provides
 // cross-process safety for tools that read/tail the file.
+//
+// # Conversation meta
+//
+// The meta file maps a runtime to that runtime's own session id for the
+// conversation (today only claude's, so a follow-up one-shot turn can pass
+// `--resume`). It is a small JSON object rewritten atomically, kept out of the
+// transcript so readers of the transcript (the UI backfill, share, export) see
+// no new entry kinds.
 //
 // # Path traversal guard
 //
@@ -24,17 +33,22 @@
 package consoleui
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
@@ -97,7 +111,7 @@ type TranscriptEntry struct {
 	//     the failure rather than ending with only a user turn.
 	Text string `json:"text"`
 
-	// Runtime is the dispatch runtime (claude|codex|agy|gemini), set on user turns.
+	// Runtime is the dispatch runtime (claude|codex|agy), set on user turns.
 	Runtime string `json:"runtime,omitempty"`
 
 	// Model is the resolved model tier, set on user turns and summary turns.
@@ -117,6 +131,10 @@ type TranscriptEntry struct {
 type Transcripts struct {
 	// chatsDir is the absolute path to <workDir>/chats/.
 	chatsDir string
+
+	// metaMu serializes read-modify-write of the per-conversation meta files
+	// within this process.
+	metaMu sync.Mutex
 }
 
 // NewTranscripts constructs a Transcripts rooted at <workDir>/chats.
@@ -344,29 +362,274 @@ func (tr *Transcripts) FirstUserOwner(conversationID string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path) //nolint:gosec // path built and validated by transcriptPath
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", nil
 		}
 		return "", fmt.Errorf("transcript: read: %w", err)
 	}
-	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	for _, line := range lines {
-		if line == "" {
-			continue
+	defer func() { _ = f.Close() }()
+	// The owner is on the first user turn, which is the first line of a real
+	// transcript, so stop there instead of reading a conversation that may be
+	// many megabytes: every dispatch asks (see handleChatDispatch).
+	r := bufio.NewReaderSize(f, 64<<10)
+	for {
+		line, readErr := r.ReadBytes('\n')
+		if len(bytes.TrimSpace(line)) > 0 {
+			var entry TranscriptEntry
+			if json.Unmarshal(line, &entry) == nil && entry.Role == RoleUser && entry.OperatorID != "" {
+				return entry.OperatorID, nil
+			}
 		}
-		var entry TranscriptEntry
-		if err := json.Unmarshal([]byte(line), &entry); err != nil {
-			continue
-		}
-		if entry.Role == RoleUser && entry.OperatorID != "" {
-			return entry.OperatorID, nil
+		if readErr != nil {
+			if readErr == io.EOF {
+				return "", nil
+			}
+			return "", fmt.Errorf("transcript: read: %w", readErr)
 		}
 	}
-	return "", nil
 }
 
 // errTranscriptForbidden is returned by Read when the caller's operatorID does
 // not match the conversation owner.  HTTP handler must return 403.
 var errTranscriptForbidden = errors.New("transcript: access denied (operator mismatch)")
+
+// ---- conversation meta: native session ids -------------------------------------
+
+// maxMetaBytes bounds how much of a meta file is read. Real files are under a
+// hundred bytes.
+const maxMetaBytes = 64 << 10
+
+// conversationMeta is the content of <conversationId>.meta.json.
+type conversationMeta struct {
+	// NativeSessions maps a runtime name to that runtime's own session id for
+	// this conversation.
+	NativeSessions map[string]string `json:"native_sessions,omitempty"`
+
+	// Owner is the operator the native sessions belong to: the one whose turn
+	// produced them. A native session carries the whole conversation (every
+	// prompt, answer and tool result), so resuming it is reading it. It is
+	// handed out only to its owner; without this, any operator who knew a
+	// conversationId could `--resume` someone else's session once the owner's
+	// turn had ended (sec-324 F1).
+	Owner string `json:"owner_operator_id,omitempty"`
+
+	// ResumeFailures counts, per runtime, the consecutive turns that tried to
+	// resume the stored session and failed. A session that is gone is normally
+	// recognised from the CLI's own message; the count is the backstop for a
+	// message that changes wording, so a dead id cannot fail every turn forever.
+	ResumeFailures map[string]int `json:"resume_failures,omitempty"`
+}
+
+// errNativeSessionOwner is returned when a native session operation names an
+// operator other than the one the conversation's sessions belong to.
+var errNativeSessionOwner = errors.New("transcript: native session belongs to another operator")
+
+// metaPath returns the meta file path for a conversation, validated exactly like
+// transcriptPath.
+func (tr *Transcripts) metaPath(id string) (string, error) {
+	if err := validateConversationID(id); err != nil {
+		return "", err
+	}
+	clean := filepath.Clean(filepath.Join(tr.chatsDir, id+".meta.json"))
+	if !strings.HasPrefix(clean, tr.chatsDir+string(filepath.Separator)) {
+		return "", errors.New("transcript: conversation_id escapes chats directory")
+	}
+	return clean, nil
+}
+
+// readMeta loads a meta file. Anything unreadable, oversize or malformed is an
+// empty meta (the file is rewritten whole on the next change), and any stored
+// session id that fails the argv-safety check is dropped: the file is local
+// state, but its ids end up on a command line.
+func readMeta(path string) conversationMeta {
+	var m conversationMeta
+	f, err := os.Open(path) //nolint:gosec // path built by metaPath
+	if err != nil {
+		return m
+	}
+	defer func() { _ = f.Close() }()
+	data, err := io.ReadAll(io.LimitReader(f, maxMetaBytes+1))
+	if err != nil || len(data) > maxMetaBytes {
+		return conversationMeta{}
+	}
+	if err := json.Unmarshal(data, &m); err != nil {
+		return conversationMeta{}
+	}
+	for rt, id := range m.NativeSessions {
+		if !isKnownRuntime(rt) || !runtime.ValidSessionID(id) {
+			delete(m.NativeSessions, rt)
+		}
+	}
+	// The owner is only ever compared, never used on a command line or in a path,
+	// so it is not held to the identity-field alphabet (a certificate CN can
+	// carry '@' or a space); a value too long to be a name is a damaged file.
+	if len(m.Owner) > 512 {
+		return conversationMeta{}
+	}
+	for rt, n := range m.ResumeFailures {
+		if !isKnownRuntime(rt) || n <= 0 || n > maxResumeFailures {
+			delete(m.ResumeFailures, rt)
+		}
+	}
+	return m
+}
+
+// maxResumeFailures bounds the stored failure count (a damaged file cannot
+// make it huge); resumeFailureLimit in the handler is far below it.
+const maxResumeFailures = 1000
+
+// writeMeta replaces the meta file atomically (temp file in the same directory,
+// then rename) with owner-only permissions, like the transcript itself.
+func (tr *Transcripts) writeMeta(path string, m conversationMeta) error {
+	dir := filepath.Dir(path)
+	if err := statepath.SecureDir(dir); err != nil {
+		return fmt.Errorf("transcript: %w", err)
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("transcript: marshal meta: %w", err)
+	}
+	tmp, err := os.CreateTemp(dir, ".meta-*.tmp") // 0600
+	if err != nil {
+		return fmt.Errorf("transcript: meta temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("transcript: write meta: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("transcript: write meta: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		_ = os.Remove(tmpName)
+		return fmt.Errorf("transcript: replace meta: %w", err)
+	}
+	return nil
+}
+
+// NativeSession returns the runtime's own session id stored for the
+// conversation, or "" when there is none (a first turn, an unknown runtime, an
+// invalid conversation id, a damaged file) or when operatorID is not the
+// operator the sessions belong to. The operator is a parameter, not a separate
+// check, so no caller can read a session without saying whose it must be.
+func (tr *Transcripts) NativeSession(conversationID, rt, operatorID string) string {
+	path, err := tr.metaPath(conversationID)
+	if err != nil || operatorID == "" {
+		return ""
+	}
+	tr.metaMu.Lock()
+	defer tr.metaMu.Unlock()
+	m := readMeta(path)
+	if m.Owner != operatorID {
+		return ""
+	}
+	return m.NativeSessions[rt]
+}
+
+// SetNativeSession records the runtime's own session id for the conversation on
+// behalf of operatorID, who becomes the owner of the conversation's sessions if
+// it has none yet. It refuses a runtime this package does not know, an id that
+// is not safe to put on a command line, and an operator other than the owner, so
+// what is stored can always be used as it stands and only by whom it belongs to.
+// A stored id means a turn worked, so the resume failure count resets.
+func (tr *Transcripts) SetNativeSession(conversationID, rt, sessionID, operatorID string) error {
+	if !isKnownRuntime(rt) {
+		return errors.New("transcript: unknown runtime for native session")
+	}
+	if !runtime.ValidSessionID(sessionID) {
+		return errors.New("transcript: invalid native session id")
+	}
+	if operatorID == "" {
+		return errors.New("transcript: native session needs an operator")
+	}
+	path, err := tr.metaPath(conversationID)
+	if err != nil {
+		return err
+	}
+	tr.metaMu.Lock()
+	defer tr.metaMu.Unlock()
+	m := readMeta(path)
+	if m.Owner != "" && m.Owner != operatorID {
+		return errNativeSessionOwner
+	}
+	if m.Owner == operatorID && m.NativeSessions[rt] == sessionID && m.ResumeFailures[rt] == 0 {
+		return nil
+	}
+	m.Owner = operatorID
+	if m.NativeSessions == nil {
+		m.NativeSessions = make(map[string]string)
+	}
+	m.NativeSessions[rt] = sessionID
+	delete(m.ResumeFailures, rt)
+	return tr.writeMeta(path, m)
+}
+
+// ClearNativeSession forgets the runtime's stored session id on behalf of
+// operatorID, so the next turn starts a fresh native session. Clearing what is
+// not stored is not an error; clearing another operator's session is refused.
+func (tr *Transcripts) ClearNativeSession(conversationID, rt, operatorID string) error {
+	path, err := tr.metaPath(conversationID)
+	if err != nil {
+		return err
+	}
+	tr.metaMu.Lock()
+	defer tr.metaMu.Unlock()
+	m := readMeta(path)
+	if m.Owner != "" && m.Owner != operatorID {
+		return errNativeSessionOwner
+	}
+	_, hadSession := m.NativeSessions[rt]
+	_, hadFailures := m.ResumeFailures[rt]
+	if !hadSession && !hadFailures {
+		return nil
+	}
+	delete(m.NativeSessions, rt)
+	delete(m.ResumeFailures, rt)
+	return tr.writeMeta(path, m)
+}
+
+// ResumeFailures returns how many consecutive turns have failed while resuming
+// the runtime's stored session (0 for an operator who is not the owner).
+func (tr *Transcripts) ResumeFailures(conversationID, rt, operatorID string) int {
+	path, err := tr.metaPath(conversationID)
+	if err != nil || operatorID == "" {
+		return 0
+	}
+	tr.metaMu.Lock()
+	defer tr.metaMu.Unlock()
+	m := readMeta(path)
+	if m.Owner != operatorID {
+		return 0
+	}
+	return m.ResumeFailures[rt]
+}
+
+// NoteResumeFailure records that a turn resumed the runtime's stored session and
+// failed, and returns how many such turns in a row there have been. It never
+// counts for an operator who is not the owner.
+func (tr *Transcripts) NoteResumeFailure(conversationID, rt, operatorID string) (int, error) {
+	if !isKnownRuntime(rt) {
+		return 0, errors.New("transcript: unknown runtime for native session")
+	}
+	path, err := tr.metaPath(conversationID)
+	if err != nil {
+		return 0, err
+	}
+	tr.metaMu.Lock()
+	defer tr.metaMu.Unlock()
+	m := readMeta(path)
+	if m.Owner == "" || m.Owner != operatorID {
+		return 0, errNativeSessionOwner
+	}
+	if m.ResumeFailures == nil {
+		m.ResumeFailures = make(map[string]int)
+	}
+	m.ResumeFailures[rt]++
+	n := m.ResumeFailures[rt]
+	return n, tr.writeMeta(path, m)
+}

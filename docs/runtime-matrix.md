@@ -249,8 +249,10 @@ agy --add-dir <workdir> --sandbox --dangerously-skip-permissions [--model <id>] 
 - Resume: `--conversation <id>` keeps the `conversation_id`, continues the step
   numbering, and reports usage cumulatively across turns (recorded). The total
   spans separate processes: turn 2's `result.usage` is turn 1's result plus turn
-  2's own step usage. Account one run from the DONE step usage in its own stream
-  (it equals the run's own usage), not from `result.usage` of a resumed turn.
+  2's own step usage. After the first turn, account one run from the DONE step
+  usage in its own stream (it equals the run's own usage), not from
+  `result.usage` of a resumed turn. On the first turn `result.usage` is already
+  the run's own usage.
 - **Containment.** Under `--sandbox --dangerously-skip-permissions`, agy's macOS
   Seatbelt sandbox blocks writes outside the workspace by default but leaves
   file reads and outbound network unrestricted, and the model can escalate out
@@ -280,12 +282,12 @@ When the operator passes a flag the chosen runtime can't honor,
 `yakos start` prints a NOTE-level warning and proceeds without
 that flag. Examples:
 
-- `--ide` is claude-only. On codex/gemini, prints
+- `--ide` is claude-only. On codex/agy, prints
   `NOTE: --ide is claude-specific; ignored for <runtime>.`
 - `--bare` is claude-only. Same treatment.
 - `--strict-mcp` is claude-only.
 - `--continue` works only for claude. codex has session-resumption
-  via `codex resume` (different shape); gemini has `-r/--resume`.
+  via `codex resume` (different shape).
 
 Hard controls (path-allowlist, secret-scan) that depend on hooks
 behave differently per runtime:
@@ -296,8 +298,6 @@ behave differently per runtime:
   config.toml format. **Out of scope for v0.4.0** — operator can
   install yakOS hooks manually per
   [codex hooks docs](https://developers.openai.com/codex/hooks).
-- gemini: 11-event hook surface, JSON I/O. yakOS conversion
-  planned for v0.4.1.
 
 ## Auth model
 
@@ -353,7 +353,75 @@ model: o4-mini
 right CLI in non-interactive mode, captures the output, and returns
 to the caller. The lead (in any runtime) calls this via Bash. This
 lets a project mix runtimes per-agent — e.g., orchestration on
-claude, code-review on codex, doc-writing on gemini.
+claude, code-review on codex, doc-writing on agy.
+
+### Go dispatch now honors `runtime:`
+
+On every Go transport (daemon, MCP, console chat, Flows, `YAKOS_IMPL=go`
+CLI) the runtime is picked in this order, highest first, the same as
+`cli/lib/dispatch.sh`:
+
+1. An explicit runtime: `yakos dispatch --runtime`, `Params.Runtime` (MCP,
+   JSON-RPC, REST), or a console pane set to a specific runtime.
+2. The agent's `runtime:` frontmatter.
+3. `.yakos.yml` `per-domain.<agent domain>`.
+4. `.yakos.yml` `default-runtime`.
+5. `YAKOS_RUNTIME` (CLI one-shot path only; the daemon never reads it).
+6. `~/.yakos-state/default-runtime`.
+7. `claude`.
+
+A bare agent name that is itself a runtime (`yakos dispatch codex "..."`)
+selects that runtime when the agent has no pin of its own, and counts as
+explicit. Agent files named after a runtime (`claude.md`, `codex.md`,
+`agy.md`) are skipped with a warning, and `yakos validate` rejects them,
+because one would shadow that runtime's own agent.
+
+For a pin or a project default the candidate chain is the chosen runtime,
+then the agent's `runtime-fallback`, then `.yakos.yml` `default-fallback`.
+The first candidate whose CLI is on PATH and that looks signed in wins:
+
+| Runtime | Looks signed in when |
+|---|---|
+| claude | The CLI is installed (credentials can live in the keychain or env, so they are not probed). |
+| codex | `OPENAI_API_KEY` is set, or `$CODEX_HOME/auth.json` exists. |
+| agy | `ANTIGRAVITY_API_KEY` or `GEMINI_API_KEY` is set, a yakos keyring entry exists, or `~/.gemini/antigravity-cli/` exists. |
+
+If nothing passes, dispatch fails fast naming each skipped runtime and why
+(e.g. `agy: not signed in; run: yakos auth login agy`). A fallback prints
+one line on stderr and is recorded in the dispatch-log (`runtime_chosen_by`,
+`fallback_from`). A long-lived daemon reuses the probe's answer for 30 seconds
+(5 seconds for a runtime that could not run, so a retry right after a login is
+not told the old answer for long), and the agy keyring lookup in it is bounded
+to 2 seconds and ends when the dispatch is cancelled. `gemini` is no longer a Go runtime; use
+`agy`. Upgrade impact: [UPGRADING.md](../UPGRADING.md).
+
+#### A runtime you name does not fall back
+
+A runtime the operator names (rule 1, or a runtime name used as the agent) is
+operator intent, including intent about where the task is sent, so it never
+quietly becomes another vendor. If it is not installed or not signed in,
+dispatch fails with the runtime, the reason, and the fallbacks it did not use:
+
+```
+dispatch: runtime codex was requested explicitly but cannot run: not signed in; run: yakos auth login codex. Not falling back to claude: an explicit runtime does not use the agent's or the project's fallback list
+dispatch: to allow a fallback for this run, pass --runtime-fallback claude
+```
+
+Only the CLI can opt in: `yakos dispatch ... --runtime codex --runtime-fallback
+claude`. For a named runtime the list replaces the (unused) agent and project
+lists; for any other choice it is tried after them. MCP, JSON-RPC, REST and
+the console have no opt-in. Pins, `.yakos.yml` defaults, `YAKOS_RUNTIME` and the
+state default keep walking the fallback lists, as `cli/lib/dispatch.sh` does.
+
+**Deliberate divergence from bash.** `cli/lib/dispatch.sh` walks the fallback
+lists for an explicit `--runtime` as well. The Go dispatcher does not. K-143
+(the parity matrix) must record this as intended rather than port the bash
+behavior back.
+
+The state default (`~/.yakos-state/default-runtime`) is trusted only when it is
+a regular file owned by you, not group or world writable, in a directory with
+the same properties (not a symlink). A file that fails this is reported and
+ignored.
 
 ## Model tiers
 
@@ -384,6 +452,25 @@ as system prompt, direct `-p`, `--include-partial-messages`):
 Partial streaming is a claude-specific capability. The Chat UI labels buffered
 runtimes clearly so operators know to expect a single response rather than a
 live stream.
+
+## Interactive chat engines (K-137)
+
+The console Chat pane's interactive mode has two engines, both for claude. The
+CLI engine runs `claude --print --input-format stream-json` itself, so it is
+Claude Code under your own login and works for subscription users. The SDK
+engine (`yakos serve --console-structured-questions`) runs a Node sidecar built
+on the Anthropic Agent SDK so `AskUserQuestion` can be answered in the browser.
+Anthropic's terms of 2026-02-19 allow a subscription login only in Claude Code
+and claude.ai, not in the Agent SDK, so the SDK engine is hard-gated: it starts
+only when `ANTHROPIC_API_KEY` holds an API key, it never receives
+`CLAUDE_CODE_OAUTH*` variables or OAuth tokens, and without a key the console
+shows the refusal instead of falling back to the CLI engine or to your login.
+Subscription users stay on the CLI engine. `yakos doctor --policy` reports an SDK
+engine that can be selected without a key. The bash `claude-sdk` runtime (the
+Python Agent SDK, `yakos dispatch --runtime claude-sdk`) follows the same rule:
+its dispatch refuses unless `ANTHROPIC_API_KEY` holds an API key, and the python
+it starts inherits no OAuth variables; its `launch` is claude.sh and is
+unchanged.
 
 ## Jev is not a runtime
 

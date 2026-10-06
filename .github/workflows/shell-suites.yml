@@ -16,6 +16,14 @@
 #                  put FIRST on PATH; otherwise the runner's brew bash 5 would
 #                  quietly run the hooks and the 3.2 job would test nothing.
 #
+# agent-enums      tests/run-agent-enums-test.sh: the agent frontmatter enums, the
+#                  agent files and project agent/skill directories the Go
+#                  dispatcher skips, and a FIFO among the files, on both validators
+#                  (bash and Go) with their findings compared byte for byte. It ran
+#                  in no workflow before. The suite runs under `bash` on PATH and
+#                  again under /bin/bash (3.2 on macOS), and needs bin/yakos, so
+#                  it fails rather than checking only the bash half without it.
+#
 # The Go half of each supervisor suite needs bin/yakos, so each job builds it
 # once. Existing coverage is untouched: hook-parity.yml already runs the budget
 # and shadow suites (bash 5 on ubuntu, bash 3.2 on macOS), so shadow is not
@@ -32,6 +40,8 @@ on:
       - 'cli-go/internal/supervise/**'
       - 'cli-go/internal/decision/**'
       - 'cli-go/internal/budget/**'
+      - 'cli-go/internal/validate/**'
+      - 'cli-go/internal/agentscompose/**'
       - 'cli-go/cmd/yakos/cmd_hook*.go'
       - 'tests/**'
       - 'Makefile'
@@ -47,6 +57,8 @@ on:
       - 'cli-go/internal/supervise/**'
       - 'cli-go/internal/decision/**'
       - 'cli-go/internal/budget/**'
+      - 'cli-go/internal/validate/**'
+      - 'cli-go/internal/agentscompose/**'
       - 'cli-go/cmd/yakos/cmd_hook*.go'
       - 'tests/**'
       - 'Makefile'
@@ -237,6 +249,79 @@ jobs:
           [ -f "$script" ] || { echo "::error::missing $script"; exit 1; }
           # Run the harness itself under the stock shell on macOS.
           if [ "$RUNNER_OS" = macOS ]; then /bin/bash "$script"; else bash "$script"; fi
+
+  # The agent frontmatter, agent file and project directory checks of `yakos
+  # validate`, run on both implementations and compared. Both bash legs run on
+  # both systems; on macOS /bin/bash is 3.2, which is where a bash-only crash or
+  # a missing builtin would show. The suite makes its own FIFOs and symlinks and
+  # runs validate under a time limit, so a pass that blocks fails the job and
+  # does not hang it. Nothing may be skipped here: a skipped fixture is coverage
+  # that quietly went away.
+  agent-enums:
+    name: agent enums (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Require bash 3.x at /bin/bash (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          /bin/bash --version | head -1
+          [ "$(/bin/bash -c 'echo "${BASH_VERSINFO[0]}"')" = 3 ] || { echo "ERROR: /bin/bash is not bash 3.x" >&2; exit 1; }
+          echo "bash on PATH: $(command -v bash) $(bash -c 'echo $BASH_VERSION')"
+
+      - name: Install jq (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        timeout-minutes: 5
+        run: command -v jq >/dev/null 2>&1 || brew install jq
+
+      - name: Install jq and python3 (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        timeout-minutes: 5
+        run: if ! command -v jq >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y jq python3; fi
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: '1.25'
+          cache-dependency-path: cli-go/go.sum
+
+      - name: Build yakos
+        shell: bash
+        timeout-minutes: 10
+        run: make build
+
+      - name: Agent enums suite under bash on PATH and under /bin/bash
+        shell: bash
+        timeout-minutes: 12
+        env:
+          YAKOS_REQUIRE_GO_BINARY: '1'
+          MIN_PASSED: '130'
+        run: |
+          rc=0
+          for sh in bash /bin/bash; do
+            log="$RUNNER_TEMP/agent-enums-$(basename "$sh").log"
+            echo "=== tests/run-agent-enums-test.sh under $sh"
+            "$sh" --version | head -1
+            "$sh" tests/run-agent-enums-test.sh > "$log" 2>&1 || true
+            cat "$log"
+            line="$(grep -E '^agent-enums: [0-9]+ passed, [0-9]+ failed' "$log" | tail -1)"
+            passed="$(printf '%s' "$line" | sed -E 's/^agent-enums: ([0-9]+) passed.*/\1/')"
+            echo "$sh result: $line (floor $MIN_PASSED passed)"
+            grep -qE '^agent-enums: [0-9]+ passed, 0 failed' "$log" || { echo "::error::$sh: the suite reported failures or did not finish"; rc=1; }
+            if grep -E '^  SKIP ' "$log"; then echo "::error::$sh: the suite skipped fixtures; every one must run in CI"; rc=1; fi
+            [ -n "$passed" ] && [ "$passed" -ge "$MIN_PASSED" ] || { echo "::error::$sh: expected at least $MIN_PASSED passed checks, got '$passed'"; rc=1; }
+          done
+          exit "$rc"
 
   # Probe: does the coalesce suite at the macOS hold time (50 ms) still go red
   # when the hook's gate lock is removed? Runs on a scratch copy with the lock

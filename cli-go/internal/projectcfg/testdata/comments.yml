@@ -1,0 +1,6 @@
+# The bash awk reader keeps a trailing comment as part of the value; real YAML
+# does not. Go is the stricter reader here, so this is not in the parity set.
+default-runtime: codex   # preferred
+default-fallback: [claude]  # then claude
+per-domain:
+  ui: agy  # visual work

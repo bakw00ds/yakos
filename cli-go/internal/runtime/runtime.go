@@ -24,9 +24,11 @@ type DispatchRequest struct {
 	// Task is the full task prompt.
 	Task string
 
-	// ModelOverride is the post-alias-expansion concrete tier name
-	// (haiku|sonnet|opus|fable) exported as YAKOS_MODEL_OVERRIDE for the adapter.
-	// Empty string means the adapter uses the model embedded in AgentJSON.
+	// ModelOverride is the model resolved for this adapter's runtime, after
+	// alias expansion: a Claude tier (haiku|sonnet|opus|fable) for claude, a
+	// concrete model id for codex and agy. Empty means no model was pinned: the
+	// claude adapter uses the model embedded in AgentJSON, and codex and agy
+	// pass no model flag so the harness picks its own.
 	ModelOverride string
 
 	// AllowRoot, when true, sets IS_SANDBOX=1 in the subprocess environment
@@ -92,8 +94,9 @@ type Adapter interface {
 	Dispatch(ctx context.Context, req DispatchRequest) (*DispatchResult, error)
 }
 
-// Known lists all registered runtime names.
-var Known = []string{"claude", "codex", "agy", "gemini"}
+// Known lists all registered runtime names. gemini is not among them: the
+// deprecation shim was past its removal date, and agy is its successor.
+var Known = []string{"claude", "codex", "agy"}
 
 // Resolve returns the Adapter for the given runtime name, or an error if the
 // name is not recognized.
@@ -105,9 +108,10 @@ func Resolve(name string) (Adapter, error) {
 		return &CodexAdapter{}, nil
 	case "agy":
 		return &AgyAdapter{}, nil
-	case "gemini":
-		return &GeminiAdapter{}, nil
 	default:
-		return nil, fmt.Errorf("runtime: unknown runtime %q (known: claude, codex, agy, gemini)", name)
+		if name == "gemini" {
+			return nil, fmt.Errorf("runtime: unknown runtime %q (known: claude, codex, agy); gemini was removed, use agy", name)
+		}
+		return nil, fmt.Errorf("runtime: unknown runtime %q (known: claude, codex, agy)", name)
 	}
 }

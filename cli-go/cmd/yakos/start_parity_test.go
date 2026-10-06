@@ -334,7 +334,7 @@ func TestStart_Unit_PrintHelp(t *testing.T) {
 
 // TestStart_Unit_KnownRuntimes verifies that the well-known runtimes are present.
 func TestStart_Unit_KnownRuntimes(t *testing.T) {
-	for _, rt := range []string{"claude", "codex", "gemini", "agy", "antigravity-sdk"} {
+	for _, rt := range []string{"claude", "codex", "agy", "antigravity-sdk"} {
 		found := false
 		for _, k := range start.KnownRuntimes {
 			if k == rt {
@@ -344,6 +344,12 @@ func TestStart_Unit_KnownRuntimes(t *testing.T) {
 		}
 		if !found {
 			t.Errorf("KnownRuntimes should include %q", rt)
+		}
+	}
+	// gemini was retired (K-132).
+	for _, k := range start.KnownRuntimes {
+		if k == "gemini" {
+			t.Error("KnownRuntimes must not include the retired gemini shim")
 		}
 	}
 }
