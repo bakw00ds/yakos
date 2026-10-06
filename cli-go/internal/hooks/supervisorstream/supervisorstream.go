@@ -664,7 +664,7 @@ func trimBuffer(bufferFile string, maxLines int) {
 var logExtraOrder = []string{
 	"ignored_keys", "invalid_keys", "lock", "age_s",
 	"coalesced", "high_risk", "throttled", "backoff_until", "capped", "cap", "ceiling",
-	"agent", "spent_usd", "limit_usd", "ceiling_usd", "budget_reason",
+	"agent", "spent_usd", "limit_usd", "ceiling_usd", "budget_reason", "cause",
 	"pre_filter", "trigger", "tool", "file",
 	"counter", "score_every", "will_score",
 	"dispatch", "model", "runtime", "deadline_s", "deferred_s", "pending", "session_key", "kind",

@@ -258,6 +258,14 @@ func (h *Hook) reportGate(out *hooktype.HookOutput, in hooktype.HookInput, logFi
 			map[string]any{"high_risk": true, "pending": res.pending})
 		return
 	}
+	// K-128 (S3): a budget that could not be read was treated as off (fail open, as
+	// documented). Say so, with the cause, ahead of the decision's own records. A
+	// read that did not fail leaves the cause empty. Bash twin: _ss_gate_report.
+	if cause := lim.bud.cause; cause != "" {
+		h.appendLog(out, in, logFile, "WARN", "pass",
+			"supervisor budget unavailable (cause: "+cause+"); failing open: this launch decision is not checked against the dollar budget",
+			map[string]any{"agent": c.agent, "budget_reason": reasonBudgetUnavailable, "cause": cause})
+	}
 	// Budget warning: every launch decision at warning level says so. At
 	// hard_stop the deny cases below say it instead (or, for a high-risk
 	// launch under the ceiling, the exempt note here).
@@ -376,12 +384,26 @@ func appendSynth(path string, now time.Time, rationale string) {
 	_ = f.Close()
 }
 
+// Why a budget read failed (budgetGate.cause), and the budget_reason of the WARN
+// that says so. The bash twin has three more causes (timeout, no_output, parse):
+// it forks the CLI, this twin evaluates in-process, so only the spend read can
+// fail here. Bash twin: _ss_bud_cause.
+const (
+	budgetCauseReadError    = "read_error"
+	reasonBudgetUnavailable = "budget_unavailable"
+)
+
 // evalBudget reads the supervisor's dollar budget in-process (no fork). Any
-// problem fails open: a zero budgetGate allows the launch. The project's
-// agent_budgets can only lower the limit, never loosen it (budget.Resolve).
+// problem fails open: a zero budgetGate allows the launch, and one whose spend
+// could not be read says so in cause (K-128, S3). A budget that is off (a limit
+// of 0) is not a failure. The project's agent_budgets can only lower the limit,
+// never loosen it (budget.Resolve).
 func (h *Hook) evalBudget(agent string, in hooktype.HookInput) budgetGate {
 	st, err := budget.Evaluate(agent, budget.Options{Project: h.resolveProjectDir(in), Now: h.NowFn})
-	if err != nil || st.LimitUSD <= 0 {
+	if err != nil {
+		return budgetGate{cause: budgetCauseReadError}
+	}
+	if st.LimitUSD <= 0 {
 		return budgetGate{}
 	}
 	return budgetGate{
