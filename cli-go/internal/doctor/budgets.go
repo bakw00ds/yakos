@@ -14,8 +14,15 @@ import (
 // tokens first, says which limit it reached, and is pointed at the matching flag
 // (`--tokens <n>` for a token stop, `<usd>` for a dollar stop). A dollar-only agent
 // reads as it always did.
+//
+// The section reads the project's .yakos.yml (agent_budgets: and supervisor: agent:,
+// see budgetProject) and nothing else from it: every line it prints names an agent
+// that passed budget.ValidateAgent and gives limit numbers. It prints no path and no
+// text taken from the project file, and it never prints budget.Status.Warnings, which
+// carry the YAML error of a malformed project file (the raw file text).
 func (r *runner) checkAgentBudgets() {
 	dir := r.stateDir()
+	project := r.budgetProject()
 	pol, perr := budget.LoadPolicy(dir)
 	type row struct {
 		st  budget.Status
@@ -26,11 +33,11 @@ func (r *runner) checkAgentBudgets() {
 	// own limit and the supervisor's (budget.Evaluate builds that one limit) under
 	// whatever name it gives it, so it gets the supervisor's wording too.
 	supervisors := map[string]bool{"supervisor": true}
-	for _, n := range budget.ProjectSupervisorAgents(r.cfg.ProjectPath) {
+	for _, n := range budget.ProjectSupervisorAgents(project) {
 		supervisors[n] = true
 	}
-	for _, a := range budget.AgentNamesForProject(pol, r.cfg.ProjectPath) {
-		st, err := budget.Evaluate(a, budget.Options{StateDir: dir, Project: r.cfg.ProjectPath})
+	for _, a := range budget.AgentNamesForProject(pol, project) {
+		st, err := budget.Evaluate(a, budget.Options{StateDir: dir, Project: project})
 		if err != nil {
 			continue
 		}
@@ -84,4 +91,15 @@ func (r *runner) checkAgentBudgets() {
 		}
 	}
 	writeln(r, "")
+}
+
+// budgetProject is the project directory the budgets section reads: BudgetProject,
+// else ProjectPath, else none (a library caller that names no project gets the
+// built-in and policy budgets only; the entry point supplies the working directory).
+// It is a place to read one file from, never a place to derive a state path from.
+func (r *runner) budgetProject() string {
+	if r.cfg.BudgetProject != "" {
+		return r.cfg.BudgetProject
+	}
+	return r.cfg.ProjectPath
 }

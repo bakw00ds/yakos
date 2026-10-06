@@ -8,7 +8,7 @@ import (
 // PrintHelp writes the --help text for `yakos doctor` to w.
 // The output is byte-identical to doctor.sh --help (modulo the trailing EOF).
 func PrintHelp(w io.Writer) {
-	_, _ = fmt.Fprint(w, `yakos doctor [<project-path>] [--probe-runtime] [--probe-decision [--live]] [--preflight] [--policy] — verify YakOS install + environment health
+	_, _ = fmt.Fprint(w, `yakos doctor [<project-path>] [--project <dir>] [--probe-runtime] [--probe-decision [--live]] [--preflight] [--policy] — verify YakOS install + environment health
 
 Without arguments, checks:
     Required commands (bash, git, jq)
@@ -25,6 +25,15 @@ If <project-path> is passed, additionally checks:
     surfaces DRIFT (informational, not an error — projects are expected
     to customize).
     Pre-push version gate installation status and drift.
+
+If --project <dir> is passed, or no project is named at all (the working
+directory is then used), the Agent budgets section reads that project's
+.yakos.yml too, so an agent the project names as its supervisor (supervisor:
+agent:) is listed with its budget. Only that file is read (never to pick a state
+path), and the section prints agent names and limit numbers, no paths and no
+project text. Unlike <project-path>, it does not turn on the project checks above.
+--project takes the place of <project-path>: giving both, or --project with
+--policy, is an error.
 
 If --fix is passed, attempts auto-remediation of cheap fixes:
     - missing ~/.yakos-state subdirs (memory, runtime-probes)
@@ -87,7 +96,7 @@ booleans only, never a value:
         the environment (a project's .claude/settings.json env block can set them)
     Always exits 0: it is a report, not a gate.
 
-Usage: yakos doctor [<project-path>] [--probe-runtime] [--probe-decision [--live]] [--preflight] [--policy]
+Usage: yakos doctor [<project-path>] [--project <dir>] [--probe-runtime] [--probe-decision [--live]] [--preflight] [--policy]
 
 Exit code:
     0   No errors (warnings/info/drift OK; --policy always exits 0)

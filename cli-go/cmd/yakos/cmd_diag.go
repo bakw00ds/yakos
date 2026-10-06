@@ -379,7 +379,16 @@ func runStatus(args []string) {
 //	yakos doctor [<project-path>] [--probe-runtime] [--production]
 //	yakos doctor --preflight
 //	yakos doctor --policy
+//	yakos doctor --project <dir>
 //	yakos doctor --help
+//
+// --project <dir> (K-136) names the project whose .yakos.yml the Agent budgets
+// section reads, so an agent the project names as its supervisor is listed with its
+// budget. With neither it nor a positional path, that section reads the working
+// directory's. It does NOT switch on the project-wide checks a positional path
+// does (hook drift, hook binaries, pre-push gate, project rules): the working
+// directory default lives in Config.BudgetProject, never in Config.ProjectPath.
+// The path is only a place to read one file from, never a state path (K-129).
 //
 // Exits 0 when no errors found (warnings/info/drift are OK).
 // Exits 1 when one or more error-severity findings are reported.
@@ -408,6 +417,8 @@ func runDoctor(yakosRoot string, args []string) {
 	fix := false
 	preflight := false
 	policy := false
+	projectFlag := ""
+	projectSeen := false
 
 	fs := &cliflag.Set{Cmd: "doctor", Specs: []cliflag.Spec{
 		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
@@ -418,6 +429,7 @@ func runDoctor(yakosRoot string, args []string) {
 		{Name: "--fix", Kind: cliflag.Bool, Bool: &fix},
 		{Name: "--preflight", Kind: cliflag.Bool, Bool: &preflight},
 		{Name: "--policy", Kind: cliflag.Bool, Bool: &policy},
+		{Name: "--project", Kind: cliflag.String, Str: &projectFlag, Seen: &projectSeen, ValueDesc: "a directory"},
 	}}
 	rest, err := fs.Parse(args)
 	if err != nil {
@@ -460,6 +472,33 @@ func runDoctor(yakosRoot string, args []string) {
 		fmt.Fprintln(os.Stderr, "doctor: --policy reads your user-level setup and takes no project path")
 		os.Exit(1)
 	}
+	if policy && projectSeen {
+		fmt.Fprintln(os.Stderr, "doctor: --policy reads your user-level setup and takes no --project")
+		os.Exit(1)
+	}
+	if projectSeen && projectPath != "" {
+		fmt.Fprintln(os.Stderr, "doctor: name the project once, as a path argument or with --project")
+		os.Exit(1)
+	}
+	if projectSeen {
+		if fi, err := os.Stat(projectFlag); projectFlag == "" || err != nil || !fi.IsDir() {
+			fmt.Fprintln(os.Stderr, "doctor: --project must name an existing directory")
+			os.Exit(1)
+		}
+	}
+	// The project the Agent budgets section reads: --project, else the positional
+	// path, else the working directory. Only that section sees the working directory
+	// default; cfg.ProjectPath below stays the positional path alone, because it
+	// switches on the project-wide checks a plain `yakos doctor` must not run.
+	budgetProject := projectPath
+	if projectSeen {
+		budgetProject = projectFlag
+	}
+	if budgetProject == "" {
+		if wd, err := os.Getwd(); err == nil {
+			budgetProject = wd
+		}
+	}
 
 	// Resolve YAKOS_ROOT from env, then cascade to materialized/embedded lib.
 	// doctor reads lib/hooks/git/ and lib/agents for its runtime-probe checks;
@@ -486,6 +525,7 @@ func runDoctor(yakosRoot string, args []string) {
 		YakosRoot:         yakosRoot,
 		YakosLib:          yakosLib,
 		ProjectPath:       projectPath,
+		BudgetProject:     budgetProject,
 		ProbeRuntime:      probeRuntime,
 		ProbeDecision:     probeDecision,
 		ProbeDecisionLive: live,

@@ -143,6 +143,17 @@ type Config struct {
 	// When empty, project-specific checks are skipped.
 	ProjectPath string
 
+	// BudgetProject is the project whose .yakos.yml the Agent budgets section reads
+	// (K-136): `yakos doctor --project <dir>`, else the positional project path, else
+	// the working directory, as chosen by the entry point. It is separate from
+	// ProjectPath on purpose. ProjectPath switches on the project-wide checks (hook
+	// drift, hook binaries, the pre-push gate, the project rules), which a plain
+	// `yakos doctor` must not start running in the working directory, so the working
+	// directory default can only live here. It is used to read that one file, for the
+	// agent_budgets: limits and the supervisor: agent: name, and never to choose or
+	// derive a state path (K-129). When empty the section falls back to ProjectPath.
+	BudgetProject string
+
 	// ProbeRuntime enables the --probe-runtime section.
 	ProbeRuntime bool
 
