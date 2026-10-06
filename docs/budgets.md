@@ -327,5 +327,5 @@ the Jev shadow decision, keep running.
   `yakos dispatch` are not counted. Turns of the console's Chat pane are: each
   interactive turn writes one event pair (surface `console-chat`), and a streamed
   chat turn is refused at a hard stop like any other dispatch. The Agent SDK
-  engine's turns carry a dollar cost and no token counts, so a token limit does
-  not see them until the sidecar reports usage.
+  engine needs an API key, so its turns are `api` turns: their tokens and dollars
+  both count.

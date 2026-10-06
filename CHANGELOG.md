@@ -232,8 +232,10 @@ subscription harness or a local model; see UPGRADING.md.
   engine) writes one `dispatch_started`/`dispatch_finished` pair with surface
   `console-chat`, so the Cost views are no longer empty for them. A turn the
   engine refuses writes nothing; a turn cut off by the session closing is
-  finished as failed. The SDK sidecar reports a turn's dollar cost but no token
-  counts, so those turns carry no tokens until it does.
+  finished as failed. The SDK engine now passes on the usage the sidecar reports
+  (input, output and cache tokens, with the turn's cost), so its turns carry
+  tokens; the sidecar needs an API key (K-137), so they are `api` turns and their
+  dollars count.
 
 - **The dispatch-log records why a runtime was chosen (K-132 P0a).**
   `dispatch_finished` events gain two additive fields, both omitted when

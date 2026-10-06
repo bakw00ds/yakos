@@ -48,6 +48,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -136,6 +137,48 @@ type sidecarAskFrame struct {
 type sidecarSummaryFrame struct {
 	TotalCostUsd float64         `json:"totalCostUsd"`
 	Usage        json.RawMessage `json:"usage"`
+}
+
+// summaryUsage reads the token usage of a summary frame: the Agent SDK's
+// ResultMessage.usage, an Anthropic API usage object. Tokens are the primary
+// accounting unit (K-136), so a turn must report them; the dollar cost the frame
+// carries rides along on the same object. It returns nil when the frame carries no
+// counts (an empty object, null, or something that is not numbers), so a turn that
+// reported nothing stays "no usage" rather than becoming zero. A negative count or
+// one beyond any real turn is read as 0.
+func summaryUsage(raw json.RawMessage, costUSD float64) *yakruntime.Usage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var u struct {
+		Input         float64 `json:"input_tokens"`
+		Output        float64 `json:"output_tokens"`
+		CacheRead     float64 `json:"cache_read_input_tokens"`
+		CacheCreation float64 `json:"cache_creation_input_tokens"`
+	}
+	if json.Unmarshal(raw, &u) != nil {
+		return nil
+	}
+	usage := yakruntime.Usage{
+		InputTokens:   tokenCount(u.Input),
+		OutputTokens:  tokenCount(u.Output),
+		CacheRead:     tokenCount(u.CacheRead),
+		CacheCreation: tokenCount(u.CacheCreation),
+		TotalCostUSD:  costUSD,
+	}
+	if usage.InputTokens == 0 && usage.OutputTokens == 0 && usage.CacheRead == 0 && usage.CacheCreation == 0 {
+		return nil
+	}
+	return &usage
+}
+
+// tokenCount converts a parsed count to an int64, 0 for NaN, a negative number or
+// one beyond any real turn.
+func tokenCount(f float64) int64 {
+	if math.IsNaN(f) || f < 0 || f > float64(int64(1)<<40) {
+		return 0
+	}
+	return int64(f)
 }
 
 // sidecarErrorFrame carries an error from the sidecar.
@@ -708,6 +751,8 @@ func (e *SDKEngine) dispatchLine(line []byte) {
 				// ExitCode defaults to 0 (success) for SDK sessions.
 				// DurationS is not tracked by the sidecar (SDK does not expose it).
 				ExitCode: 0,
+				// The turn's tokens (K-136); nil when the frame carried none.
+				Usage: summaryUsage(f.Usage, f.TotalCostUsd),
 			})
 		}
 
