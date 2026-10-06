@@ -140,24 +140,28 @@ entries stay `unknown`.
   PATH and looks signed in; no network call), and a harness that fails it is
   skipped. It is best effort: a signed-out agy can still pass, and if `agy models`
   then fails or prints nothing usable, that is a failed probe.
-- **Command.** `agy models` with fixed arguments, no shell and no stdin. It runs in
-  a fresh private directory, `.discover-*` inside the secured state directory,
-  removed afterwards. There is no fallback to the temporary directory, because
-  `TMPDIR` can be set by a project and agy run in a directory the project chose
-  may load its workspace configuration: with no secured state directory (no home,
-  a relative home, or a state directory that is a symlink or not a directory) the
-  probe is skipped and agy is not run. On Unix it starts in a session of its own,
-  so it has no controlling terminal to prompt on and the whole process group, not
-  only agy, is killed when the probe times out, is cancelled or prints too much;
-  Windows has no process group and kills agy alone. A Ctrl-C at the terminal no
-  longer reaches agy, so `yakos models probe` binds the probe to the interrupt and
-  waits for the killed run before it exits. Its environment is a short allowlist: PATH
-  and HOME, the platform basics, proxy and certificate settings, and agy's own
-  credential families (`GEMINI_*`, `GOOGLE_*`, `GCLOUD_*`, `ANTIGRAVITY_*`). It is
-  narrower than the one dispatch gives agy: no `GH_TOKEN`, `GITHUB_TOKEN`,
-  `SSH_AUTH_SOCK`, `GIT_*`, `NODE_OPTIONS` or `YAKOS_*`, which an agent's git work
-  needs and a listing does not. A relative PATH entry is refused. Output is capped
-  at 256 KiB (stderr 16 KiB) as it is produced.
+- **Command.** `agy models` with fixed arguments, no shell and no stdin. It runs
+  in a fresh private directory, `.discover-<pid>-<n>` inside the secured state
+  directory (the pid is the owning yakOS process's), removed afterwards. There is
+  no fallback to the temporary directory, because `TMPDIR` can be set by a project
+  and agy run in a directory the project chose may load its workspace
+  configuration: with no secured state directory (no home, a relative home, or a
+  state directory that is a symlink or not a directory) the probe is skipped and
+  agy is not run. On Unix it starts in a session of its own, so it has no
+  controlling terminal to prompt on and the whole process group, not only agy, is
+  killed when the probe times out, is cancelled or prints too much. When agy exits
+  successfully but a helper it started still holds the output pipes, the probe
+  returns what agy printed once the two-second wait delay has passed and kills the
+  group then, so no helper outlives the probe. Windows has no process group and
+  kills agy alone. A Ctrl-C at the terminal no longer reaches agy, so
+  `yakos models probe` binds the probe to the interrupt and waits for the killed
+  run before it exits. Its environment is a short allowlist: PATH and HOME, the
+  platform basics, proxy and certificate settings, and agy's own credential
+  families (`GEMINI_*`, `GOOGLE_*`, `GCLOUD_*`, `ANTIGRAVITY_*`). It is narrower
+  than the one dispatch gives agy: no `GH_TOKEN`, `GITHUB_TOKEN`, `SSH_AUTH_SOCK`,
+  `GIT_*`, `NODE_OPTIONS` or `YAKOS_*`, which an agent's git work needs and a
+  listing does not. A relative PATH entry is refused. Output is capped at 256 KiB
+  (stderr 16 KiB) as it is produced.
 - **Never blocking.** `Snapshot` reads memory or one small file and runs nothing.
   `Kick` returns at once and refreshes in the background when there is no listing
   or it is older than 6 hours, unless one is running or a probe was skipped or
@@ -168,7 +172,8 @@ entries stay `unknown`.
   while the last caller is cancelling it starts a fresh run instead of inheriting
   the cancellation. Only `yakos models` builds a discoverer today; dispatch does
   not call it.
-- **Output is data.** One line per model, `id<TAB>display name`. A line with no tab,
+- **Output is data.** One line per model, `id<TAB>display name`. A leading UTF-8
+  byte order mark is ignored (it must not cost the first id). A line with no tab,
   or an id that fails the id rule, is dropped and counted: a one-word message
   such as `unauthorized` on standard output must not become a one-model listing.
   At most 512 models are kept, and names lose
@@ -184,6 +189,18 @@ entries stay `unknown`.
   oversized output or a listing with no valid id fails the probe and leaves the
   previous snapshot, in memory and on disk, so a glitch never marks every model
   unavailable.
+- **Leftover directories.** A probe killed with SIGKILL, a crash or a power cut
+  cannot remove its directory, so every probe sweeps the `.discover-*` directories
+  of earlier ones before it makes its own, once the state directory is secured.
+  The sweep goes by the owner in the name: a directory whose pid is alive (a probe
+  in another yakOS process) stays, unless it is more than an hour old, since pids
+  are reused; a directory of a dead pid goes; a name with no pid (an earlier build)
+  goes only when it is more than an hour old. It touches real directories the
+  current user owns and nothing else: a symlink with such a name is left alone and
+  nothing behind it is touched, a regular file is not a work directory, and
+  removing a directory does not follow a link inside it. At most 32 are removed
+  per probe, and a failure to remove one is silent. SIGKILL does not stop the
+  agy that was running; only the directory is swept.
 - **Cache.** `~/.yakos-state/model-discovery.json`, mode 0600, written by
   temporary file and rename in a directory made or tightened to 0700. It is read
   back through the overlay's trust check with every id validated again; an
