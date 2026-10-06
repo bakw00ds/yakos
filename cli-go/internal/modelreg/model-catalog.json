@@ -1,0 +1,381 @@
+{
+  "_doc": "yakOS model catalog (K-138). Entries follow the models.dev shape (name, family, modalities, limit, cost) plus yakOS keys: provider (who serves the model, and so receives the request), harnesses (the runtimes whose model flag takes this id), billing (subscription | api | local), effort_levels, effort_in_id, default_enabled. cost (USD per million tokens) exists only on billing=api entries; tokens are the accounting unit for everything else. The aliases key is the semantic alias table (alias -> runtime -> model id) and must stay equal to the aliases key of lib/settings/model-aliases.json, which the bash CLI reads (cli/lib/project-config.sh): TestCatalogAliasesMatchLegacyFile fails on drift. Codex aliases are empty on purpose, as there: an empty value means the harness default and no -m flag, because the codex catalog is per login and plan and gives no documented tiers; map them per operator in ~/.yakos-state/model-registry.yml. The embedded copy cli-go/internal/modelreg/model-catalog.json must equal this file (TestEmbeddedCatalogMatchesLib; refresh with cp).",
+  "schema": 1,
+  "sources": [
+    { "harness": "claude", "captured": "2026-10-06", "note": "The four Claude Code tier names accepted by `claude --model`; the CLI resolves each to the current model of that tier." },
+    { "harness": "codex", "captured": "2026-10-05", "note": "`codex debug models`, codex-cli 0.154.0, ChatGPT login (work/current/reports/codex-models-2026-10-05.txt). Descriptions are codex's own wording. The catalog is per login and plan and changes often; re-capture before relying on it." },
+    { "harness": "agy", "captured": "2026-10-06", "note": "`agy models`, agy 1.2.17, Antigravity login; identical to the agy 1.2.7 listing of 2026-10-05. The reasoning effort is part of each id." }
+  ],
+  "models": [
+    {
+      "id": "haiku",
+      "name": "Claude Haiku",
+      "provider": "anthropic",
+      "family": "claude-haiku",
+      "description": "Claude Code tier alias for the fastest, cheapest Claude model.",
+      "harnesses": ["claude"],
+      "billing": "subscription"
+    },
+    {
+      "id": "sonnet",
+      "name": "Claude Sonnet",
+      "provider": "anthropic",
+      "family": "claude-sonnet",
+      "description": "Claude Code tier alias for the balanced Claude model; the dispatch default.",
+      "harnesses": ["claude"],
+      "billing": "subscription"
+    },
+    {
+      "id": "opus",
+      "name": "Claude Opus",
+      "provider": "anthropic",
+      "family": "claude-opus",
+      "description": "Claude Code tier alias for the most capable Claude model below fable.",
+      "harnesses": ["claude"],
+      "billing": "subscription"
+    },
+    {
+      "id": "fable",
+      "name": "Claude Fable",
+      "provider": "anthropic",
+      "family": "claude-fable",
+      "description": "Claude Code tier alias above opus, the top tier.",
+      "harnesses": ["claude"],
+      "billing": "subscription"
+    },
+    {
+      "id": "gpt-6-astra",
+      "name": "GPT-6-Astra",
+      "provider": "openai",
+      "description": "Frontier intelligence for the most demanding work.",
+      "harnesses": ["codex"],
+      "billing": "subscription",
+      "visibility": "list",
+      "effort_levels": ["low", "medium", "high", "xhigh", "max", "ultra"],
+      "default_effort": "medium",
+      "modalities": { "input": ["text", "image"] },
+      "limit": { "context": 272000, "context_max": 872000 }
+    },
+    {
+      "id": "gpt-reserve",
+      "name": "GPT-Reserve",
+      "provider": "openai",
+      "description": "Fast and affordable agentic coding model.",
+      "harnesses": ["codex"],
+      "billing": "subscription",
+      "default_enabled": false,
+      "visibility": "hide",
+      "effort_levels": ["low", "medium", "high", "xhigh", "max"],
+      "default_effort": "medium",
+      "modalities": { "input": ["text", "image"] },
+      "limit": { "context": 272000, "context_max": 872000 }
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "name": "GPT-5.6-Sol",
+      "provider": "openai",
+      "description": "Older generation workhorse model.",
+      "harnesses": ["codex"],
+      "billing": "subscription",
+      "visibility": "list",
+      "effort_levels": ["low", "medium", "high", "xhigh", "max", "ultra"],
+      "default_effort": "low",
+      "modalities": { "input": ["text", "image"] },
+      "limit": { "context": 272000, "context_max": 872000 }
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "name": "GPT-5.6-Terra",
+      "provider": "openai",
+      "description": "Older balanced model for straightforward work.",
+      "harnesses": ["codex"],
+      "billing": "subscription",
+      "visibility": "list",
+      "effort_levels": ["low", "medium", "high", "xhigh", "max", "ultra"],
+      "default_effort": "medium",
+      "modalities": { "input": ["text", "image"] },
+      "limit": { "context": 272000, "context_max": 872000 }
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "name": "GPT-5.6-Luna",
+      "provider": "openai",
+      "description": "Older fast and efficient model.",
+      "harnesses": ["codex"],
+      "billing": "subscription",
+      "visibility": "list",
+      "effort_levels": ["low", "medium", "high", "xhigh", "max"],
+      "default_effort": "medium",
+      "modalities": { "input": ["text", "image"] },
+      "limit": { "context": 272000, "context_max": 872000 }
+    },
+    {
+      "id": "gpt-5.5",
+      "name": "GPT-5.5",
+      "provider": "openai",
+      "description": "Legacy coding model.",
+      "harnesses": ["codex"],
+      "billing": "subscription",
+      "visibility": "list",
+      "effort_levels": ["low", "medium", "high", "xhigh"],
+      "default_effort": "medium",
+      "modalities": { "input": ["text", "image"] },
+      "limit": { "context": 272000, "context_max": 272000 }
+    },
+    {
+      "id": "codex-auto-review",
+      "name": "Codex Auto Review",
+      "provider": "openai",
+      "description": "Automatic approval review model for Codex.",
+      "harnesses": ["codex"],
+      "billing": "subscription",
+      "default_enabled": false,
+      "visibility": "hide",
+      "effort_levels": ["low", "medium", "high", "xhigh", "max"],
+      "default_effort": "medium",
+      "modalities": { "input": ["text", "image"] },
+      "limit": { "context": 272000, "context_max": 872000 }
+    },
+    {
+      "id": "gemini-3.8-flash-high",
+      "name": "Gemini 3.8 Flash (High)",
+      "provider": "google",
+      "family": "gemini-flash",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["high"],
+      "default_effort": "high",
+      "effort_in_id": true
+    },
+    {
+      "id": "gemini-3.8-flash-medium",
+      "name": "Gemini 3.8 Flash (Medium)",
+      "provider": "google",
+      "family": "gemini-flash",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["medium"],
+      "default_effort": "medium",
+      "effort_in_id": true
+    },
+    {
+      "id": "gemini-3.8-flash-low",
+      "name": "Gemini 3.8 Flash (Low)",
+      "provider": "google",
+      "family": "gemini-flash",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["low"],
+      "default_effort": "low",
+      "effort_in_id": true
+    },
+    {
+      "id": "gemini-3.7-flash-high",
+      "name": "Gemini 3.7 Flash (High)",
+      "provider": "google",
+      "family": "gemini-flash",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["high"],
+      "default_effort": "high",
+      "effort_in_id": true
+    },
+    {
+      "id": "gemini-3.7-flash-medium",
+      "name": "Gemini 3.7 Flash (Medium)",
+      "provider": "google",
+      "family": "gemini-flash",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["medium"],
+      "default_effort": "medium",
+      "effort_in_id": true
+    },
+    {
+      "id": "gemini-3.7-flash-low",
+      "name": "Gemini 3.7 Flash (Low)",
+      "provider": "google",
+      "family": "gemini-flash",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["low"],
+      "default_effort": "low",
+      "effort_in_id": true
+    },
+    {
+      "id": "gemini-3.6-flash-high",
+      "name": "Gemini 3.6 Flash (High)",
+      "provider": "google",
+      "family": "gemini-flash",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["high"],
+      "default_effort": "high",
+      "effort_in_id": true
+    },
+    {
+      "id": "gemini-3.6-flash-medium",
+      "name": "Gemini 3.6 Flash (Medium)",
+      "provider": "google",
+      "family": "gemini-flash",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["medium"],
+      "default_effort": "medium",
+      "effort_in_id": true
+    },
+    {
+      "id": "gemini-3.6-flash-low",
+      "name": "Gemini 3.6 Flash (Low)",
+      "provider": "google",
+      "family": "gemini-flash",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["low"],
+      "default_effort": "low",
+      "effort_in_id": true
+    },
+    {
+      "id": "gemini-3.1-pro-high",
+      "name": "Gemini 3.1 Pro (High)",
+      "provider": "google",
+      "family": "gemini-pro",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["high"],
+      "default_effort": "high",
+      "effort_in_id": true
+    },
+    {
+      "id": "gemini-3.1-pro-low",
+      "name": "Gemini 3.1 Pro (Low)",
+      "provider": "google",
+      "family": "gemini-pro",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["low"],
+      "default_effort": "low",
+      "effort_in_id": true
+    },
+    {
+      "id": "claude-opus-5-5-low",
+      "name": "Claude Opus 5.5 (Low)",
+      "provider": "google",
+      "family": "claude-opus",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["low"],
+      "default_effort": "low",
+      "effort_in_id": true
+    },
+    {
+      "id": "claude-opus-5-5-medium",
+      "name": "Claude Opus 5.5 (Medium)",
+      "provider": "google",
+      "family": "claude-opus",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["medium"],
+      "default_effort": "medium",
+      "effort_in_id": true
+    },
+    {
+      "id": "claude-opus-5-5-high",
+      "name": "Claude Opus 5.5 (High)",
+      "provider": "google",
+      "family": "claude-opus",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["high"],
+      "default_effort": "high",
+      "effort_in_id": true
+    },
+    {
+      "id": "claude-sonnet-5-5-low",
+      "name": "Claude Sonnet 5.5 (Low)",
+      "provider": "google",
+      "family": "claude-sonnet",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["low"],
+      "default_effort": "low",
+      "effort_in_id": true
+    },
+    {
+      "id": "claude-sonnet-5-5-medium",
+      "name": "Claude Sonnet 5.5 (Medium)",
+      "provider": "google",
+      "family": "claude-sonnet",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["medium"],
+      "default_effort": "medium",
+      "effort_in_id": true
+    },
+    {
+      "id": "claude-sonnet-5-5-high",
+      "name": "Claude Sonnet 5.5 (High)",
+      "provider": "google",
+      "family": "claude-sonnet",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["high"],
+      "default_effort": "high",
+      "effort_in_id": true
+    },
+    {
+      "id": "gpt-oss-120b-medium",
+      "name": "GPT-OSS 120B (Medium)",
+      "provider": "google",
+      "family": "gpt-oss",
+      "harnesses": ["agy"],
+      "billing": "subscription",
+      "effort_levels": ["medium"],
+      "default_effort": "medium",
+      "effort_in_id": true,
+      "open_weights": true
+    }
+  ],
+  "aliases": {
+    "cheap": {
+      "claude": "haiku",
+      "claude-sdk": "haiku",
+      "codex": "",
+      "gemini": "gemini-2.5-flash",
+      "agy": "gemini-3.8-flash-low",
+      "antigravity-sdk": "gemini-3.8-flash-low"
+    },
+    "balanced": {
+      "claude": "sonnet",
+      "claude-sdk": "sonnet",
+      "codex": "",
+      "gemini": "gemini-2.5-pro",
+      "agy": "gemini-3.8-flash-high",
+      "antigravity-sdk": "gemini-3.8-flash-high"
+    },
+    "best": {
+      "claude": "opus",
+      "claude-sdk": "opus",
+      "codex": "",
+      "gemini": "gemini-2.5-pro",
+      "agy": "claude-opus-5-5-medium",
+      "antigravity-sdk": "claude-opus-5-5-medium"
+    },
+    "reasoning": {
+      "claude": "opus",
+      "claude-sdk": "opus",
+      "codex": "",
+      "gemini": "gemini-2.5-pro",
+      "agy": "gemini-3.1-pro-high",
+      "antigravity-sdk": "gemini-3.1-pro-high"
+    },
+    "frontier": {
+      "claude": "fable",
+      "claude-sdk": "fable",
+      "codex": "",
+      "gemini": "gemini-2.5-pro",
+      "agy": "claude-opus-5-5-high",
+      "antigravity-sdk": "claude-opus-5-5-high"
+    }
+  }
+}

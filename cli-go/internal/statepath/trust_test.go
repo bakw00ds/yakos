@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -145,5 +146,104 @@ func TestReadTrusted_CapsTheRead(t *testing.T) {
 	got, err := ReadTrusted(path, 16)
 	if err != nil || len(got) != 16 {
 		t.Fatalf("read %d bytes, err %v, want 16", len(got), err)
+	}
+}
+
+// sec-324 F2 lists "owned by another user" among the planted-file cases, but no
+// test could make one: a file another user owns needs a second account. The
+// ownership test is a variable (ownedBy) so the guard can be exercised: these two
+// tests model the entry another user owns, once for the file and once for the
+// directory holding it, and mutate away the guard to see them fail.
+func TestReadTrusted_RefusesAFileOwnedByAnotherUser(t *testing.T) {
+	_, path := trustedState(t, "default-runtime", "codex\n")
+	restore := ownedBy
+	t.Cleanup(func() { ownedBy = restore })
+	ownedBy = func(fi os.FileInfo) bool { return fi.Name() != "default-runtime" }
+
+	data, err := ReadTrusted(path, 256)
+	if err == nil {
+		t.Fatalf("read %q from a file another user owns", data)
+	}
+	if !IsUntrusted(err) || !strings.Contains(err.Error(), ": is owned by another user") {
+		t.Errorf("err = %v, want an untrusted error saying the file is owned by another user", err)
+	}
+	var u *UntrustedError
+	if !errors.As(err, &u) || u.Path != path {
+		t.Errorf("the refusal must name the file (%s), got %+v", path, u)
+	}
+}
+
+func TestReadTrusted_RefusesADirectoryOwnedByAnotherUser(t *testing.T) {
+	dir, path := trustedState(t, "default-runtime", "codex\n")
+	restore := ownedBy
+	t.Cleanup(func() { ownedBy = restore })
+	ownedBy = func(fi os.FileInfo) bool { return fi.Name() != filepath.Base(dir) }
+
+	data, err := ReadTrusted(path, 256)
+	if err == nil {
+		t.Fatalf("read %q from a directory another user owns", data)
+	}
+	if !IsUntrusted(err) || !strings.Contains(err.Error(), ": is owned by another user") {
+		t.Errorf("err = %v, want an untrusted error saying the directory is owned by another user", err)
+	}
+	var u *UntrustedError
+	if !errors.As(err, &u) || u.Path != dir {
+		t.Errorf("the refusal must name the directory (%s), got %+v", dir, u)
+	}
+}
+
+// The same tests pass for an entry the current user owns: the variable defaults
+// to the real check, so nothing above weakens it.
+func TestReadTrusted_OwnerCheckDefaultsToTheRealOne(t *testing.T) {
+	_, path := trustedState(t, "default-runtime", "codex\n")
+	if _, err := ReadTrusted(path, 256); err != nil {
+		t.Fatalf("a file this user owns must be trusted: %v", err)
+	}
+}
+
+// ReadTrusted vets the path with Lstat and then opens it. If another file takes the
+// path's place in between, the file read is not the file vetted. The replacement
+// here is a regular file of the same owner and mode, so only the same-file
+// comparison on the open descriptor can refuse it: the symlink, owner and mode
+// checks all pass.
+func TestReadTrusted_RefusesAFileSwappedAfterTheCheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("rename over an entry another handle may hold")
+	}
+	_, path := trustedState(t, "default-runtime", "codex\n")
+	restore := afterCheck
+	t.Cleanup(func() { afterCheck = restore })
+	swapped := false
+	afterCheck = func(p string) {
+		tmp := p + ".swap"
+		if err := os.WriteFile(tmp, []byte("agy\n"), 0o600); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := os.Rename(tmp, p); err != nil {
+			t.Error(err)
+			return
+		}
+		swapped = true
+	}
+
+	data, err := ReadTrusted(path, 256)
+	if !swapped {
+		t.Fatal("the hook did not run between the check and the open")
+	}
+	if err == nil {
+		t.Fatalf("read %q from a file swapped after it was vetted", data)
+	}
+	if !IsUntrusted(err) || !strings.Contains(err.Error(), "changed while it was being opened") {
+		t.Errorf("err = %v, want an untrusted error saying the file changed while it was opened", err)
+	}
+}
+
+// The seam the owner tests replace must default to the real predicate. Pointer
+// equality of two references to one top-level function is how Go says "the same
+// function"; a wrapper, a stub that returns true, or a different predicate is not.
+func TestOwnedByDefaultsToTheRealPredicate(t *testing.T) {
+	if reflect.ValueOf(ownedBy).Pointer() != reflect.ValueOf(ownedByCurrentUser).Pointer() {
+		t.Error("ownedBy is not ownedByCurrentUser: the trust checks would not apply the real owner test")
 	}
 }
