@@ -1,9 +1,14 @@
-// Package budget implements per-agent dollar budgets with a hard stop (K-119).
+// Package budget implements per-agent budgets with a hard stop (K-119, K-136).
 //
-// An agent gets a dollar limit over a window (calendar month in local time, or
-// lifetime). Spend is summed from the dispatch-log cost fields. Below the
-// warning percentage the agent is "ok", from it "warning", and at 100% the
-// agent is in "hard_stop" and new dispatches are refused until the limit is
+// An agent gets a token limit, a dollar limit, or both, over a window (calendar
+// month in local time, or lifetime). Tokens are the primary unit (K-136): the
+// aggregate sums the reported input, output and cache tokens of every run, for
+// every model, and `limit_tokens` trips on that total whatever the run was billed.
+// Dollars are summed from the dispatch-log cost fields but count only for runs
+// billed per API call (cost.CountsAsSpend): a subscription or local run's
+// figure is never spend, so `limit_usd` does not move for it. Below the warning
+// percentage the agent is "ok", from it "warning", and at 100% of EITHER limit
+// the agent is in "hard_stop" and new dispatches are refused until the limit is
 // raised, the operator runs `yakos budget reset <agent>`, or the window rolls
 // over. A run already in flight is never killed.
 //
@@ -71,12 +76,18 @@ func BuiltinLimit(agent string) (float64, bool) {
 	return v, ok
 }
 
-// AgentLimit is one limit entry. LimitUSD is a pointer so an explicit 0
-// (off) differs from "not set".
+// AgentLimit is one limit entry. LimitUSD and LimitTokens are pointers so an
+// explicit 0 (off) differs from "not set".
 type AgentLimit struct {
 	LimitUSD *float64 `yaml:"limit_usd,omitempty"`
-	Window   string   `yaml:"window,omitempty"`
-	WarnPct  int      `yaml:"warn_pct,omitempty"`
+	// LimitTokens caps the tokens an agent may use in the window: fresh input,
+	// output, cache reads and cache writes of every run, whatever its billing. It
+	// trips exactly like LimitUSD (warning at warn_pct, hard stop at 100%). It
+	// shares the entry's Window with LimitUSD. A project cannot set one; a limit
+	// in this user-level file is the only way to have one.
+	LimitTokens *int64 `yaml:"limit_tokens,omitempty"`
+	Window      string `yaml:"window,omitempty"`
+	WarnPct     int    `yaml:"warn_pct,omitempty"`
 	// MaxModel is an optional model-tier ceiling (haiku < sonnet < opus <
 	// fable) applied at dispatch, so a project cannot raise an agent's cost
 	// by naming a dearer model (K-119 F2).
@@ -149,7 +160,7 @@ func SavePolicy(stateDir string, p Policy) error {
 	if err != nil {
 		return err
 	}
-	header := "# yakOS per-agent dollar budgets (K-119). Edit with `yakos budget set`.\n"
+	header := "# yakOS per-agent budgets (K-119, K-136): limit_usd and limit_tokens. Edit with `yakos budget set`.\n"
 	return atomicWrite(PolicyPath(stateDir), append([]byte(header), data...))
 }
 
@@ -169,6 +180,31 @@ func SetLimit(stateDir, agent string, usd float64, w Window) error {
 	return updatePolicy(stateDir, func(p *Policy) {
 		prev := p.Agents[agent]
 		prev.LimitUSD = &usd
+		prev.Window = string(w)
+		p.Agents[agent] = prev
+	})
+}
+
+// maxTokenLimit bounds a configured token limit; a larger number is a typo.
+const maxTokenLimit = int64(1) << 50
+
+// SetTokenLimit records a token limit for agent in the policy file. tokens 0
+// turns the token limit off. The window is the agent's one window: it also
+// applies to the agent's dollar limit. The read-modify-write runs under the
+// budget lock so parallel sets never lose an update.
+func SetTokenLimit(stateDir, agent string, tokens int64, w Window) error {
+	if err := ValidateAgent(agent); err != nil {
+		return err
+	}
+	if tokens < 0 || tokens > maxTokenLimit {
+		return fmt.Errorf("budget: token limit must be between 0 and %d", maxTokenLimit)
+	}
+	if w != Monthly && w != Lifetime {
+		return fmt.Errorf("budget: window must be %s or %s", Monthly, Lifetime)
+	}
+	return updatePolicy(stateDir, func(p *Policy) {
+		prev := p.Agents[agent]
+		prev.LimitTokens = &tokens
 		prev.Window = string(w)
 		p.Agents[agent] = prev
 	})
@@ -254,12 +290,14 @@ func ValidateAgent(agent string) error {
 // Limit is the effective limit for one agent.
 type Limit struct {
 	USD      float64 // 0 = off
+	Tokens   int64   // 0 = off
 	Window   Window
 	WarnPct  int
 	Source   string // builtin | policy | policy-default | project | none
 	Warnings []string
 	// StopFactor scales the dispatch-level stop: dispatch refuses at
-	// StopFactor x USD (1 for every agent but the supervisor).
+	// StopFactor x USD (1 for every agent but the supervisor). It scales Tokens
+	// the same way.
 	StopFactor float64
 }
 
@@ -294,6 +332,16 @@ func Resolve(agent string, p Policy, projectUSD *float64) Limit {
 			}
 			l.USD = v
 			l.Source = src
+		}
+		if a.LimitTokens != nil {
+			v := *a.LimitTokens
+			if v < 0 || v > maxTokenLimit {
+				v = 0
+			}
+			l.Tokens = v
+			if l.Source == "none" {
+				l.Source = src
+			}
 		}
 	}
 	// Global default first so agent-level values override it field by field.

@@ -22,16 +22,22 @@ const (
 	resetsFileName    = "budget-resets.json"
 	lockFileName      = "budget.lock"
 	logFileName       = "dispatch-log.ndjson"
-	aggregateVersion  = 2
+	aggregateVersion  = 3 // 3: token sums added (K-136); an older cache is rebuilt from the log
 	headBytes         = 256
 )
 
 type agentSpend struct {
+	// Lifetime and Monthly are DOLLAR spend: only api-billed runs and runs from
+	// before the billing field count (cost.CountsAsSpend).
 	Lifetime float64            `json:"lifetime"`
 	Monthly  map[string]float64 `json:"monthly"`
 	// Projects is spend by month then by the project recorded on the
 	// dispatch_finished event (K-119 F2 per-project attribution).
 	Projects map[string]map[string]float64 `json:"projects,omitempty"`
+	// TokensLifetime and TokensMonthly are every reported token of every run,
+	// whatever its billing (K-136): tokens are the primary unit.
+	TokensLifetime cost.TokenTotals            `json:"tokens_lifetime"`
+	TokensMonthly  map[string]cost.TokenTotals `json:"tokens_monthly"`
 }
 
 // aggregate is a derived cache of the dispatch-log: per-agent spend by local
@@ -61,15 +67,20 @@ func newAggregate() *aggregate {
 	return &aggregate{Version: aggregateVersion, Zone: zoneFingerprint(), Agents: map[string]*agentSpend{}}
 }
 
-func (a *aggregate) add(agent, month, project string, usd float64) {
+// add folds one run into agent's sums: usd is its dollar spend (already filtered
+// by the billing rule, 0 for a subscription or local run) and tok its reported
+// tokens.
+func (a *aggregate) add(agent, month, project string, usd float64, tok cost.TokenTotals) {
 	s := a.Agents[agent]
 	if s == nil {
-		s = &agentSpend{Monthly: map[string]float64{}}
+		s = &agentSpend{Monthly: map[string]float64{}, TokensMonthly: map[string]cost.TokenTotals{}}
 		a.Agents[agent] = s
 	}
+	s.TokensLifetime = s.TokensLifetime.Add(tok)
+	s.TokensMonthly[month] = s.TokensMonthly[month].Add(tok)
 	s.Lifetime += usd
 	s.Monthly[month] += usd
-	if project != "" {
+	if usd != 0 && project != "" {
 		if s.Projects == nil {
 			s.Projects = map[string]map[string]float64{}
 		}
@@ -111,6 +122,18 @@ func (a *aggregate) spend(agent string, w Window, key string) float64 {
 	return s.Monthly[key]
 }
 
+// tokens returns the raw (pre-reset) tokens of agent in the window key.
+func (a *aggregate) tokens(agent string, w Window, key string) cost.TokenTotals {
+	s := a.Agents[agent]
+	if s == nil {
+		return cost.TokenTotals{}
+	}
+	if w == Lifetime {
+		return s.TokensLifetime
+	}
+	return s.TokensMonthly[key]
+}
+
 // WindowKey is the accounting bucket for t: the local calendar month, or the
 // constant "lifetime".
 func WindowKey(w Window, t time.Time) string {
@@ -140,7 +163,7 @@ func readAggregate(dir string) *aggregate {
 		return nil // corrupt: rebuilt from the log
 	}
 	for _, s := range a.Agents {
-		if s == nil || s.Monthly == nil {
+		if s == nil || s.Monthly == nil || s.TokensMonthly == nil {
 			return nil
 		}
 	}
@@ -192,14 +215,33 @@ func logState(logPath string, agg *aggregate) (size int64, headOK bool, err erro
 	return size, hashHead(buf) == agg.Head, nil
 }
 
+// finishedLine is the part of a dispatch_finished event the aggregate reads.
+// The token counts are parsed as numbers so a line that spells one 1.5e3, or one
+// too large for an int64, still counts its other fields instead of being
+// dropped whole; toCount turns them into counts.
 type finishedLine struct {
 	Type    string `json:"type"`
 	Ts      string `json:"ts"`
 	Agent   string `json:"agent"`
 	Project string `json:"project"`
+	// Billing is the K-136 billing mode ("" on a line from before it).
+	Billing string `json:"billing"`
 	Usage   *struct {
-		TotalCostUSD float64 `json:"total_cost_usd"`
+		InputTokens   float64 `json:"input_tokens"`
+		OutputTokens  float64 `json:"output_tokens"`
+		CacheRead     float64 `json:"cache_read"`
+		CacheCreation float64 `json:"cache_creation"`
+		TotalCostUSD  float64 `json:"total_cost_usd"`
 	} `json:"usage"`
+}
+
+// toCount converts a parsed token count to an int64: 0 for NaN, a negative
+// number or one beyond any real run (cost.Event.Tokens applies the same bound).
+func toCount(f float64) int64 {
+	if math.IsNaN(f) || f < 0 || f > float64(int64(1)<<40) {
+		return 0
+	}
+	return int64(f)
 }
 
 var finishedMarker = []byte(`"dispatch_finished"`)
@@ -231,15 +273,25 @@ func scan(r io.Reader, agg *aggregate) (int64, error) {
 		if json.Unmarshal(line, &ev) != nil || ev.Type != "dispatch_finished" || ev.Agent == "" || ev.Usage == nil {
 			continue
 		}
-		c := ev.Usage.TotalCostUSD
-		if math.IsNaN(c) || math.IsInf(c, 0) || c <= 0 {
+		// One definition of what an event counts for: cost.Event applies the
+		// billing rule to the dollars (api-billed runs and pre-K-136 rows only)
+		// and sums the reported tokens of every run.
+		e := cost.Event{Billing: ev.Billing, Usage: &cost.Usage{
+			InputTokens:   toCount(ev.Usage.InputTokens),
+			OutputTokens:  toCount(ev.Usage.OutputTokens),
+			CacheRead:     toCount(ev.Usage.CacheRead),
+			CacheCreation: toCount(ev.Usage.CacheCreation),
+			TotalCostUSD:  ev.Usage.TotalCostUSD,
+		}}
+		usd, tok := e.SpendUSD(), e.Tokens()
+		if usd <= 0 && tok.IsZero() {
 			continue
 		}
 		m, ok := monthOf(ev.Ts)
 		if !ok {
 			continue
 		}
-		agg.add(ev.Agent, m, ev.Project, c)
+		agg.add(ev.Agent, m, ev.Project, usd, tok)
 	}
 	return int64(end), nil
 }
@@ -351,7 +403,10 @@ type resetRec struct {
 	Window string  `json:"window"`
 	Key    string  `json:"key"`
 	USD    float64 `json:"usd"`
-	At     string  `json:"at"`
+	// Tokens is the token baseline of the reset (K-136); absent in a record from
+	// before it, which then resets dollars only.
+	Tokens int64  `json:"tokens,omitempty"`
+	At     string `json:"at"`
 }
 
 // readTrusted reads a budget state file only when it passes the same trust

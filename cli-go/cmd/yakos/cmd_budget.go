@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -23,16 +24,22 @@ import (
 // It never exits 2: exit 2 is the Claude Code hook "block" code, and a budget
 // refusal must never block a tool call (the supervisor hook stays fail-open).
 func printBudgetHelp(w io.Writer) {
-	_, _ = fmt.Fprint(w, `yakos budget <status|set|reset|check> — per-agent dollar budgets with a hard stop
+	_, _ = fmt.Fprint(w, `yakos budget <status|set|reset|check> — per-agent token and dollar budgets with a hard stop
 
 Subcommands:
     status [--json] [--by-project] [--project <path>]
                           One row per agent with a budget (user-level, built-in, or
                           a project agent_budgets: entry): state, spend, limit.
-                          --by-project adds each agent's spend per project.
-    set <agent> <usd> [--window monthly|lifetime] [--max-model haiku|sonnet|opus|fable]
-                          Set an agent's limit in ~/.yakos-state/budget-policy.yml.
-                          0 turns the limit off (including a built-in default).
+                          Token columns appear when an agent has used tokens or has
+                          a token limit. --by-project adds each agent's spend per project.
+    set <agent> [<usd>] [--tokens <n>] [--window monthly|lifetime] [--max-model haiku|sonnet|opus|fable]
+                          Set an agent's limits in ~/.yakos-state/budget-policy.yml.
+                          <usd> is a dollar limit; it counts only runs billed per API
+                          call, never a subscription or a local model.
+                          --tokens is a token limit: the input, output and cache tokens of
+                          every run, whatever it is billed (5000000, 500k, 1.5m, 2b).
+                          Give <usd>, --tokens, or both. 0 turns a limit off
+                          (including a built-in default).
                           --max-model also sets a model-tier ceiling for the agent
                           (a project cannot raise its cost with a dearer model).
     reset <agent>         Start the agent's current window over. Spend already
@@ -47,12 +54,13 @@ Flags:
     --json                Machine-readable output.
     --window <w>          monthly (calendar month, local time; default) or lifetime.
     --by-project          status: list spend per project under each agent.
+    --tokens <n>          set: token limit (see set).
     --max-model <tier>    set: model-tier ceiling applied at dispatch.
     --project <path>      Project whose .yakos.yml agent_budgets: may LOWER a limit.
 
-States: ok, warning (default 80% of the limit), hard_stop (100%: new dispatches
-are refused, exit 4; a run in flight is not killed). Agents have no budget
-unless one is set, except supervisor ($100/month) and librarian ($40/month).
+States: ok, warning (default 80% of the limit), hard_stop (100% of either limit:
+new dispatches are refused, exit 4; a run in flight is not killed). Agents have no
+budget unless one is set, except supervisor ($100/month) and librarian ($40/month).
 See docs/budgets.md.
 `)
 }
@@ -73,6 +81,7 @@ func runBudget(args []string) {
 		window    = "monthly"
 		maxModel  string
 		project   string
+		tokensArg string
 	)
 	specs := []cliflag.Spec{{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help}}
 	switch sub {
@@ -82,6 +91,7 @@ func runBudget(args []string) {
 			cliflag.Spec{Name: "--project", Kind: cliflag.String, Str: &project, ValueDesc: "a path"})
 	case "set":
 		specs = append(specs, cliflag.Spec{Name: "--window", Kind: cliflag.String, Str: &window, ValueDesc: "monthly or lifetime"},
+			cliflag.Spec{Name: "--tokens", Kind: cliflag.String, Str: &tokensArg, ValueDesc: "a token count"},
 			cliflag.Spec{Name: "--max-model", Kind: cliflag.String, Str: &maxModel, ValueDesc: "a model tier"})
 	case "reset":
 	case "check":
@@ -119,18 +129,42 @@ func runBudget(args []string) {
 		}
 		budgetStatus(os.Stdout, opts, asJSON, byProject)
 	case "set":
-		if len(pos) != 2 {
-			fmt.Fprintln(os.Stderr, "usage: yakos budget set <agent> <usd> [--window monthly|lifetime]")
+		// <agent> [<usd>] [--tokens <n>]: at least one limit is required.
+		if len(pos) < 1 || len(pos) > 2 || (len(pos) == 1 && tokensArg == "") {
+			fmt.Fprintln(os.Stderr, "usage: yakos budget set <agent> [<usd>] [--tokens <n>] [--window monthly|lifetime]")
 			os.Exit(1)
 		}
-		usd, err := strconv.ParseFloat(strings.TrimPrefix(pos[1], "$"), 64)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "budget set: %q is not a dollar amount\n", pos[1])
-			os.Exit(1)
+		var (
+			usd    float64
+			tokens int64
+		)
+		if len(pos) == 2 {
+			var err error
+			usd, err = strconv.ParseFloat(strings.TrimPrefix(pos[1], "$"), 64)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "budget set: %q is not a dollar amount\n", pos[1])
+				os.Exit(1)
+			}
 		}
-		if err := budget.SetLimit(opts.StateDirOrDefault(), pos[0], usd, budget.Window(window)); err != nil {
-			fmt.Fprintln(os.Stderr, err)
-			os.Exit(1)
+		if tokensArg != "" {
+			var err error
+			tokens, err = parseTokenCount(tokensArg)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "budget set: %v\n", err)
+				os.Exit(1)
+			}
+		}
+		if len(pos) == 2 {
+			if err := budget.SetLimit(opts.StateDirOrDefault(), pos[0], usd, budget.Window(window)); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+		}
+		if tokensArg != "" {
+			if err := budget.SetTokenLimit(opts.StateDirOrDefault(), pos[0], tokens, budget.Window(window)); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
 		}
 		if maxModel != "" {
 			if err := budget.SetMaxModel(opts.StateDirOrDefault(), pos[0], maxModel); err != nil {
@@ -139,10 +173,19 @@ func runBudget(args []string) {
 			}
 			fmt.Printf("model ceiling for %s set to %s\n", pos[0], maxModel)
 		}
-		if usd == 0 {
-			fmt.Printf("budget for %s turned off\n", pos[0])
-		} else {
-			fmt.Printf("budget for %s set to $%.2f (%s)\n", pos[0], usd, window)
+		if len(pos) == 2 {
+			if usd == 0 {
+				fmt.Printf("budget for %s turned off\n", pos[0])
+			} else {
+				fmt.Printf("budget for %s set to $%.2f (%s)\n", pos[0], usd, window)
+			}
+		}
+		if tokensArg != "" {
+			if tokens == 0 {
+				fmt.Printf("token budget for %s turned off\n", pos[0])
+			} else {
+				fmt.Printf("token budget for %s set to %d tokens (%s)\n", pos[0], tokens, window)
+			}
 		}
 	case "reset":
 		if len(pos) != 1 {
@@ -184,7 +227,13 @@ func budgetCheck(stdout, stderr io.Writer, agent string, opts budget.Options, as
 		b, _ := json.Marshal(st)
 		fmt.Fprintln(stdout, string(b))
 	} else {
-		fmt.Fprintf(stdout, "reason=%s state=%s agent=%s spent_usd=%.2f limit_usd=%.2f window=%s\n", st.Reason, st.State, st.Agent, st.SpentUSD, st.LimitUSD, st.Window)
+		line := fmt.Sprintf("reason=%s state=%s agent=%s spent_usd=%.2f limit_usd=%.2f window=%s", st.Reason, st.State, st.Agent, st.SpentUSD, st.LimitUSD, st.Window)
+		if st.LimitTokens > 0 {
+			// Only an agent with a token limit gains these two keys, so the line
+			// stays as it was for every other agent.
+			line += fmt.Sprintf(" spent_tokens=%d limit_tokens=%d", st.SpentTokens, st.LimitTokens)
+		}
+		fmt.Fprintln(stdout, line)
 		fmt.Fprintln(stdout, st.Message())
 	}
 	if st.Refused() {
@@ -213,22 +262,70 @@ func budgetStatus(w io.Writer, opts budget.Options, asJSON, byProject bool) {
 		fmt.Fprintln(w, string(b))
 		return
 	}
+	// Tokens are the primary unit (K-136): when any agent has used tokens or has a
+	// token limit, the table gains TOKENS and TOKEN LIMIT columns. Without any, the
+	// table is exactly the dollar table it always was.
+	showTokens := false
+	for _, st := range rows {
+		showTokens = showTokens || st.SpentTokens > 0 || st.LimitTokens > 0
+	}
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "AGENT\tSTATE\tSPENT\tLIMIT\tUSED\tWINDOW\tSOURCE")
+	if showTokens {
+		fmt.Fprintln(tw, "AGENT\tSTATE\tTOKENS\tTOKEN LIMIT\tSPENT\tLIMIT\tUSED\tWINDOW\tSOURCE")
+	} else {
+		fmt.Fprintln(tw, "AGENT\tSTATE\tSPENT\tLIMIT\tUSED\tWINDOW\tSOURCE")
+	}
 	for _, st := range rows {
 		limit, used := "off", "-"
-		if st.LimitUSD > 0 {
-			limit = fmt.Sprintf("$%.2f", st.LimitUSD)
+		if st.LimitUSD > 0 || st.LimitTokens > 0 {
 			used = fmt.Sprintf("%.0f%%", st.Pct)
 		}
-		fmt.Fprintf(tw, "%s\t%s\t$%.2f\t%s\t%s\t%s\t%s\n", st.Agent, st.State, st.SpentUSD, limit, used, st.Window, st.Source)
+		if st.LimitUSD > 0 {
+			limit = fmt.Sprintf("$%.2f", st.LimitUSD)
+		}
+		if showTokens {
+			tokLimit := "off"
+			if st.LimitTokens > 0 {
+				tokLimit = fmt.Sprintf("%d", st.LimitTokens)
+			}
+			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t$%.2f\t%s\t%s\t%s\t%s\n", st.Agent, st.State, st.SpentTokens, tokLimit, st.SpentUSD, limit, used, st.Window, st.Source)
+		} else {
+			fmt.Fprintf(tw, "%s\t%s\t$%.2f\t%s\t%s\t%s\t%s\n", st.Agent, st.State, st.SpentUSD, limit, used, st.Window, st.Source)
+		}
 		if byProject {
 			for _, p := range st.Projects {
-				fmt.Fprintf(tw, "  %s\t\t$%.2f\t\t\t\t\n", p.Project, p.SpentUSD)
+				if showTokens {
+					fmt.Fprintf(tw, "  %s\t\t\t\t$%.2f\t\t\t\t\n", p.Project, p.SpentUSD)
+				} else {
+					fmt.Fprintf(tw, "  %s\t\t$%.2f\t\t\t\t\n", p.Project, p.SpentUSD)
+				}
 			}
 		}
 	}
 	_ = tw.Flush()
+}
+
+// parseTokenCount reads a token count: digits, optionally with a decimal point
+// and a k, m or b suffix (thousand, million, billion), such as 5000000, 500k,
+// 1.5m or 2b. It rejects anything negative, empty, or past the budget package's
+// bound.
+func parseTokenCount(s string) (int64, error) {
+	orig := s
+	s = strings.ToLower(strings.TrimSpace(s))
+	mult := 1.0
+	switch {
+	case strings.HasSuffix(s, "k"):
+		mult, s = 1e3, strings.TrimSuffix(s, "k")
+	case strings.HasSuffix(s, "m"):
+		mult, s = 1e6, strings.TrimSuffix(s, "m")
+	case strings.HasSuffix(s, "b"):
+		mult, s = 1e9, strings.TrimSuffix(s, "b")
+	}
+	f, err := strconv.ParseFloat(strings.ReplaceAll(s, "_", ""), 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 0 || f*mult > float64(int64(1)<<50) {
+		return 0, fmt.Errorf("%q is not a token count (use a number such as 5000000, 500k, 1.5m or 2b)", orig)
+	}
+	return int64(f*mult + 0.5), nil
 }
 
 // dispatchValueFlags are the `yakos dispatch` flags that consume the next

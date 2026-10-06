@@ -217,7 +217,7 @@ var commandRegistry = []commandEntry{
 	},
 	{
 		Name:   "budget",
-		Specs:  specSet("budget", "--json", "--window", "--project", "--by-project", "--max-model"),
+		Specs:  specSet("budget", "--json", "--window", "--project", "--by-project", "--max-model", "--tokens"),
 		HelpFn: printBudgetHelp,
 	},
 	{

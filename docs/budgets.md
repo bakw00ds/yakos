@@ -1,12 +1,17 @@
-# Per-agent dollar budgets (K-119)
+# Per-agent token and dollar budgets (K-119, K-136)
 
-A dollar budget caps what one agent may spend over a window. When an agent
-reaches its limit, new dispatches for that agent are refused until the limit is
-raised, the window is reset, or the window rolls over. The idea comes from
-Paperclip's per-agent budget hard stops. It is insurance against a runaway
-agent, not a steady-state saving: the efficiency audit of 2026-10-01 found the
-supervisor at $1,763 and 511 failing runs at $58, none of which any cap
-flagged.
+A budget caps what one agent may use over a window, as a token limit, a dollar
+limit, or both. When an agent reaches either limit, new dispatches for that agent
+are refused until the limit is raised, the window is reset, or the window rolls
+over. The idea comes from Paperclip's per-agent budget hard stops. It is insurance
+against a runaway agent, not a steady-state saving: the efficiency audit of
+2026-10-01 found the supervisor at $1,763 and 511 failing runs at $58, none of
+which any cap flagged.
+
+Tokens are the primary unit (K-136). A token limit counts the input, output and
+cache tokens of every run of the agent, whatever model ran it and however it was
+billed. A dollar limit counts only runs billed per API call, never a subscription
+harness and never a local model. See "Tokens first, dollars for API runs".
 
 ## States
 
@@ -14,14 +19,60 @@ flagged.
 |---|---|---|
 | `off` | No limit configured | Nothing. This is the default for most agents. |
 | `ok` | Below the warning percentage | Nothing. |
-| `warning` | At or above `warn_pct` (default 80%) | A line on stderr at dispatch, a warning in `yakos doctor`, a row in `yakos budget status`. |
-| `hard_stop` | At or above 100% of the limit | `yakos dispatch` refuses the run and exits 4. |
+| `warning` | At or above `warn_pct` (default 80%) of either limit | A line on stderr at dispatch, a warning in `yakos doctor`, a row in `yakos budget status`. |
+| `hard_stop` | At or above 100% of either limit | `yakos dispatch` refuses the run and exits 4. |
 
-A run already in flight is never killed. (The supervisor is the one exception to the 1x refusal in `yakos dispatch`; see "The supervisor at hard stop".) Spend is recorded when a run finishes
-(the `usage.total_cost_usd` on its `dispatch_finished` event), so two
+A run already in flight is never killed. (The supervisor is the one exception to the 1x refusal in `yakos dispatch`; see "The supervisor at hard stop".) Usage is recorded when a run finishes
+(the `usage` object and `billing` on its `dispatch_finished` event), so two
 dispatches started together near the limit both pass the pre-flight, and the
-next dispatch after they finish is refused. The overshoot is bounded by the cost
+next dispatch after they finish is refused. The overshoot is bounded by the size
 of the runs in flight.
+
+## Tokens first, dollars for API runs
+
+Every `dispatch_finished` event written by the Go dispatcher carries a `billing`
+value: `subscription` (the harness ran under the operator's login), `api` (it was
+billed per call) or `local`. The dispatcher reads it from the credentials the
+harness inherits: an API key of the harness's own provider in its environment
+(`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` or a Bedrock/Vertex/Foundry switch
+for claude; `OPENAI_API_KEY` or `CODEX_API_KEY` for codex; `GEMINI_API_KEY`,
+`GOOGLE_API_KEY` or `ANTIGRAVITY_API_KEY` for agy) means `api`, and none means
+`subscription`. Only the presence of a variable is read, never its value.
+
+| What | Subscription or local run | API run | Row from before K-136 |
+|---|---|---|---|
+| Tokens (`limit_tokens`) | counted | counted | counted, when it has a `usage` object |
+| Dollars (`limit_usd`) | **not counted** | counted | counted, as before |
+| The harness's reported cost | kept as `api_equivalent_usd`, `usage.total_cost_usd` is 0 | `usage.total_cost_usd` | `usage.total_cost_usd` |
+
+- `limit_tokens` is the total of fresh input, output, cache-read and
+  cache-creation tokens. It trips like `limit_usd`: `ok`, then `warning` at
+  `warn_pct`, then `hard_stop` at 100%, and the same window and reset rules.
+  Set it with `yakos budget set <agent> --tokens 5m` (also `500k`, `1.5m`,
+  `2b`, or a plain number) or in the policy file; `0` turns it off.
+- An agent with both limits is at `hard_stop` when either is reached, and the
+  refusal names the one that tripped. `pct` in `status` is the larger share.
+- `api_equivalent_usd` is what a subscription run would have cost at API
+  rates, as the harness reported it (only claude reports a figure). It is
+  informational: it is never spend and never counts toward `limit_usd`.
+- A row with no `billing` field (written by the bash dispatcher, or by the Go
+  dispatcher before K-136) keeps counting its dollars, so a dollar budget does
+  not reset itself when you upgrade. The bash dispatcher is still the default
+  `yakos dispatch` implementation, so its rows stay on the old rule until the
+  Go dispatcher becomes the default.
+- Codex and agy report tokens and no dollar figure, so under a subscription they
+  show tokens and no dollars anywhere. Only a token limit can stop them.
+- The built-in supervisor ($100) and librarian ($40) limits are dollar limits. For
+  a subscription operator they never trip, because those runs cost no dollars.
+  Add `limit_tokens` for them if you want a backstop; the built-ins do not have one.
+
+Limits of the billing detection: only the environment the dispatcher itself
+passes to the harness is read. A harness signed in through a pay-per-token console
+login, or given a key by its own settings (an `apiKeyHelper` or an `env` block in
+the harness's settings file), has no key in that environment and reads as a
+subscription. If that is your setup, set a token limit, which counts every run.
+The model registry (plan phase P1) will let you state the billing of a model in a
+user-level file.
 
 ## Windows
 
@@ -32,7 +83,7 @@ of the runs in flight.
 
 ```
 yakos budget status [--json] [--by-project] [--project <path>]
-yakos budget set <agent> <usd> [--window monthly|lifetime] [--max-model haiku|sonnet|opus|fable]
+yakos budget set <agent> [<usd>] [--tokens <n>] [--window monthly|lifetime] [--max-model haiku|sonnet|opus|fable]
 yakos budget reset <agent>
 yakos budget check <agent> [--project <path>] [--json]
 ```
@@ -40,12 +91,18 @@ yakos budget check <agent> [--project <path>] [--json]
 - `status` shows one row per agent that has a budget, whether it comes from the
   policy file, a built-in default, or only from the current project's
   `agent_budgets:` (the project is `--project`, else the working directory):
-  state, spend, limit, percentage, window and where the limit came from.
-  `--by-project` lists each agent's spend per project (the `project` recorded on
-  each dispatch-log entry). `--json` carries the same, top 10 projects per agent.
+  state, spend, limit, percentage, window and where the limit came from. When an
+  agent has used tokens or has a token limit, the table gains `TOKENS` and
+  `TOKEN LIMIT` columns, ahead of the dollar columns; without any it is the dollar
+  table it always was.
+  `--by-project` lists each agent's dollar spend per project (the `project` recorded on
+  each dispatch-log entry). `--json` carries the same, top 10 projects per agent,
+  plus `limit_tokens`, `stop_tokens`, `spent_tokens` and `tokens_pct`.
 - `set --max-model` also records a model-tier ceiling (see below).
 - `set` writes `~/.yakos-state/budget-policy.yml`. `set <agent> 0` turns the
-  limit off, including a built-in default.
+  dollar limit off, including a built-in default. `set <agent> --tokens <n>` sets
+  a token limit and leaves the dollar limit as it was; give `<usd>`, `--tokens`,
+  or both. The agent has one window, shared by both limits.
 - `reset` starts the agent's current window over. Spend already logged stops
   counting. The dispatch-log is not edited. A reset belongs to the window it was
   made in and does not carry into the next month.
@@ -56,7 +113,9 @@ yakos budget check <agent> [--project <path>] [--json]
   machine-readable and stable:
   `reason=<code> state=<state> agent=<agent> spent_usd=... limit_usd=... window=...`
   with `reason` one of `budget_off`, `budget_ok`, `budget_warning`,
-  `budget_exhausted` (`--json` has the same `reason` field).
+  `budget_exhausted` (`--json` has the same `reason` field). For an agent that
+  has a token limit the line ends with ` spent_tokens=<n> limit_tokens=<n>`; for
+  every other agent it is unchanged.
 - `yakos doctor` lists agents in `warning` or `hard_stop`, and prints nothing
   about budgets when every agent is healthy. The supervisor is special: at
   `hard_stop` doctor reports an **error**, "LLM supervision disabled: supervisor
@@ -101,10 +160,14 @@ agents:
     warn_pct: 90
   code-reviewer:
     limit_usd: 150
+  general-codex:
+    limit_tokens: 5000000   # fresh input + output + cache tokens, any billing; 0 = off
 ```
 
 Resolution order for one agent: its entry under `agents:`, then the built-in
-default, then `default:`, otherwise off.
+default, then `default:`, otherwise off. The two limits resolve independently, so
+an entry may set one and inherit the other. A project cannot set a token limit
+(`agent_budgets:` is dollars only), so only this file can.
 
 ## Projects may only lower a limit
 
@@ -161,12 +224,23 @@ Appends by yakos itself are unaffected, since they do not go through tool calls.
 
 ## How spend is computed
 
-Spend is the sum of `usage.total_cost_usd` over `dispatch_finished` events in
-`dispatch-log*.ndjson`, bucketed by agent and by local calendar month. Events
-without a cost count as zero.
+Usage is summed over `dispatch_finished` events in `dispatch-log*.ndjson`,
+bucketed by agent and by local calendar month. Tokens are the four counts of the
+`usage` object (`input_tokens`, `output_tokens`, `cache_read`, `cache_creation`)
+of every event, whatever its billing; an event without a `usage` object adds none
+(a size estimate such as `est_input_tokens` is not a count and is never used).
+Dollars are `usage.total_cost_usd`, counted only for an event whose `billing` is
+`api` or that has no `billing` field (see "Tokens first, dollars for API runs");
+events without a cost count as zero. A count that is negative or beyond any real
+run is read as 0, so one corrupt line cannot move a total. Codex rows written by the
+bash dispatcher hold the cached tokens inside `input_tokens` while Go rows put them
+in `cache_read`; the total adds all four, so both agree (docs/runtime-matrix.md,
+"Usage fields by harness").
 
 To keep the pre-flight fast, a derived cache `budget-spend.json` (mode 0600)
-holds per-agent totals and the byte offset consumed from the current log. Each
+holds per-agent totals (dollars and tokens) and the byte offset consumed from the
+current log. A cache written before token limits existed is rebuilt from the log
+once. Each
 pre-flight stats the log and reads only the bytes appended since the last one.
 The cache is rebuilt from the log (rotated archives included) when it is missing,
 corrupt, untrusted (a symlink, owned by another user, or group/world writable,
@@ -248,5 +322,10 @@ the Jev shadow decision, keep running.
 ## Not covered
 
 - In-flight runs are not stopped.
-- Spend is only what the dispatch-log records. Interactive Claude Code sessions
-  and teammates that never go through `yakos dispatch` are not counted.
+- Usage is only what the dispatch-log records. Interactive Claude Code sessions
+  you run yourself in a terminal and teammates that never go through
+  `yakos dispatch` are not counted. Turns of the console's Chat pane are: each
+  interactive turn writes one event pair (surface `console-chat`), and a streamed
+  chat turn is refused at a hard stop like any other dispatch. The Agent SDK
+  engine's turns carry a dollar cost and no token counts, so a token limit does
+  not see them until the sidecar reports usage.
