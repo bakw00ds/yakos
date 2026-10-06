@@ -29,6 +29,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/bakw00ds/yakos/internal/cost"
@@ -202,7 +203,9 @@ func buildFinished(req Request, res Result, ts time.Time) finishedEvent {
 // applyLedger fills the K-136 fields of ev and decides what its usage object
 // says about dollars. The rules:
 //
-//   - Tokens are recorded as reported, for every runtime and billing mode.
+//   - Tokens are recorded as reported, for every runtime and billing mode, except
+//     that a figure the harness reported as negative is recorded as 0: a log
+//     sum must never go down because of one hostile or corrupt row.
 //   - billing comes from the credentials the harness inherited
 //     (runtime.BillingFor), never from the request.
 //   - A dollar figure the harness reported (claude's total_cost_usd) is spend only
@@ -213,6 +216,9 @@ func buildFinished(req Request, res Result, ts time.Time) finishedEvent {
 //     harness's.
 //   - A run on a runtime this build does not know (a plugin) has no billing; its
 //     row reads like a pre-K-136 row.
+//   - Nothing the harness reports can stop the event being written: a cost that
+//     is NaN, infinite or negative is recorded as 0 (encoding/json refuses to
+//     encode a non-finite number, and the whole finished event would be lost).
 //
 // The caller's Result and its Usage are not modified.
 func applyLedger(ev *finishedEvent, req Request, res Result) {
@@ -233,7 +239,14 @@ func applyLedger(ev *finishedEvent, req Request, res Result) {
 
 	if res.Usage != nil {
 		u := *res.Usage
-		if usd := finiteUSD(u.TotalCostUSD); usd > 0 {
+		u.InputTokens = nonNegative(u.InputTokens)
+		u.OutputTokens = nonNegative(u.OutputTokens)
+		u.CacheRead = nonNegative(u.CacheRead)
+		u.CacheCreation = nonNegative(u.CacheCreation)
+		u.DurationMs = nonNegative(u.DurationMs)
+		usd := finiteUSD(u.TotalCostUSD)
+		u.TotalCostUSD = usd
+		if usd > 0 {
 			ev.CostSource = costSourceHarness
 			if !cost.CountsAsSpend(ev.Billing) {
 				ev.APIEquivalentUSD = usd
@@ -253,9 +266,17 @@ func applyLedger(ev *finishedEvent, req Request, res Result) {
 	ev.PolicySHA = logHex(req.PolicySHA, 64)
 }
 
+// nonNegative returns v, or 0 when v is negative.
+func nonNegative(v int64) int64 {
+	if v < 0 {
+		return 0
+	}
+	return v
+}
+
 // finiteUSD returns v when it is a finite positive dollar figure within reason,
 // else 0, so a corrupt or hostile number cannot become spend or an
-// API-equivalent.
+// API-equivalent, and cannot make the event unencodable.
 func finiteUSD(v float64) float64 {
 	if math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 || v > 1e12 {
 		return 0
@@ -316,12 +337,19 @@ func logHex(s string, max int) string {
 
 // logText returns s with control characters removed, cut to at most max bytes on
 // a rune boundary. It is for the router's short human-readable reason.
+//
+// What is removed: the C0 and C1 control characters (so a terminal escape, a
+// carriage return or a NEL cannot rewrite a line when the log is tailed), DEL,
+// the Unicode format characters (the bidirectional overrides and isolates that
+// reorder text on screen, the zero-width characters that hide it, the byte order
+// mark), the line and paragraph separators, and invalid UTF-8.
 func logText(s string, max int) string {
 	if s == "" {
 		return ""
 	}
 	clean := strings.Map(func(r rune) rune {
-		if r < 0x20 || r == 0x7f || r == utf8.RuneError {
+		if r == utf8.RuneError || unicode.IsControl(r) || unicode.Is(unicode.Cf, r) ||
+			unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r) {
 			return -1
 		}
 		return r
