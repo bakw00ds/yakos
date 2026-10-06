@@ -158,10 +158,10 @@ func TestParseProject_ParseErrorSaysTheDisableListIsNotApplied(t *testing.T) {
 	}
 }
 
-// OS error text carries the project's path, and a directory can be named with
-// anything. Warnings are printed to a terminal, so they hold no control or escape
-// characters whatever the path.
-func TestLoadProject_OSErrorTextIsSanitized(t *testing.T) {
+// An OS error carries the project's path, and a directory can be named with anything.
+// Warnings are printed to a terminal and, later, served over an API, so a read
+// failure is worded by role and names no path.
+func TestLoadProject_ReadErrorsNameNoPath(t *testing.T) {
 	skipIfNoPosixModes(t)
 	if os.Geteuid() == 0 {
 		t.Skip("root can read a mode-000 file")
@@ -175,12 +175,11 @@ func TestLoadProject_OSErrorTextIsSanitized(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, warns := LoadProject(dir)
-	if len(warns) != 1 {
-		t.Fatalf("warnings = %v, want the read error", warns)
+	want := ".yakos.yml: permission denied, so a models: disable list in it is NOT applied"
+	if len(warns) != 1 || warns[0] != want {
+		t.Fatalf("warnings = %q, want exactly [%q]", warns, want)
 	}
-	for _, r := range warns[0] {
-		if r < 0x20 || r == 0x7f {
-			t.Errorf("warning holds control character %q: %q", r, warns[0])
-		}
+	if strings.Contains(warns[0], "roj") || strings.Contains(warns[0], os.TempDir()) {
+		t.Errorf("the warning names the project's path: %q", warns[0])
 	}
 }

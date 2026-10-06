@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,7 +31,9 @@ import (
 //     snapshot, in memory and on disk, stays in effect. A glitch must not mark
 //     every model unavailable.
 //   - Output is data. Ids that fail ValidID are never kept, names are sanitized,
-//     and no text from the command's standard output ever reaches a reason.
+//     and no text from the command's standard output or standard error ever
+//     reaches a reason or a warning (vendor error text can hold a token or a home
+//     path). Reasons and warnings hold no path either.
 
 const (
 	agyHarness = "agy"
@@ -77,7 +80,8 @@ type ProbeReport struct {
 	Harness string      `json:"harness"`
 	Status  ProbeStatus `json:"status"`
 	// Reason is one operator-facing line for skipped, unsupported and failed. It
-	// holds no control characters and is at most maxReasonRunes long.
+	// holds no control characters, no path and no text the command printed, and is
+	// at most maxReasonRunes long.
 	Reason string `json:"reason,omitempty"`
 	// Snapshot is the snapshot in effect after the probe: the new one when
 	// updated, the previous one (if any) otherwise.
@@ -429,6 +433,9 @@ func (d *Discoverer) discover(ctx context.Context, harness string) (ProbeReport,
 
 	dir, err := d.workDir()
 	if err != nil {
+		if errors.Is(err, errNoPrivateDir) {
+			return probeSkipped(rep, "agy was not run: there is no secured yakOS state directory to run it in")
+		}
 		return probeFailed(rep, "cannot create a private working directory for agy", err)
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
@@ -449,14 +456,14 @@ func (d *Discoverer) discover(ctx context.Context, harness string) (ProbeReport,
 	case errors.Is(err, context.Canceled):
 		return probeFailed(rep, "agy models was cancelled", err)
 	case err != nil:
-		return probeFailed(rep, "cannot run agy models: "+err.Error(), err)
+		return probeFailed(rep, startFailureReason(err), err)
 	}
 	if res.ExitCode != 0 {
-		reason := fmt.Sprintf("agy models exited with status %d", res.ExitCode)
-		if line := stderrReason(res.Stderr); line != "" {
-			reason += ": " + line
-		}
-		return probeFailed(rep, reason, nil)
+		// What agy printed on standard error is not repeated: vendor error text can
+		// hold a token, an API-key URL or a home path, and a probe's output is read by
+		// agents (so it reaches a model provider) and is meant to be served over an API.
+		// The operator can run `agy models` to read the message itself.
+		return probeFailed(rep, fmt.Sprintf("agy models exited with status %d (run `agy models` to see its message)", res.ExitCode), nil)
 	}
 
 	models, dropped := parseAgyModels(res.Stdout)
@@ -492,25 +499,31 @@ func (d *Discoverer) discover(ctx context.Context, harness string) (ProbeReport,
 	}
 	if d.cfg.StateDir != "" {
 		if err := writeCacheFile(d.cfg.StateDir, all); err != nil {
-			rep.Warnings = append(rep.Warnings, "cache not written: "+sanitizeText(err.Error(), maxReasonRunes))
+			rep.Warnings = append(rep.Warnings, cacheWriteWarning(err))
 		}
 	}
 	return rep, nil
 }
 
-// workDir makes the private directory agy runs in. It goes inside the secured
-// state directory when there is one: the process's temp directory follows TMPDIR,
-// which a project's environment can set, and whoever owns the parent of a
-// directory can swap it after it is made. The state directory is owner-only
-// (statepath.SecureDir refuses a symlink, another owner, and loosens the mode),
-// so nobody else can. Without a state directory the temp directory is used.
+// errNoPrivateDir means there is no secured state directory to run agy in.
+var errNoPrivateDir = errors.New("modelreg: no secured state directory")
+
+// workDir makes the private directory agy runs in, inside the secured state
+// directory. The state directory is owner-only (statepath.SecureDir refuses a
+// symlink and another owner, and loosens the mode), so nobody else can swap what is
+// made inside it. There is no fallback to the process's temp directory: that
+// follows TMPDIR, which a project's environment can set, and agy run in a directory
+// the project chose may load the project's workspace configuration. With no
+// secured state directory the probe is skipped (errNoPrivateDir) rather than run
+// anywhere else.
 func (d *Discoverer) workDir() (string, error) {
-	if d.cfg.StateDir != "" && statepath.SecureDir(d.cfg.StateDir) == nil {
-		if dir, err := os.MkdirTemp(d.cfg.StateDir, ".discover-*"); err == nil {
-			return dir, nil
-		}
+	if d.cfg.StateDir == "" {
+		return "", errNoPrivateDir
 	}
-	return os.MkdirTemp("", "yakos-modelreg-*")
+	if err := statepath.SecureDir(d.cfg.StateDir); err != nil {
+		return "", fmt.Errorf("%w: %w", errNoPrivateDir, err)
+	}
+	return os.MkdirTemp(d.cfg.StateDir, ".discover-*")
 }
 
 // cloneReport copies r's slices so callers that shared one probe cannot change
@@ -550,13 +563,47 @@ func probeSkipped(rep ProbeReport, reason string) (ProbeReport, error) {
 	return rep, nil
 }
 
+// reasonError is the error a failed probe returns. Its text is the probe's own
+// reason sentence, which holds no path and no text from the command; the cause
+// stays reachable with errors.Is and errors.As (a caller can tell a deadline from
+// an overflow), but printing the error never prints it: an error from os/exec
+// carries the program's absolute path, and one from the state directory carries
+// that directory's.
+type reasonError struct {
+	msg   string
+	cause error
+}
+
+func (e *reasonError) Error() string { return e.msg }
+func (e *reasonError) Unwrap() error { return e.cause }
+
 func probeFailed(rep ProbeReport, reason string, cause error) (ProbeReport, error) {
 	rep.Status = ProbeFailed
 	rep.Reason = sanitizeText(reason, maxReasonRunes)
 	if cause == nil {
 		cause = errors.New(rep.Reason)
 	}
-	return rep, fmt.Errorf("modelreg: %s discovery failed: %w", rep.Harness, cause)
+	return rep, &reasonError{msg: "modelreg: " + rep.Harness + " discovery failed: " + rep.Reason, cause: cause}
+}
+
+// startFailureReason words a failure to start the program without naming it.
+func startFailureReason(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrPermission):
+		return "agy could not be started: permission denied"
+	case errors.Is(err, fs.ErrNotExist):
+		return "agy could not be started: it is no longer where PATH found it"
+	}
+	return "agy could not be started"
+}
+
+// cacheWriteWarning words a failure to write the cache without naming the state
+// directory (a probe's output holds no paths).
+func cacheWriteWarning(err error) string {
+	if errors.Is(err, fs.ErrPermission) {
+		return "cache not written: permission denied on the yakOS state directory"
+	}
+	return "cache not written: the yakOS state directory is not usable (not private, or not writable)"
 }
 
 // diffSnapshotIDs returns the ids in next and not in prev, and the ids in prev and not in

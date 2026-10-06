@@ -227,26 +227,6 @@ func TestDiscoverySanitize_Table(t *testing.T) {
 	}
 }
 
-func TestDiscoveryStderrReason(t *testing.T) {
-	cases := []struct{ name, in, want string }{
-		{"empty", "", ""},
-		{"blank lines only", "\n  \n", ""},
-		{"first line", "boom\nsecond\n", "boom"},
-		{"progress line then the failure", "Fetching available models...\nError: not signed in\n", "Error: not signed in"},
-		{"progress line only", "Fetching available models...\n", "Fetching available models..."},
-		{"progress then blanks", "Fetching available models...\n\n", "Fetching available models..."},
-		{"escapes and controls removed", "\x1b[31mError:\x1b[0m bad\x00 thing\n", "Error: bad thing"},
-		{"cut", strings.Repeat("x", 500) + "\n", strings.Repeat("x", maxReasonRunes)},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := stderrReason([]byte(tc.in)); got != tc.want {
-				t.Errorf("stderrReason(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
-
 // FuzzDiscoveryParse holds the invariants the rest of the package relies on
 // whatever bytes a command prints. `go test` runs the seeds; run it for longer
 // with `go test -fuzz FuzzDiscoveryParse -fuzztime 30s ./internal/modelreg`.
@@ -291,10 +271,6 @@ func FuzzDiscoveryParse(f *testing.F) {
 					t.Fatalf("name %q holds %U", m.Name, r)
 				}
 			}
-		}
-		// The reason helper takes standard error, which is as untrusted.
-		if r := stderrReason([]byte(in)); utf8.RuneCountInString(r) > maxReasonRunes || strings.ContainsAny(r, "\n\r\x1b\x00") {
-			t.Fatalf("unsafe reason %q", r)
 		}
 	})
 }

@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -868,5 +870,108 @@ func copyExe(t *testing.T, from, to string) {
 	}
 	if err := dst.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// ---- what the probe prints ---------------------------------------------------------------
+
+// A failed probe prints a reason by role. Nothing agy wrote to standard error or
+// standard output, and no path, reaches the table, the --json report or stderr:
+// agents run `yakos models probe` through Bash, so its output enters transcripts
+// that go to a model provider, and the report is meant to be served over an API.
+func TestModelsProbeOutputNeverHoldsWhatAgyPrinted(t *testing.T) {
+	const stderrText = "Fetching available models...\nError: token ya29.SENTINEL-TOKEN-9f8e7d rejected; see /Users/someone/.gemini/antigravity-cli/oauth_creds.json\n" +
+		"GET https://example.invalid/v1/models?key=AIzaSENTINELKEY0123456789abcdefghijk failed\n"
+	scenarios := map[string]func(ctx context.Context, spec modelreg.RunSpec) (modelreg.RunResult, error){
+		"non-zero exit": func(context.Context, modelreg.RunSpec) (modelreg.RunResult, error) {
+			return modelreg.RunResult{ExitCode: 3, Stderr: []byte(stderrText), Stdout: []byte("ya29.SENTINEL-TOKEN\n")}, nil
+		},
+		"no usable listing": func(context.Context, modelreg.RunSpec) (modelreg.RunResult, error) {
+			return modelreg.RunResult{Stderr: []byte(stderrText), Stdout: []byte("error: ya29.SENTINEL-TOKEN at /Users/someone/x\n")}, nil
+		},
+		"could not start": func(context.Context, modelreg.RunSpec) (modelreg.RunResult, error) {
+			return modelreg.RunResult{}, &fs.PathError{Op: "fork/exec", Path: "/Users/someone/bin/agy", Err: fs.ErrPermission}
+		},
+	}
+	for name, fn := range scenarios {
+		for _, mode := range [][]string{{"probe", "--harness", "agy"}, {"probe", "--harness", "agy", "--json"}} {
+			t.Run(strings.TrimSpace(name+" "+strings.Join(mode[3:], "")), func(t *testing.T) {
+				r := newModelsRig(t)
+				r.run = fn
+				code, out, errs := r.do(mode...)
+				if code != 1 {
+					t.Fatalf("exit %d, want 1 for a failed probe", code)
+				}
+				for where, text := range map[string]string{"stdout": out, "stderr": errs} {
+					for _, bad := range []string{"SENTINEL", "ya29", "?key=", "/Users/", "oauth_creds", "antigravity-cli", "someone"} {
+						if strings.Contains(text, bad) {
+							t.Errorf("%s holds %q:\n%s", where, bad, text)
+						}
+					}
+				}
+				if !strings.Contains(out, "failed") && !strings.Contains(out, `"status": "failed"`) {
+					t.Errorf("the failure is not reported:\n%s", out)
+				}
+			})
+		}
+	}
+}
+
+// With no home directory there is no secured state directory, so agy is not run at
+// all; the answer is a skip, not an error.
+func TestModelsProbeWithoutAStateDirIsSkipped(t *testing.T) {
+	r := newModelsRig(t)
+	r.stateDir = ""
+	code, out, errs := r.do("probe", "--harness", "agy")
+	if code != 0 || errs != "" {
+		t.Errorf("exit %d, stderr %q", code, errs)
+	}
+	if !strings.Contains(out, "agy: skipped, agy was not run: there is no secured yakOS state directory to run it in\n") {
+		t.Errorf("out:\n%s", out)
+	}
+	if r.runs != 0 {
+		t.Errorf("agy ran %d time(s)", r.runs)
+	}
+}
+
+// agy runs in a session of its own and no longer receives a Ctrl-C from the
+// terminal, so the probe is bound to the interrupt and the command waits for the
+// stopped run to finish dying before it returns.
+func TestModelsProbeStopsAgyWhenTheContextEnds(t *testing.T) {
+	r := newModelsRig(t)
+	started := make(chan struct{})
+	var finished atomic.Bool
+	r.run = func(ctx context.Context, spec modelreg.RunSpec) (modelreg.RunResult, error) {
+		close(started)
+		<-ctx.Done()
+		time.Sleep(200 * time.Millisecond) // the group takes a moment to die
+		finished.Store(true)
+		return modelreg.RunResult{}, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	env := r.env()
+	env.ctx = ctx
+	type result struct {
+		code     int
+		out, err string
+	}
+	done := make(chan result, 1)
+	go func() {
+		var out, errb bytes.Buffer
+		code := modelsMain([]string{"probe", "--harness", "agy"}, &out, &errb, env)
+		done <- result{code, out.String(), errb.String()}
+	}()
+	<-started
+	cancel()
+	select {
+	case res := <-done:
+		if res.code != 1 || !strings.Contains(res.out, "agy: failed, stopped waiting for the listing") {
+			t.Errorf("exit %d\n%s\n%s", res.code, res.out, res.err)
+		}
+		if !finished.Load() {
+			t.Error("probe returned before the stopped run had finished: a killed group might not have been reaped before the process exited")
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("probe did not return after its context ended")
 	}
 }

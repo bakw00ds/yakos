@@ -166,6 +166,7 @@ func Load(o Options) (*Registry, error) {
 	r.admit(ov.Admit, snaps)
 	r.applyOverlayModels(ov.Models)
 	r.buildAliases(ov.Aliases)
+	r.warnAmbiguousAliases()
 	r.applyProject(pol.Disable)
 	r.applyAvailability(snaps, now(), fresh)
 	r.labelAliases()
@@ -336,6 +337,41 @@ func (r *Registry) buildAliases(overlay map[string]map[string]string) {
 				r.warn("aliases.%s.%s: %s is not a %s model the registry knows; accepted because the overlay is yours", a, h, id, h)
 			}
 			r.aliases[a][h], r.aliasBy[a][h] = id, FromOverlay
+		}
+	}
+}
+
+// warnAmbiguousAliases reports an id that two aliases of different cost classes
+// map to on one harness. The catalog has none (best and reasoning share a rank);
+// an overlay can create one, and the dearer class counts for the model (see
+// ClassOf), which is rarely what a mapping meant.
+func (r *Registry) warnAmbiguousAliases() {
+	for _, h := range Harnesses {
+		byID := map[string][]string{}
+		var order []string
+		for _, a := range AliasNames {
+			id := r.aliases[a][h]
+			if id == "" {
+				continue
+			}
+			if _, seen := byID[id]; !seen {
+				order = append(order, id)
+			}
+			byID[id] = append(byID[id], a)
+		}
+		for _, id := range order {
+			aliases := byID[id]
+			lo, hi := aliasRank[aliases[0]], aliasRank[aliases[0]]
+			for _, a := range aliases[1:] {
+				if rk := aliasRank[a]; rk < lo {
+					lo = rk
+				} else if rk > hi {
+					hi = rk
+				}
+			}
+			if lo != hi {
+				r.warn("aliases %s all map to %s on %s but are different cost classes; the dearest counts", joinWords(aliases), id, h)
+			}
 		}
 	}
 }

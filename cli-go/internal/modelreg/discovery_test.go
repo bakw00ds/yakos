@@ -2,8 +2,10 @@ package modelreg
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -238,9 +240,14 @@ func TestDiscoveryNew_RelativeStateDirMeansNoDisk(t *testing.T) {
 	if s, ok := rig.d.Snapshot("agy"); ok {
 		t.Errorf("a cache in a relative directory was read: %+v", s)
 	}
+	// And agy is not run in it either: with no usable state directory there is no
+	// private place to run it (see TestDiscoveryProbe_WithoutAStateDirAgyIsNotRun).
 	rep, err := rig.d.Probe(context.Background(), "agy")
-	if err != nil || rep.Status != ProbeUpdated || len(rep.Warnings) != 0 {
-		t.Fatalf("probe: %q %v %v", rep.Status, rep.Warnings, err)
+	if err != nil || rep.Status != ProbeSkipped {
+		t.Fatalf("probe: %q %q %v, want skipped", rep.Status, rep.Reason, err)
+	}
+	if rig.runner.count() != 0 {
+		t.Errorf("agy ran %d time(s) with a relative state directory", rig.runner.count())
 	}
 	entries, _ := os.ReadDir("state")
 	if len(entries) != 1 || entries[0].Name() != DiscoveryFileName {
@@ -408,23 +415,24 @@ func TestDiscoveryProbe_RunsExactlyAgyModelsInAPrivateDirectory(t *testing.T) {
 	}
 }
 
-// With no state directory (memory-only discovery) the temp directory is the only
-// place left for the private working directory.
-func TestDiscoveryProbe_WithoutAStateDirTheTempDirIsUsed(t *testing.T) {
-	var sawDir string
+// agy runs in a private directory inside the secured state directory and nowhere
+// else: the temp directory follows TMPDIR, which a project's environment can set,
+// and agy run in a directory the project chose may load the project's workspace
+// configuration. With no state directory the probe is skipped.
+func TestDiscoveryProbe_WithoutAStateDirAgyIsNotRun(t *testing.T) {
 	rig := newDiscRig(t, func(c *DiscovererConfig) { c.StateDir = "" })
-	rig.runner.fn = func(_ context.Context, spec RunSpec) (RunResult, error) {
-		sawDir = spec.Dir
-		return discListing("model-a"), nil
+	rep, err := rig.d.Probe(context.Background(), "agy")
+	if err != nil || rep.Status != ProbeSkipped {
+		t.Fatalf("got %q %q %v, want skipped", rep.Status, rep.Reason, err)
 	}
-	if _, err := rig.d.Probe(context.Background(), "agy"); err != nil {
-		t.Fatal(err)
+	if rep.Reason != "agy was not run: there is no secured yakOS state directory to run it in" {
+		t.Errorf("Reason = %q", rep.Reason)
 	}
-	if filepath.Dir(sawDir) != filepath.Clean(os.TempDir()) || !strings.HasPrefix(filepath.Base(sawDir), "yakos-modelreg-") {
-		t.Errorf("working directory %q, want a yakos-modelreg-* directory directly under %q", sawDir, os.TempDir())
+	if rig.runner.count() != 0 {
+		t.Errorf("agy ran %d time(s) with nowhere private to run", rig.runner.count())
 	}
-	if _, err := os.Stat(sawDir); !os.IsNotExist(err) {
-		t.Errorf("the working directory outlived the run: %v", err)
+	if _, ok := rig.d.Snapshot("agy"); ok {
+		t.Error("a skipped probe left a snapshot")
 	}
 }
 
@@ -529,7 +537,8 @@ func TestDiscoveryProbe_NonZeroExitFails(t *testing.T) {
 	if err == nil || rep.Status != ProbeFailed {
 		t.Fatalf("got %q, %v; want failed with an error", rep.Status, err)
 	}
-	if rep.Reason != "agy models exited with status 2: Error: session expired" {
+	// What agy printed on standard error is not repeated (see the sentinel tests).
+	if rep.Reason != "agy models exited with status 2 (run `agy models` to see its message)" {
 		t.Errorf("Reason = %q", rep.Reason)
 	}
 	after, _ := rig.d.Snapshot("agy")
@@ -553,7 +562,7 @@ func TestDiscoveryProbe_ReasonNeverHoldsStandardOutput(t *testing.T) {
 	if strings.Contains(rep.Reason, "SENTINEL") || strings.Contains(err.Error(), "SENTINEL") {
 		t.Errorf("standard output leaked into %q / %v", rep.Reason, err)
 	}
-	if rep.Reason != "agy models exited with status 1" {
+	if rep.Reason != "agy models exited with status 1 (run `agy models` to see its message)" {
 		t.Errorf("Reason = %q", rep.Reason)
 	}
 	// And a listing with no usable id, whatever it said.
@@ -566,17 +575,58 @@ func TestDiscoveryProbe_ReasonNeverHoldsStandardOutput(t *testing.T) {
 	}
 }
 
-func TestDiscoveryProbe_ReasonIsOneSanitizedLine(t *testing.T) {
-	rig := newDiscRig(t)
-	rig.runner.fn = func(context.Context, RunSpec) (RunResult, error) {
-		return RunResult{ExitCode: 1, Stderr: []byte("\x1b[31mError:\x1b[0m " + strings.Repeat("long ", 100) + "\nsecond line\n")}, nil
+// Nothing the command printed reaches a reason, a warning or an error: vendor error
+// text can hold a token, an API-key URL or a home path, and a probe's output is read
+// by agents (so it reaches a model provider) and is meant to be served over an API.
+// The sentinels are token-shaped, a key in a URL query, a home path and an
+// escape-laden line; the report is also rendered as JSON, the form an API serves.
+func TestDiscoveryProbe_NothingTheCommandPrintedReachesAnyOutput(t *testing.T) {
+	const (
+		token = "ya29.SENTINEL-TOKEN-9f8e7d6c5b4a"
+		url   = "https://example.invalid/v1/models?key=AIzaSENTINELKEY0123456789abcdefghijk"
+		home  = "/Users/someone/.gemini/antigravity-cli/oauth_creds.json"
+	)
+	leaked := func(t *testing.T, where, text string) {
+		t.Helper()
+		for _, s := range []string{token, "SENTINEL", "?key=", home, "/Users/", "oauth_creds", "antigravity-cli"} {
+			if strings.Contains(text, s) {
+				t.Errorf("%s holds %q: %q", where, s, text)
+			}
+		}
 	}
-	rep, _ := rig.d.Probe(context.Background(), "agy")
-	if utf8.RuneCountInString(rep.Reason) > maxReasonRunes {
-		t.Errorf("Reason is %d runes, want at most %d", utf8.RuneCountInString(rep.Reason), maxReasonRunes)
+	stderrText := "Fetching available models...\nError: token " + token + " rejected; see " + home + "\nGET " + url + " failed\n\x1b[31mred\x1b[0m\n"
+	cases := []struct {
+		name string
+		res  RunResult
+		err  error
+	}{
+		{"non-zero exit", RunResult{ExitCode: 3, Stderr: []byte(stderrText), Stdout: []byte(token + "\n" + home + "\n")}, nil},
+		{"exit zero and no usable listing", RunResult{Stderr: []byte(stderrText), Stdout: []byte("error: " + token + " at " + home + "\n")}, nil},
+		{"killed by a signal", RunResult{ExitCode: -1, Stderr: []byte(stderrText)}, nil},
+		{"runner error naming a path", RunResult{}, &fs.PathError{Op: "fork/exec", Path: home, Err: fs.ErrPermission}},
 	}
-	if strings.ContainsAny(rep.Reason, "\n\r\x1b") || !strings.HasPrefix(rep.Reason, "agy models exited with status 1: Error: long long") {
-		t.Errorf("Reason = %q", rep.Reason)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := newDiscRig(t)
+			rig.runner.fn = func(context.Context, RunSpec) (RunResult, error) { return tc.res, tc.err }
+			rep, err := rig.d.Probe(context.Background(), "agy")
+			if rep.Status != ProbeFailed || err == nil {
+				t.Fatalf("got %q, %v; want failed with an error", rep.Status, err)
+			}
+			leaked(t, "Reason", rep.Reason)
+			leaked(t, "error text", err.Error())
+			for _, w := range rep.Warnings {
+				leaked(t, "a warning", w)
+			}
+			js, jerr := json.Marshal(rep)
+			if jerr != nil {
+				t.Fatal(jerr)
+			}
+			leaked(t, "the JSON a server would send", string(js))
+			if strings.ContainsAny(rep.Reason, "\n\r\x1b") || utf8.RuneCountInString(rep.Reason) > maxReasonRunes {
+				t.Errorf("Reason is not one short plain line: %q", rep.Reason)
+			}
+		})
 	}
 }
 
@@ -643,7 +693,10 @@ func TestDiscoveryProbe_RunnerErrorsFail(t *testing.T) {
 		{"output too large", ErrOutputTooLarge, ErrOutputTooLarge, "agy models printed more than 256 KiB"},
 		{"deadline", context.DeadlineExceeded, context.DeadlineExceeded, "agy models did not finish within 5s"},
 		{"cancelled", context.Canceled, context.Canceled, "agy models was cancelled"},
-		{"other", errors.New("fork/exec: permission denied"), nil, "cannot run agy models: fork/exec: permission denied"},
+		// os/exec errors carry the program's absolute path; the reason names none.
+		{"permission", &fs.PathError{Op: "fork/exec", Path: "/abs/secret-dir/agy", Err: fs.ErrPermission}, fs.ErrPermission, "agy could not be started: permission denied"},
+		{"vanished", &fs.PathError{Op: "fork/exec", Path: "/abs/secret-dir/agy", Err: fs.ErrNotExist}, fs.ErrNotExist, "agy could not be started: it is no longer where PATH found it"},
+		{"other", errors.New("fork/exec /abs/secret-dir/agy: exec format error"), nil, "agy could not be started"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -662,6 +715,10 @@ func TestDiscoveryProbe_RunnerErrorsFail(t *testing.T) {
 			}
 			if rep.Reason != tc.wantReason {
 				t.Errorf("Reason = %q, want %q", rep.Reason, tc.wantReason)
+			}
+			// The error prints as the reason: its cause (a path) is for errors.Is only.
+			if strings.Contains(err.Error(), "/abs/") || strings.Contains(rep.Reason, "/abs/") {
+				t.Errorf("a path reached the reason or the error: %q / %v", rep.Reason, err)
 			}
 			after, _ := rig.d.Snapshot("agy")
 			if !reflect.DeepEqual(before, after) {

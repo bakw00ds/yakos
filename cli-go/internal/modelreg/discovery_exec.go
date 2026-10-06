@@ -75,6 +75,7 @@ func execRunner(ctx context.Context, spec RunSpec) (RunResult, error) {
 	cmd.Env = append([]string{}, spec.Env...)
 	cmd.Stdin = nil // the null device: the CLI can never wait for a keypress
 	cmd.WaitDelay = waitDelay
+	isolateProcess(cmd)
 	out := &limitedBuffer{max: maxOut, onOverflow: cancel}
 	errOut := &limitedBuffer{max: maxErr}
 	cmd.Stdout, cmd.Stderr = out, errOut

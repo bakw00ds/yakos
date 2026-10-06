@@ -226,3 +226,59 @@ func TestClamp_UnrankedModelsPassThroughByDesign(t *testing.T) {
 		}
 	}
 }
+
+// With a trusted overlay mapping an id under two aliases of different rank, the
+// replacement must be judged by its own class too. cheap -> claude-opus-5-5-high
+// leaves that id also mapped as frontier (rank 4): lowering a rank-3 model to it
+// under a rank-1 ceiling returned a frontier model and said "lowered".
+func TestClamp_AReplacementRankedAboveTheCeilingIsNotUsed(t *testing.T) {
+	dir := privateStateDir(t)
+	writeOverlay(t, dir, "aliases:\n  cheap: {agy: claude-opus-5-5-high}\n", 0o600)
+	r := mustLoad(t, Options{StateDir: dir})
+
+	if alias, rank, ok := r.ClassOf("agy", "claude-opus-5-5-high"); !ok || alias != "frontier" || rank != 4 {
+		t.Fatalf("setup: ClassOf = (%q, %d, %v), want frontier/4 (the dearer of cheap and frontier)", alias, rank, ok)
+	}
+	got, lowered := r.Clamp("agy", "gemini-3.1-pro-high", "cheap")
+	if got == "claude-opus-5-5-high" || lowered {
+		t.Errorf("Clamp(agy, gemini-3.1-pro-high, cheap) = (%q, %v): returned a model ranked above the ceiling", got, lowered)
+	}
+	if got != "gemini-3.1-pro-high" {
+		t.Errorf("with no candidate at or below the ceiling the model is left alone, got %q", got)
+	}
+}
+
+// ... and the walk goes on to the next candidate down when one is skipped.
+func TestClamp_SkipsAnAmbiguousCandidateAndUsesTheNextOneDown(t *testing.T) {
+	dir := privateStateDir(t)
+	writeOverlay(t, dir, `
+aliases:
+  cheap: {codex: gpt-5.6-luna}
+  balanced: {codex: gpt-6-astra}
+  best: {codex: gpt-5.6-sol}
+  frontier: {codex: gpt-6-astra}
+`, 0o600)
+	r := mustLoad(t, Options{StateDir: dir})
+	// gpt-6-astra is balanced and frontier at once, so it counts as frontier and is not
+	// a way down to balanced: the next candidate down is cheap's luna.
+	got, lowered := r.Clamp("codex", "gpt-5.6-sol", "balanced")
+	if got != "gpt-5.6-luna" || !lowered {
+		t.Errorf("Clamp(codex, gpt-5.6-sol, balanced) = (%q, %v), want gpt-5.6-luna", got, lowered)
+	}
+}
+
+func TestLoad_WarnsWhenOneIDIsMappedUnderAliasesOfDifferentCostClasses(t *testing.T) {
+	dir := privateStateDir(t)
+	writeOverlay(t, dir, "aliases:\n  cheap: {agy: claude-opus-5-5-high}\n  balanced: {codex: gpt-5.5}\n  best: {codex: gpt-5.5}\n", 0o600)
+	w := mustLoad(t, Options{StateDir: dir}).Warnings()
+	if !hasWarning(w, "aliases cheap, frontier all map to claude-opus-5-5-high on agy but are different cost classes; the dearest counts") {
+		t.Errorf("no warning for cheap and frontier on agy: %v", w)
+	}
+	if !hasWarning(w, "aliases balanced, best all map to gpt-5.5 on codex but are different cost classes") {
+		t.Errorf("no warning for balanced and best on codex: %v", w)
+	}
+	// The catalog's own best and reasoning share a rank and are not a problem.
+	if w := mustLoad(t, Options{}).Warnings(); len(w) != 0 {
+		t.Errorf("the catalog alone must not warn: %v", w)
+	}
+}

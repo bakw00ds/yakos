@@ -69,7 +69,8 @@ func (r *Registry) ceilingClass(ceiling string) (rank int, ok bool) {
 //   - no model at or below the ceiling is mapped on the harness.
 //
 // Otherwise it returns the model the highest class at or below the ceiling maps
-// to on that harness, and true. It never raises a model and never leaves the
+// to on that harness, skipping one that is also mapped under a dearer alias, and
+// true. It never raises a model and never leaves the
 // harness. It reads the mapping only, so a replacement that is disabled or
 // unavailable is the caller's to notice (Lookup and Entry.Usable), and it builds
 // no message: callers word their own note, which keeps budget.ClampModel's text
@@ -88,12 +89,18 @@ func (r *Registry) Clamp(harness, model, ceiling string) (clamped string, lowere
 			if aliasRank[a] != rank {
 				continue
 			}
-			// An id the model already is would not lower it: a model mapped under two
-			// aliases of different rank counts as the higher, and the walk goes on
-			// to the next one down.
-			if id := r.aliases[a][harness]; id != "" && id != model {
-				return id, true
+			// An id the model already is would not lower it, and an id that is also
+			// mapped under a dearer alias (an overlay can do that) is not below the
+			// ceiling either: it counts as the dearer one, as ClassOf says. Either
+			// way the walk goes on to the next candidate down.
+			id := r.aliases[a][harness]
+			if id == "" || id == model {
+				continue
 			}
+			if _, rank, _ := r.ClassOf(harness, id); rank > ceilRank {
+				continue
+			}
+			return id, true
 		}
 	}
 	return model, false

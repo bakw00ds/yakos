@@ -441,6 +441,9 @@ func TestDiscoveryCache_WriteReplacesAPlantedSymlink(t *testing.T) {
 }
 
 // A state directory that is a symlink is refused for writing too, not followed.
+// (A probe never reaches the write: it needs a private working directory inside
+// the same directory and is skipped first, see the work-directory test; the
+// guard is exercised directly.)
 func TestDiscoveryCache_WriteRefusesASymlinkedStateDir(t *testing.T) {
 	discSkipPosixOnly(t)
 	real := discPrivateDir(t)
@@ -448,48 +451,59 @@ func TestDiscoveryCache_WriteRefusesASymlinkedStateDir(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Fatal(err)
 	}
-	rig := newDiscRig(t, func(c *DiscovererConfig) { c.StateDir = link })
-	rep, err := rig.d.Probe(context.Background(), "agy")
-	if err != nil || rep.Status != ProbeUpdated {
-		t.Fatalf("probe: %q %v", rep.Status, err)
-	}
-	if len(rep.Warnings) != 1 || !strings.HasPrefix(rep.Warnings[0], "cache not written: ") {
-		t.Errorf("Warnings = %q, want a cache-not-written warning", rep.Warnings)
+	snap := Snapshot{Harness: "agy", Source: agySource, ProbedAt: discT0, Models: []DiscoveredModel{{ID: "model-a"}}}
+	if err := writeCacheFile(link, map[string]Snapshot{"agy": snap}); err == nil {
+		t.Error("writeCacheFile followed a symlinked state directory")
 	}
 	if entries, _ := os.ReadDir(real); len(entries) != 0 {
 		t.Errorf("the cache was written through the symlink into %s: %v", real, entries)
 	}
 }
 
+// A cache that cannot be written leaves the probe a success with a warning that
+// names no path, and the in-memory snapshot in effect. A directory at the target
+// makes the final rename fail while the working directory is still made.
 func TestDiscoveryCache_WriteFailureKeepsTheMemorySnapshot(t *testing.T) {
 	discSkipPosixOnly(t)
-	notADir := filepath.Join(t.TempDir(), "state")
-	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
+	rig := newDiscRig(t)
+	if err := os.Mkdir(filepath.Join(rig.stateDir, DiscoveryFileName), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	rig := newDiscRig(t, func(c *DiscovererConfig) { c.StateDir = notADir })
+	if err := os.WriteFile(filepath.Join(rig.stateDir, DiscoveryFileName, "keep"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	rep, err := rig.d.Probe(context.Background(), "agy")
 	if err != nil || rep.Status != ProbeUpdated {
 		t.Fatalf("a cache that cannot be written must not fail the probe: %q %v", rep.Status, err)
 	}
-	if len(rep.Warnings) != 1 || !strings.HasPrefix(rep.Warnings[0], "cache not written: ") {
-		t.Errorf("Warnings = %q", rep.Warnings)
+	want := "cache not written: the yakOS state directory is not usable (not private, or not writable)"
+	if len(rep.Warnings) != 1 || rep.Warnings[0] != want {
+		t.Errorf("Warnings = %q, want [%q]", rep.Warnings, want)
+	}
+	if strings.Contains(rep.Warnings[0], rig.stateDir) || strings.Contains(rep.Warnings[0], os.TempDir()) {
+		t.Errorf("the warning names a path: %q", rep.Warnings[0])
 	}
 	if s, ok := rig.d.Snapshot("agy"); !ok || len(s.Models) != 3 {
 		t.Errorf("the in-memory snapshot must stay in effect: %+v %v", s, ok)
 	}
 }
 
+// With no state directory there is no private place to run agy, so the probe is
+// skipped: nothing runs and nothing is written anywhere, the working directory
+// included.
 func TestDiscoveryCache_NoStateDirMeansNoFiles(t *testing.T) {
 	work := t.TempDir()
 	t.Chdir(work)
 	rig := newDiscRig(t, func(c *DiscovererConfig) { c.StateDir = "" })
 	rep, err := rig.d.Probe(context.Background(), "agy")
-	if err != nil || rep.Status != ProbeUpdated || len(rep.Warnings) != 0 {
-		t.Fatalf("probe: %q %v %v", rep.Status, rep.Warnings, err)
+	if err != nil || rep.Status != ProbeSkipped {
+		t.Fatalf("probe: %q %q %v, want skipped", rep.Status, rep.Reason, err)
 	}
-	if _, ok := rig.d.Snapshot("agy"); !ok {
-		t.Error("memory-only mode must still keep the snapshot")
+	if rig.runner.count() != 0 {
+		t.Errorf("agy ran %d time(s) with no state directory", rig.runner.count())
+	}
+	if _, ok := rig.d.Snapshot("agy"); ok {
+		t.Error("a skipped probe left a snapshot")
 	}
 	if entries, _ := os.ReadDir(work); len(entries) != 0 {
 		t.Errorf("a Discoverer with no state directory wrote %d file(s) into the working directory", len(entries))

@@ -1,8 +1,10 @@
 package modelreg
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 
@@ -49,7 +51,7 @@ func LoadProject(project string) (ProjectPolicy, []string) {
 		if os.IsNotExist(err) {
 			return ProjectPolicy{}, nil
 		}
-		return ProjectPolicy{}, []string{".yakos.yml: " + firstLine(err.Error())}
+		return ProjectPolicy{}, []string{projectReadWarning(err)}
 	}
 	// A FIFO or device named .yakos.yml would block or stream forever.
 	if !fi.Mode().IsRegular() {
@@ -60,17 +62,27 @@ func LoadProject(project string) (ProjectPolicy, []string) {
 	}
 	f, err := os.Open(path) //nolint:gosec // project config path, stat-checked above
 	if err != nil {
-		return ProjectPolicy{}, []string{".yakos.yml: " + firstLine(err.Error())}
+		return ProjectPolicy{}, []string{projectReadWarning(err)}
 	}
 	defer func() { _ = f.Close() }()
 	data, err := io.ReadAll(io.LimitReader(f, maxProjectBytes+1))
 	if err != nil {
-		return ProjectPolicy{}, []string{".yakos.yml: " + firstLine(err.Error())}
+		return ProjectPolicy{}, []string{projectReadWarning(err)}
 	}
 	if len(data) > maxProjectBytes {
 		return ProjectPolicy{}, []string{fmt.Sprintf(".yakos.yml: larger than %d bytes; the models: key is ignored", maxProjectBytes)}
 	}
 	return ParseProject(data)
+}
+
+// projectReadWarning words a failure to read .yakos.yml without the project's path
+// (an OS error carries it, and the warning reaches a terminal and, later, an API).
+func projectReadWarning(err error) string {
+	why := "it could not be read"
+	if errors.Is(err, fs.ErrPermission) {
+		why = "permission denied"
+	}
+	return ".yakos.yml: " + why + ", so a models: disable list in it is NOT applied"
 }
 
 // ParseProject reads the models: key of a .yakos.yml. Every other top-level key

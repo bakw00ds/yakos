@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
@@ -102,11 +103,11 @@ func TestDiscoveryExec_NonZeroExitOfARealScript(t *testing.T) {
 	script := discScript(t, "echo out-secret-should-not-leak\necho boom >&2\nexit 3\n")
 	rig := newDiscRig(t, discReal(script, 10*time.Second))
 	rep, err := rig.d.Probe(context.Background(), "agy")
-	if err == nil || rep.Status != ProbeFailed || rep.Reason != "agy models exited with status 3: boom" {
+	if err == nil || rep.Status != ProbeFailed || rep.Reason != "agy models exited with status 3 (run `agy models` to see its message)" {
 		t.Errorf("got %q %q %v", rep.Status, rep.Reason, err)
 	}
-	if strings.Contains(rep.Reason, "secret") {
-		t.Errorf("standard output reached the reason: %q", rep.Reason)
+	if strings.Contains(rep.Reason, "secret") || strings.Contains(rep.Reason, "boom") || strings.Contains(err.Error(), "boom") {
+		t.Errorf("what the command printed reached the reason or the error: %q / %v", rep.Reason, err)
 	}
 }
 
@@ -386,9 +387,10 @@ func TestDiscoveryExec_AnAbsolutePathEntryIsFound(t *testing.T) {
 	}
 	t.Setenv("PATH", bin+":/usr/bin:/bin")
 	d := NewDiscoverer(DiscovererConfig{
-		Probe:   func(context.Context, string) (bool, string) { return true, "" },
-		Env:     []string{"PATH=/usr/bin:/bin"},
-		Timeout: 10 * time.Second,
+		StateDir: t.TempDir(), // agy runs in a directory inside it
+		Probe:    func(context.Context, string) (bool, string) { return true, "" },
+		Env:      []string{"PATH=/usr/bin:/bin"},
+		Timeout:  10 * time.Second,
 	})
 	rep, err := d.Probe(context.Background(), "agy")
 	if err != nil || rep.Status != ProbeUpdated {
@@ -396,5 +398,146 @@ func TestDiscoveryExec_AnAbsolutePathEntryIsFound(t *testing.T) {
 	}
 	if _, err := os.Stat(marker); err != nil {
 		t.Errorf("the CLI found on an absolute PATH entry was not run: %v", err)
+	}
+}
+
+// ---- the process group ----------------------------------------------------------------
+
+// discProcessDead reports whether pid is gone, waiting briefly for it. A zombie
+// counts as gone: a killed descendant is reparented to init, which reaps it a
+// moment later, and kill(pid, 0) still succeeds for a zombie.
+func discProcessDead(pid int) bool {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+		if err != nil { // ps exits 1 when there is no such process
+			return true
+		}
+		if strings.HasPrefix(strings.TrimSpace(string(out)), "Z") {
+			return true
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return false
+}
+
+// discReadPIDs reads the pids a script appended to a file, one per line.
+func discReadPIDs(t *testing.T, path string, want int) []int {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		raw, _ := os.ReadFile(path)
+		var pids []int
+		for _, f := range strings.Fields(string(raw)) {
+			if n, err := strconv.Atoi(f); err == nil && n > 1 {
+				pids = append(pids, n)
+			}
+		}
+		if len(pids) >= want {
+			return pids
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the script wrote %d of %d pids: %q", len(pids), want, raw)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// killAtCleanup makes sure a failing test (or a mutated build) leaves no sleeping
+// process behind.
+func killAtCleanup(t *testing.T, path string) {
+	t.Helper()
+	t.Cleanup(func() {
+		raw, _ := os.ReadFile(path)
+		for _, f := range strings.Fields(string(raw)) {
+			if n, err := strconv.Atoi(f); err == nil && n > 1 {
+				_ = syscall.Kill(n, syscall.SIGKILL)
+			}
+		}
+	})
+}
+
+// A hung agy that has started helpers of its own: the timeout must end all of
+// them, not only agy. Without a process group of its own, the cancel killed the
+// direct child and the helpers were reparented to init and kept running.
+func TestDiscoveryExec_TimeoutKillsTheWholeProcessGroup(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pids")
+	killAtCleanup(t, pidFile)
+	script := discScript(t,
+		"/bin/sleep 3602 &\necho $! >> "+shq(pidFile)+"\n"+
+			"/bin/sleep 3603 &\necho $! >> "+shq(pidFile)+"\n"+
+			"echo $$ >> "+shq(pidFile)+"\nexec /bin/sleep 3601\n")
+	rig := newDiscRig(t, discReal(script, 600*time.Millisecond))
+	rep, err := probeWithin(t, rig.d, context.Background(), 15*time.Second)
+	if rep.Status != ProbeFailed || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %q %v, want failed with a deadline error", rep.Status, err)
+	}
+	for i, pid := range discReadPIDs(t, pidFile, 3) {
+		if !discProcessDead(pid) {
+			t.Errorf("process %d of agy's group (%d of 3) outlived the probe", pid, i+1)
+		}
+	}
+}
+
+// The same for a caller that gives up, and for output that outgrows its bound:
+// every way the run is stopped ends the group.
+func TestDiscoveryExec_CallerCancelAndOverflowKillTheGroupToo(t *testing.T) {
+	t.Run("caller cancel", func(t *testing.T) {
+		pidFile := filepath.Join(t.TempDir(), "pids")
+		killAtCleanup(t, pidFile)
+		script := discScript(t, "/bin/sleep 3602 &\necho $! >> "+shq(pidFile)+"\necho $$ >> "+shq(pidFile)+"\nexec /bin/sleep 3601\n")
+		rig := newDiscRig(t, discReal(script, 30*time.Second))
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() {
+			discReadPIDs(t, pidFile, 2)
+			cancel()
+		}()
+		if _, err := probeWithin(t, rig.d, ctx, 15*time.Second); !errors.Is(err, context.Canceled) {
+			t.Fatalf("got %v, want a cancellation", err)
+		}
+		for _, pid := range discReadPIDs(t, pidFile, 2) {
+			if !discProcessDead(pid) {
+				t.Errorf("process %d outlived its only caller", pid)
+			}
+		}
+	})
+	t.Run("output over the bound", func(t *testing.T) {
+		pidFile := filepath.Join(t.TempDir(), "pids")
+		killAtCleanup(t, pidFile)
+		script := discScript(t, "/bin/sleep 3602 &\necho $! >> "+shq(pidFile)+"\necho $$ >> "+shq(pidFile)+"\nexec /usr/bin/yes endless-output-0123456789\n")
+		rig := newDiscRig(t, discReal(script, 30*time.Second))
+		rep, err := probeWithin(t, rig.d, context.Background(), 15*time.Second)
+		if rep.Status != ProbeFailed || !errors.Is(err, ErrOutputTooLarge) {
+			t.Fatalf("got %q %v, want failed with ErrOutputTooLarge", rep.Status, err)
+		}
+		for _, pid := range discReadPIDs(t, pidFile, 2) {
+			if !discProcessDead(pid) {
+				t.Errorf("process %d outlived the overflow", pid)
+			}
+		}
+	})
+}
+
+// agy runs in a session of its own: it leads its process group (so the group can be
+// killed without touching the caller) and has no controlling terminal (so it cannot
+// prompt on /dev/tty although its standard input is the null device).
+func TestDiscoveryExec_RunsInASessionOfItsOwn(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "ps")
+	script := discScript(t, "echo \"$$ $(ps -o pgid= -p $$ | tr -d ' ')\" > "+shq(out)+"\nprintf 'model-a\\tA\\n'\n")
+	rig := newDiscRig(t, discReal(script, 10*time.Second))
+	rep, err := rig.d.Probe(context.Background(), "agy")
+	if err != nil || rep.Status != ProbeUpdated {
+		t.Fatalf("got %q %q %v", rep.Status, rep.Reason, err)
+	}
+	raw, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := strings.Fields(string(raw))
+	if len(f) != 2 || f[0] != f[1] {
+		t.Errorf("pid and process group = %q, want them equal (agy leads a group of its own)", raw)
+	}
+	if mine := strconv.Itoa(syscall.Getpgrp()); len(f) == 2 && f[1] == mine {
+		t.Errorf("agy shares the caller's process group %s", mine)
 	}
 }

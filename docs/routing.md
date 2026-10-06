@@ -141,9 +141,17 @@ entries stay `unknown`.
   skipped. It is best effort: a signed-out agy can still pass, and if `agy models`
   then fails or prints nothing usable, that is a failed probe.
 - **Command.** `agy models` with fixed arguments, no shell and no stdin. It runs in
-  a fresh private directory (`.discover-*` inside the state directory, removed
-  afterwards; the temporary directory when there is no state directory, since
-  `TMPDIR` can be set by a project). Its environment is a short allowlist: PATH
+  a fresh private directory, `.discover-*` inside the secured state directory,
+  removed afterwards. There is no fallback to the temporary directory, because
+  `TMPDIR` can be set by a project and agy run in a directory the project chose
+  may load its workspace configuration: with no secured state directory (no home,
+  a relative home, or a state directory that is a symlink or not a directory) the
+  probe is skipped and agy is not run. On Unix it starts in a session of its own,
+  so it has no controlling terminal to prompt on and the whole process group, not
+  only agy, is killed when the probe times out, is cancelled or prints too much;
+  Windows has no process group and kills agy alone. A Ctrl-C at the terminal no
+  longer reaches agy, so `yakos models probe` binds the probe to the interrupt and
+  waits for the killed run before it exits. Its environment is a short allowlist: PATH
   and HOME, the platform basics, proxy and certificate settings, and agy's own
   credential families (`GEMINI_*`, `GOOGLE_*`, `GCLOUD_*`, `ANTIGRAVITY_*`). It is
   narrower than the one dispatch gives agy: no `GH_TOKEN`, `GITHUB_TOKEN`,
@@ -165,8 +173,13 @@ entries stay `unknown`.
   such as `unauthorized` on standard output must not become a one-model listing.
   At most 512 models are kept, and names lose
   control, ANSI escape and Unicode format or bidirectional characters and are cut
-  to 80. Standard output never appears in a reason; for a failed exit one
-  sanitized line of standard error does.
+  to 80. **Nothing the command printed reaches a reason, a warning or an error,
+  and none holds a path**: a failed exit reports `agy models exited with status N
+  (run `agy models` to see its message)`, a failure to start says only that agy
+  could not be started (permission denied, or gone from where PATH found it), and
+  a cache that cannot be written says the state directory is not usable. Vendor
+  error text can hold a token, an API-key URL or a home path, and a probe's output
+  is read by agents and meant to be served over an API.
 - **A listing that cannot be used changes nothing.** A non-zero exit, a timeout,
   oversized output or a listing with no valid id fails the probe and leaves the
   previous snapshot, in memory and on disk, so a glitch never marks every model
@@ -230,6 +243,11 @@ harness. On claude it is the ordering `budget.ClampModel` has always applied to
 ceiling and requires the same answer. Codex models have no class until you map
 aliases in the overlay. Making `budget.ClampModel` and dispatch use it is a later
 change.
+
+A replacement is judged by its own class too: an id that an overlay maps under a
+dearer alias as well counts as the dearer one and is skipped, and the walk goes on
+to the next candidate down (loading an overlay that does this warns, naming both
+aliases).
 
 One gap to close before the clamp serves a harness other than claude: a model that
 no alias maps to has no class, so it passes any ceiling. On claude all four tiers

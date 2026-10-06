@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -68,6 +70,9 @@ type modelsEnv struct {
 	// discoverer builds the Discoverer for stateDir with the given per-probe
 	// timeout (0 means the default).
 	discoverer func(stateDir string, timeout time.Duration) *modelreg.Discoverer
+	// ctx is what a probe is bound to, besides the process's own interrupt. Nil
+	// means context.Background().
+	ctx context.Context
 }
 
 func defaultModelsEnv() modelsEnv {
@@ -238,6 +243,9 @@ func modelsMain(args []string, stdout, stderr io.Writer, env modelsEnv) int {
 const (
 	defaultProbeTimeout = 15 * time.Second
 	maxProbeTimeout     = 2 * time.Minute
+	// modelsIdleWait is how long probe waits, before it returns, for a run it
+	// stopped to finish dying.
+	modelsIdleWait = 5 * time.Second
 )
 
 func parseProbeTimeout(s string) (time.Duration, error) {
@@ -488,7 +496,22 @@ type probeOutput struct {
 }
 
 func modelsProbe(stdout, stderr io.Writer, env modelsEnv, harness string, timeout time.Duration, asJSON bool) int {
+	// agy runs in a session of its own (no controlling terminal, so it can never
+	// prompt), which means a Ctrl-C at the terminal no longer reaches it. The probe
+	// is bound to the interrupt instead: the context ends, the run is killed with its
+	// whole process group, and the command waits for that before it returns.
+	base := env.ctx
+	if base == nil {
+		base = context.Background()
+	}
+	ctx, stop := signal.NotifyContext(base, os.Interrupt, syscall.SIGTERM)
+	defer stop()
 	d := env.discoverer(env.stateDir, timeout)
+	defer func() {
+		idle, cancel := context.WithTimeout(context.Background(), modelsIdleWait)
+		defer cancel()
+		_ = d.WaitIdle(idle)
+	}()
 	targets := modelreg.Harnesses
 	if harness != "" {
 		targets = []string{harness}
@@ -503,7 +526,7 @@ func modelsProbe(stdout, stderr io.Writer, env modelsEnv, harness string, timeou
 	out := probeOutput{NotInCatalog: map[string][]string{}}
 	failed := false
 	for _, h := range targets {
-		rep, err := d.Probe(context.Background(), h)
+		rep, err := d.Probe(ctx, h)
 		out.Probes = append(out.Probes, rep)
 		out.Warnings = append(out.Warnings, rep.Warnings...)
 		if err != nil {

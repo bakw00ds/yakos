@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -185,12 +186,31 @@ func TestDiscoveryProbe_DefaultGraceOutlastsTheWaitDelayAndIsShort(t *testing.T)
 }
 
 // The private working directory is made inside the state directory only once
-// statepath.SecureDir has accepted it. A symlinked state directory is refused (the
-// directory is then made in the temp directory, never through the link into
-// whatever it points at), and a group- or world-accessible one is tightened to 0700
-// before agy runs in a directory inside it.
+// statepath.SecureDir has accepted it. A symlinked state directory, or one that is
+// not a directory, is refused and the probe is skipped: agy is NOT run in the temp
+// directory instead (TMPDIR is project-settable), and nothing is made through the
+// link into whatever it points at. A group- or world-accessible directory is
+// tightened to 0700 before agy runs in a directory inside it.
 func TestDiscoveryProbe_TheWorkDirIsOnlyMadeInASecuredStateDir(t *testing.T) {
 	skipIfNoPosixModes(t)
+
+	skipped := func(t *testing.T, stateDir string) {
+		t.Helper()
+		rig := newDiscRig(t, func(c *DiscovererConfig) { c.StateDir = stateDir })
+		rep, err := rig.d.Probe(context.Background(), "agy")
+		if err != nil || rep.Status != ProbeSkipped {
+			t.Fatalf("got %q %q %v, want skipped", rep.Status, rep.Reason, err)
+		}
+		if rep.Reason != "agy was not run: there is no secured yakOS state directory to run it in" {
+			t.Errorf("Reason = %q", rep.Reason)
+		}
+		if strings.Contains(rep.Reason, stateDir) {
+			t.Errorf("the reason names the state directory: %q", rep.Reason)
+		}
+		if rig.runner.count() != 0 {
+			t.Errorf("agy ran %d time(s) though there was no secured directory to run it in", rig.runner.count())
+		}
+	}
 
 	t.Run("symlinked state directory", func(t *testing.T) {
 		target := t.TempDir()
@@ -198,21 +218,18 @@ func TestDiscoveryProbe_TheWorkDirIsOnlyMadeInASecuredStateDir(t *testing.T) {
 		if err := os.Symlink(target, link); err != nil {
 			t.Fatal(err)
 		}
-		var sawDir string
-		rig := newDiscRig(t, func(c *DiscovererConfig) { c.StateDir = link })
-		rig.runner.fn = func(_ context.Context, spec RunSpec) (RunResult, error) {
-			sawDir = spec.Dir
-			return discListing("model-a"), nil
+		skipped(t, link)
+		if entries, _ := os.ReadDir(target); len(entries) != 0 {
+			t.Errorf("something was made through the symlink: %v", entries)
 		}
-		if _, err := rig.d.Probe(context.Background(), "agy"); err != nil {
+	})
+
+	t.Run("state directory that is a regular file", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "state")
+		if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if parent := filepath.Dir(sawDir); parent == link || parent == target {
-			t.Errorf("the working directory %q was made through the symlinked state directory", sawDir)
-		}
-		if filepath.Dir(sawDir) != filepath.Clean(os.TempDir()) {
-			t.Errorf("working directory %q, want one directly under the temp directory %q", sawDir, os.TempDir())
-		}
+		skipped(t, file)
 	})
 
 	t.Run("loose state directory", func(t *testing.T) {

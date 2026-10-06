@@ -173,27 +173,3 @@ func stripEscapes(s string) string {
 	}
 	return b.String()
 }
-
-// stderrReason is the one line of a command's standard error shown to the
-// operator when the command failed: the first non-empty line, sanitized and cut
-// to maxReasonRunes. agy prints a progress line ("Fetching available models...")
-// before it does any work, and a failure usually follows it, so a line that only
-// reports progress is passed over when a later line exists. Standard output never
-// goes into a reason: it is the data stream, and a failing command may have put
-// anything on it.
-func stderrReason(stderr []byte) string {
-	fallback := ""
-	for _, raw := range strings.Split(string(stderr), "\n") {
-		line := sanitizeText(raw, maxReasonRunes)
-		if line == "" {
-			continue
-		}
-		if fallback == "" {
-			fallback = line
-		}
-		if !strings.HasPrefix(strings.ToLower(line), "fetching ") {
-			return line
-		}
-	}
-	return fallback
-}
