@@ -454,6 +454,21 @@ for side in bash go; do
         && printf '%s' "$f" | grep -q 'Supervisor dollar-budget ceiling (\$200.00) reached' && [ "$(printf '%s\n' "$f" | grep -c CRITICAL)" = 1 ]; then ok "(11) $side with both limits, the ceiling names the limit that is past its own stop (the dollar one)"
     else bad "(11) $side both limits, dollar ceiling: runs=$(runs "$sb") $r / $f"; fi
 
+    # dollar messages are the ones they always were while a token limit is configured but not reached (the supervisor's
+    # default is $100 AND 33M tokens): the exempt launch (150 of 100, under the $200 stop) and the warning (85%)
+    sb="$(mksbt "usdexempt-$side" 100 33000000 10 150)"
+    fire "$side" "$sb" "$TMP/high.json"; rc=$?; settle
+    r="$(logs "$sb" | grep 'allowed under the ceiling')"
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ] && printf '%s' "$r" | grep -q '"spent_usd":150,"limit_usd":100,"ceiling_usd":200,"budget_reason":"budget_exhausted"' && ! printf '%s' "$r" | grep -q '_tokens' \
+        && grep -q 'budget exhausted (\$150.00 of \$100.00); launching high-risk supervision under the \$200.00 ceiling' "$sb/hook.stderr"; then ok "(11) $side with a token limit configured but not reached, the exempt launch is noted in dollars, as before"
+    else bad "(11) $side dollar exempt note beside a token limit: rc=$rc runs=$(runs "$sb") $r / $(cat "$sb/hook.stderr")"; fi
+    sb="$(mksbt "usdwarn-$side" 100 33000000 10 85)"
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    r="$(logs "$sb" | grep 'budget_warning')"
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ] && printf '%s' "$r" | grep -q '"spent_usd":85,"limit_usd":100,"budget_reason":"budget_warning"' && ! printf '%s' "$r" | grep -q '_tokens' \
+        && grep -q 'supervisor budget at 85% (\$85.00 of \$100.00); at 100% routine supervisor runs stop' "$sb/hook.stderr"; then ok "(11) $side with a token limit configured but not reached, the warning is in dollars, as before"
+    else bad "(11) $side dollar warning beside a token limit: rc=$rc runs=$(runs "$sb") $r / $(cat "$sb/hook.stderr")"; fi
+
     # a budget with no limit of either kind is OFF, whatever was spent
     sb="$(mksbt "offboth-$side" 0 0 90000000000 5000)"
     fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
@@ -521,14 +536,19 @@ for spec in 'usdzero|{"state":"ok","spent_usd":0,"limit_usd":0,"stop_usd":0,"rea
     fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
     if unavail_is "$sb" read_error && [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ]; then ok "(12) bash read_failed with a zero dollar limit ($name) is a failed read, not off: one WARN, cause read_error"
     else bad "(12) bash read_failed stub ($name): rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
+    # the WARN covers both units: it says the launch decision is not checked against "the budget", not "the dollar budget"
+    if unavail "$sb" | grep -q 'this launch decision is not checked against the budget"' && ! unavail "$sb" | grep -q 'dollar'; then ok "(12) bash the unavailable WARN names the budget, not only its dollars ($name)"
+    else bad "(12) bash unavailable WARN wording ($name): $(unavail "$sb")"; fi
 done
 # the token fields are optional and only numbers count: an older CLI's JSON, or a garbled one, reads as dollars alone
 sb="$(stubsb stub-oldjson-bash '{"state":"hard_stop","spent_usd":100,"limit_usd":100,"stop_usd":200,"limit_tokens":"lots","spent_tokens":"many","stop_tokens":null}' 4)"
 fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
 if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && logs "$sb" | grep 'skipping this routine' | grep -q '"spent_usd":100,"limit_usd":100,"budget_reason":"budget_exhausted"' && ! logs "$sb" | grep -q '_tokens'; then ok "(12) bash token fields that are not numbers read as 0: the dollar budget decides, as before"
 else bad "(12) bash garbled token fields: rc=$rc runs=$(runs "$sb")"; fi
-# a status that lacks its state or its amounts is not a budget at all (parse), as before: it must not read as off or as over
-for spec in 'nostate|{"spent_usd":0,"limit_usd":100,"stop_usd":200}' 'nostop|{"state":"hard_stop","spent_usd":100,"limit_usd":100}'; do
+# a status that lacks its state or its amounts, or whose state is not a string, is not a budget at all (parse), as before: it must
+# not read as off or as over
+for spec in 'nostate|{"spent_usd":0,"limit_usd":100,"stop_usd":200}' 'nostop|{"state":"hard_stop","spent_usd":100,"limit_usd":100}' \
+            'numstate|{"state":5,"spent_usd":100,"limit_usd":100,"stop_usd":200}'; do
     name="${spec%%|*}"; json="${spec#*|}"
     sb="$(stubsb "stub-malformed-$name-bash" "$json")"
     fire bash "$sb" "$TMP/high.json"; rc=$?; settle
@@ -582,7 +602,7 @@ cmp_norm() { # cmp_norm <sandbox>
     logs "$1" | jq -c 'select(has("session_id") | not) | del(.ts, .duration_s)' 2>&1 | sort
 }
 for scen in routine high ceil warn proj quiet flags unread off stub spoof spoofsup spoofctl \
-            tokhard tokhigh tokceil tokwarn bothtok bothusd bothboth bothceil offboth dolloff flagstok; do
+            tokhard tokhigh tokceil tokwarn bothtok bothusd bothboth bothceil usdexempt usdwarn offboth dolloff flagstok; do
     b="$(cmp_norm "$TMP/$scen-bash")"
     g="$(cmp_norm "$TMP/$scen-go")"
     if [ -n "$b" ] && [ "$b" = "$g" ]; then ok "(9) $scen hook-log records are byte-identical across twins"; else

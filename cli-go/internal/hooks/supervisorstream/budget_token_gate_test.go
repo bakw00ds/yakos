@@ -213,6 +213,29 @@ func TestDollarMessagesUnchangedWhileATokenLimitIsPresent(t *testing.T) {
 	if f := findings(t, work2); !strings.Contains(f, "Supervisor dollar-budget ceiling ($200.00) reached") {
 		t.Errorf("the dollar ceiling finding: %q", f)
 	}
+	rec2 := recordWith(t, work2, "supervisor budget ceiling reached")
+	if want := `"spent_usd":250,"ceiling_usd":200,"budget_reason":"budget_exhausted"`; !strings.Contains(rec2, want) || strings.Contains(rec2, "_tokens") {
+		t.Errorf("the ceiling note is the dollar record (%s): %s", want, rec2)
+	}
+	// The exempt high-risk launch (150 of 100, under the $200 stop) and the warning (85%) are the dollar records too.
+	b3, work3 := tokenBudget(t, 100, 33_000_000, 150, 10)
+	out3 := riskEdit(t, b3.h, b3.env)
+	rec3 := recordWith(t, work3, "high-risk launch allowed under the ceiling")
+	if want := `"spent_usd":150,"limit_usd":100,"ceiling_usd":200,"budget_reason":"budget_exhausted"`; len(b3.rec.specs) != 1 || !strings.Contains(rec3, want) || strings.Contains(rec3, "_tokens") {
+		t.Errorf("the exempt note is the dollar record (%s), launches %d: %s", want, len(b3.rec.specs), rec3)
+	}
+	if want := "supervisor-stream: supervisor budget exhausted ($150.00 of $100.00); launching high-risk supervision under the $200.00 ceiling\n"; string(out3.Stderr) != want {
+		t.Errorf("stderr = %q, want %q", out3.Stderr, want)
+	}
+	b4, work4 := tokenBudget(t, 100, 33_000_000, 85, 10)
+	out4 := bigEditOut(t, b4)
+	rec4 := recordWith(t, work4, "supervisor budget at warning level")
+	if want := `"spent_usd":85,"limit_usd":100,"budget_reason":"budget_warning"`; !strings.Contains(rec4, want) || strings.Contains(rec4, "_tokens") {
+		t.Errorf("the warning is the dollar record (%s): %s", want, rec4)
+	}
+	if want := "supervisor-stream: supervisor budget at 85% ($85.00 of $100.00); at 100% routine supervisor runs stop\n"; string(out4.Stderr) != want {
+		t.Errorf("stderr = %q, want %q", out4.Stderr, want)
+	}
 }
 
 // With both limits set, the one that tripped is named; with both reached, tokens
