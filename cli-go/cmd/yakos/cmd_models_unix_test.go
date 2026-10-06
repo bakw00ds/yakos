@@ -153,3 +153,127 @@ func TestModelsProbeThroughTheRouterHonoursTimeout(t *testing.T) {
 		}
 	}
 }
+
+// hangingProbe is a real `yakos models probe --harness agy` (the router, run in a
+// subprocess of the test binary) against a fake agy that records its pid and hangs.
+type hangingProbe struct {
+	cmd     *exec.Cmd
+	waited  chan error
+	out     *bytes.Buffer
+	pidFile string
+}
+
+func (p *hangingProbe) pid() int { return p.cmd.Process.Pid }
+
+func (p *hangingProbe) agyPIDs() []int {
+	raw, _ := os.ReadFile(p.pidFile)
+	var pids []int
+	for _, f := range strings.Fields(string(raw)) {
+		if n, err := strconv.Atoi(f); err == nil && n > 1 {
+			pids = append(pids, n)
+		}
+	}
+	return pids
+}
+
+// startHangingProbe starts a probe in home and returns once agy is running, which is
+// after the probe made its working directory.
+func startHangingProbe(t *testing.T, home string) *hangingProbe {
+	t.Helper()
+	bin := t.TempDir()
+	p := &hangingProbe{pidFile: filepath.Join(t.TempDir(), "pids"), out: &bytes.Buffer{}}
+	script := "#!/bin/sh\necho $$ >> '" + p.pidFile + "'\nexec /bin/sleep 3604\n"
+	if err := os.WriteFile(filepath.Join(bin, "agy"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal([]string{"models", "probe", "--harness", "agy", "--timeout", "120s"})
+	p.cmd = exec.Command(os.Args[0], "-test.run=^TestBudgetHelperMain$")
+	p.cmd.Env = []string{
+		"YAKOS_TEST_MAIN_ARGS=" + string(args),
+		"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + home, "ANTIGRAVITY_API_KEY=agy-key",
+	}
+	p.cmd.Stdout, p.cmd.Stderr = p.out, p.out
+	if err := p.cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	p.waited = make(chan error, 1)
+	go func() { p.waited <- p.cmd.Wait() }()
+	t.Cleanup(func() { // a failing test leaves nothing running
+		_ = p.cmd.Process.Kill()
+		for _, pid := range p.agyPIDs() {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	})
+	for deadline := time.Now().Add(20 * time.Second); len(p.agyPIDs()) == 0 && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+	}
+	if len(p.agyPIDs()) == 0 {
+		t.Fatalf("the fake agy never started:\n%s", p.out.String())
+	}
+	return p
+}
+
+// A probe killed with SIGKILL cannot remove its working directory. The next probe
+// sweeps it, and leaves alone the directory of a probe that is still running in
+// another yakOS process. Three real routers share one state directory: A hangs and
+// stays up, K hangs and is killed with SIGKILL, and B is the next probe.
+func TestModelsProbeThroughTheRouterSweepsAKilledProbesDirectoryAndKeepsALiveOnes(t *testing.T) {
+	home := t.TempDir()
+	state := filepath.Join(home, ".yakos-state")
+	dirsOf := func(pid int) []string {
+		m, _ := filepath.Glob(filepath.Join(state, ".discover-"+strconv.Itoa(pid)+"-*"))
+		return m
+	}
+
+	a := startHangingProbe(t, home)
+	if got := dirsOf(a.pid()); len(got) != 1 {
+		t.Fatalf("A's working directory: %v", got)
+	}
+
+	// K starts while A is running: its own sweep must keep A's directory.
+	k := startHangingProbe(t, home)
+	if got := dirsOf(a.pid()); len(got) != 1 {
+		t.Fatalf("starting a second probe removed the directory of the first, which is still running: %v", got)
+	}
+	if got := dirsOf(k.pid()); len(got) != 1 {
+		t.Fatalf("K's working directory: %v", got)
+	}
+	if err := k.cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	<-k.waited
+	if got := dirsOf(k.pid()); len(got) != 1 {
+		t.Fatalf("SIGKILL left %d directories of K, want 1: the directory is what the next probe has to sweep", len(got))
+	}
+
+	// B: an ordinary probe that finishes.
+	fast := t.TempDir()
+	listing := "#!/bin/sh\nprintf 'gemini-3.8-flash-high\\tGemini 3.8 Flash (High)\\n'\n"
+	if err := os.WriteFile(filepath.Join(fast, "agy"), []byte(listing), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	code, out := runYakos(t, t.TempDir(), []string{
+		"PATH=" + fast + ":/usr/bin:/bin", "HOME=" + home, "ANTIGRAVITY_API_KEY=agy-key",
+	}, "models", "probe", "--harness", "agy")
+	if code != 0 || !strings.Contains(out, "agy: updated, 1 models listed by `agy models`\n") {
+		t.Fatalf("B: exit %d:\n%s", code, out)
+	}
+	if got := dirsOf(k.pid()); len(got) != 0 {
+		t.Errorf("the directory of the killed probe was not swept: %v", got)
+	}
+	if got := dirsOf(a.pid()); len(got) != 1 {
+		t.Errorf("the directory of the probe that is still running was swept: %v", got)
+	}
+
+	// A is still working: it ends on a signal and removes its own directory.
+	if err := a.cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-a.waited:
+	case <-time.After(30 * time.Second):
+		t.Fatalf("A did not exit after SIGTERM:\n%s", a.out.String())
+	}
+	if got := dirsOf(a.pid()); len(got) != 0 {
+		t.Errorf("A left its working directory behind: %v", got)
+	}
+}

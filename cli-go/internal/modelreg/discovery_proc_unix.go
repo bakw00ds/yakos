@@ -56,3 +56,14 @@ func killProcessGroup(cmd *exec.Cmd) {
 	}
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 }
+
+// processAlive reports whether a process with this pid exists. A process that
+// exists but belongs to someone else (EPERM) is alive. pid 0 and below name no
+// process (kill(0, ...) would signal our own process group), so they are not.
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}

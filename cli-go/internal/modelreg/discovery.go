@@ -523,7 +523,11 @@ func (d *Discoverer) workDir() (string, error) {
 	if err := statepath.SecureDir(d.cfg.StateDir); err != nil {
 		return "", fmt.Errorf("%w: %w", errNoPrivateDir, err)
 	}
-	return os.MkdirTemp(d.cfg.StateDir, ".discover-*")
+	// Leftovers of probes that were killed before they could clean up (see
+	// discovery_sweep.go). Only after SecureDir: nothing is touched in a directory
+	// that is not private.
+	sweepStaleWorkDirs(d.cfg.StateDir)
+	return os.MkdirTemp(d.cfg.StateDir, workDirPattern())
 }
 
 // cloneReport copies r's slices so callers that shared one probe cannot change
