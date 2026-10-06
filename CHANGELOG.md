@@ -440,13 +440,13 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   warning and rejected by `yakos validate`. The chat summary event also
   carries `runtime_resolved`, the runtime that actually ran the turn.
 
-- **Compose follows a symlink only to a file or directory inside the agent
-  directories, and no longer blocks or exhausts memory on a special file (K-132
-  follow-up, sec-324, rev-324).** A cloned repository controls the project's
-  `.claude/agents`, and the roster reader followed whatever a link there
-  pointed at. A link to a file such as `~/.aws/credentials` became an agent's
-  persona: its first line was the description `/api/skills` returns to every
-  reader of the endpoint, and the daemon sent the whole file to the model
+- **Compose follows a symlink only to a file inside the agent directories,
+  never to a directory, and no longer blocks or exhausts memory on a special
+  file (K-132 follow-up, sec-324, rev-324).** A cloned repository controls the
+  project's `.claude/agents`, and the roster reader followed whatever a link
+  there pointed at. A link to a file such as `~/.aws/credentials` became an
+  agent's persona: its first line was the description `/api/skills` returns to
+  every reader of the endpoint, and the daemon sent the whole file to the model
   vendor as the system prompt. A dangling link or a link to a directory emptied
   the roster, a link to a FIFO blocked it for good, and a link to `/dev/zero`
   would have used up the daemon's memory. A symlinked agent file is now
@@ -460,22 +460,31 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   to the vendor (rev-324). The directories are checked themselves too, because
   a file seen through a linked directory is a regular file and never reaches
   the rule for files. A project `.claude/agents` or `.claude/skills` that is a
-  symlink, or sits under a symlinked `.claude`, must resolve to a directory
-  inside the project, compared by directory identity so that `/var` against
-  `/private/var`, a symlinked root and a case-insensitive file system agree.
-  Otherwise the whole directory is skipped, with one warning that names it. A
-  directory linked to another directory of the project composes like a plain
-  one, and the rule for files holds inside it. Anything else that is not a
-  regular file is skipped without being opened, a file over 4 MiB is skipped,
-  and the read itself is bounded. Each is skipped with the same once-per-file
-  warning that names the file, and so is any failure to read a file in the
-  project directory, so one bad file no longer stops the other agents. A
-  framework file that cannot be read is still an error. What is checked is what
-  is read: the file is opened by the path the check resolved, without following
-  a link and without blocking, and the open file must be a regular file and the
-  same file that was checked. A link retargeted to an outside file, a directory
+  symlink, or sits under a symlinked `.claude`, is skipped whole, once, with
+  one warning that names it, wherever the link leads: outside the project, to
+  another directory of the project, to nothing or to a file. Only the project's
+  directories are looked at. The framework's own root, `lib/agents` and
+  `lib/skills` may be links, as a bare install or a re-pointed upgrade can
+  leave them, and still compose. Anything else that is not a regular file is
+  skipped without being opened, a file over 4 MiB is skipped, and the read
+  itself is bounded. Each is skipped with the same once-per-file warning that
+  names the file, and so is any failure to read a file in the project
+  directory, so one bad file no longer stops the other agents. A framework file
+  that cannot be read is still an error. What is checked is what is read: the
+  file is opened by the path the check resolved, without following a link and
+  without blocking, and the open file must be a regular file and the same file
+  that was checked. In Go, a link retargeted to an outside file, a directory
   swapped for a link, or a file swapped for a FIFO between the check and the
-  read is a skip, not a leak or a hang (rev-324).
+  read is a skip, not a leak or a hang (rev-324). The bash composer still
+  checks and then reads: the open by descriptor that closes the race has no
+  bash equivalent, so a link retargeted between the check and the read can
+  still be followed there (rev-324 saw the retargeting link win in 3 of 17 runs
+  of a tight loop). The bash composer is the parity oracle that K-143 retires,
+  and the race is not closed in it. If you linked an agent or skill file to
+  another file of the project, move that file into `.claude/agents` or
+  `.claude/skills` (a subdirectory is fine). If you linked `.claude/agents`,
+  `.claude/skills` or `.claude` itself, make it a real directory. Links into
+  `lib/agents` and `lib/skills` keep working.
 
 - **The skills listing skips a `SKILL.md` it may not read instead of failing
   (K-132 follow-up, sec-324).** `ComposeSkills`, behind `GET /api/skills`, read
@@ -486,11 +495,11 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   `.claude/skills`, nothing that is not a regular file, nothing over 4 MiB, no
   line of 1 MiB or more, and a failure to read a file in the project directory
   is a skip. The project's `.claude/skills` is checked itself, like
-  `.claude/agents`: a link that does not resolve to a directory inside the
-  project skips the whole directory, with one warning. Each is skipped with a
-  once-per-file warning that names the file, and the rest of the listing is
-  served. A framework skill that cannot be read is still an error. A skill
-  directory without a `SKILL.md` is skipped silently, as before.
+  `.claude/agents`: a symlink there, or a symlinked `.claude` above it, skips
+  the whole directory, with the same one warning, wherever the link leads. Each
+  is skipped with a once-per-file warning that names the file, and the rest of
+  the listing is served. A framework skill that cannot be read is still an
+  error. A skill directory without a `SKILL.md` is skipped silently, as before.
 
 - **`extends:` names a framework template and nothing else (K-132 follow-up,
   sec-324, rev-324).** The value came from the agent's own file and went into a
@@ -521,21 +530,23 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   does not end at a regular file inside the framework's `lib/agents` or the
   project's `.claude/agents`, an `extends:` that is not a bare agent id, and a
   project `.claude/agents` or `.claude/skills` that is a symlink, or sits under
-  a symlinked `.claude`, and does not resolve to a directory inside the
-  project. No pass reads a directory it reports. Neither validator walks into a
-  symlinked agents or skills directory, as before, so what is in one is not
-  validated here although the dispatcher composes it. The bash validator also
-  checks the `runtime` and `model-policy` of an agent reached through a symlink
-  it accepts, as the Go one always did. The Go validator no longer reads a
-  symlink to a FIFO or a device in any pass over agent files, where it would
-  have blocked or read without end, and leaves a FIFO among the skills and
-  rules alone, as the bash one does. The bash validator's playbook-reference
-  pass read every file in the agents, rules and skills directories with a
-  recursive `grep`, so a FIFO there blocked it for good while the Go validator
-  returned at once; it now reads regular files only. The shell suite that runs
-  both validators on the same fixtures and compares their findings,
-  `tests/run-agent-enums-test.sh`, now runs in CI on Linux and macOS, under
-  bash 5 and bash 3.2.
+  a symlinked `.claude`, wherever it leads. No pass reads a directory it
+  reports, and none reads through a link the dispatcher refuses, an agent file
+  or a `SKILL.md`. The Go eval-case pass read an agent link and printed the
+  `model-policy` of the file it led to, and the Go passes over skills read a
+  `SKILL.md` link and printed what they found in it. Only the agent files are
+  reported. The framework's own directories are never reported for being links.
+  The bash validator also checks the `runtime` and `model-policy` of an agent
+  reached through a symlink it accepts, as the Go one always did. The Go
+  validator no longer reads a symlink to a FIFO or a device in any pass over
+  agent files, where it would have blocked or read without end, and leaves a
+  FIFO among the skills and rules alone, as the bash one does. The bash
+  validator's playbook-reference pass read every file in the agents, rules and
+  skills directories with a recursive `grep`, so a FIFO there blocked it for
+  good while the Go validator returned at once; it now reads regular files
+  only. The shell suite that runs both validators on the same fixtures and
+  compares their findings, `tests/run-agent-enums-test.sh`, now runs in CI on
+  Linux and macOS, under bash 5 and bash 3.2.
 
 - **codex dispatch is sandboxed by default; agy gets `--sandbox` but is not
   contained (K-133, K-158).** The Go dispatcher (console, MCP, Flows, JSON-RPC,
