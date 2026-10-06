@@ -349,3 +349,34 @@ func TestGateReleasesTheLockWhenLaunchPanics(t *testing.T) {
 		t.Error("the lock was left behind after a panic")
 	}
 }
+
+// K-128 review finding 9: the ledger is stamped BEFORE the budget is read. A spend that
+// lands while the read is in progress (here: right after the evaluation has read the
+// ledger) is invisible to that read, so only a stamp taken before it can notice, under
+// the lock, that the read is stale. A stamp taken after the read would include the spend,
+// compare equal, and the launch would go ahead on the stale "ok", past the hard stop. The
+// pause seam cannot see this (it parks the gate after the read). Bash twin: the stream
+// suite's (k19), whose fake CLI appends the spend after it has answered.
+func TestGateStampsTheLedgerBeforeTheBudgetRead(t *testing.T) {
+	h, launches, _, logFile := internalGateHook(t)
+	reads := 0
+	budgetEvaluatedHook = func() {
+		reads++
+		if reads == 1 {
+			ledgerEvent(t, "dispatch_finished", 100) // the whole limit is spent just after the first read looked
+		}
+	}
+	t.Cleanup(func() { budgetEvaluatedHook = nil })
+	var out hooktype.HookOutput
+	h.launchGate(&out, gateIn(), nil, logFile, gateCall{crossed: true, event: map[string]any{"n": 1}, model: "haiku", agent: "supervisor"})
+	if n := atomic.LoadInt32(launches); n != 0 {
+		t.Errorf("launched %d times at the hard stop: the decision used the stale read (the ledger was stamped after it)", n)
+	}
+	logs := readFileT(t, logFile)
+	if !strings.Contains(logs, "supervisor budget exhausted; skipping this routine") {
+		t.Errorf("no budget refusal:\n%s", logs)
+	}
+	if reads != 2 {
+		t.Errorf("budget reads = %d, want 2 (the one before the lock and the re-read under it)", reads)
+	}
+}

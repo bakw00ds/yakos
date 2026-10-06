@@ -864,6 +864,34 @@ for side in $sides; do
     if [ "$_pm" = 600 ]; then ok "(k128) $side the pending file is created 0600 under umask 0"; else bad "(k128) $side pending file mode ${_pm:-missing} under umask 0, want 600"; fi
 done
 
+# (k19) K-128 review finding 9: the ledger is stamped BEFORE the budget is read. A spend that lands while the read is in
+# progress is invisible to that read, so only a stamp taken before it can notice, under the lock, that the read is stale;
+# a stamp taken after the read would include the spend, compare equal, and let the launch through on the stale "ok", past
+# the hard stop. The pause seam of (k9) cannot see this (it parks the hook after the read). This fake CLI answers from the
+# ledger FIRST and appends the spend (the whole limit) after it has answered, once: the hook's first read says "ok", its
+# second (under the lock, because the stamp moved) says hard_stop. The Go twin evaluates in-process, where a shell cannot
+# interrupt it: it is covered by TestGateStampsTheLedgerBeforeTheBudgetRead.
+K19BODY='if [ "$1" = budget ]; then
+    printf "read\n" >> "$0.budget"
+    if [ -e "$YAKOS_WORK_DIR/current/.supervisor-counter.lock" ]; then printf "under\n" >> "$0.under"; fi
+    if grep -q "\"total_cost_usd\":100" "$YAKOS_DISPATCH_LOG/dispatch-log.ndjson" 2>/dev/null; then
+        echo "{\"state\":\"hard_stop\",\"spent_usd\":100,\"limit_usd\":100,\"stop_usd\":200}"
+    else
+        echo "{\"state\":\"ok\",\"spent_usd\":0,\"limit_usd\":100,\"stop_usd\":200}"
+    fi
+    if [ ! -e "$0.spent" ]; then
+        : > "$0.spent"
+        printf "{\"type\":\"dispatch_finished\",\"ts\":\"%s\",\"agent\":\"supervisor\",\"usage\":{\"total_cost_usd\":100}}\n" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$YAKOS_DISPATCH_LOG/dispatch-log.ndjson"
+    fi
+    exit 0
+fi
+printf "run\n" >> "$0.runs"'
+sb="$(k128sb "k19-bash" $'supervisor:\n  score_every_n_calls: 1\n' "$K19BODY")"
+k128run bash "$sb" "$TMP/k128-benign.json"
+if [ "$(nlog "$sb" 'forked async')" = 0 ] && [ "$(k128runs "$sb")" = 0 ] && [ "$(nlog "$sb" "$K9REFUSED")" = 1 ] && [ "$(k128reads "$sb")" = 2 ] && [ "$(k128under "$sb")" = 1 ]; then
+    ok "(k128) bash a spend that lands while the budget is being read is noticed: the ledger was stamped before the read, so the hook read again under the lock and refused at the hard stop"
+else bad "(k128) bash stamp order: forked=$(nlog "$sb" 'forked async') runs=$(k128runs "$sb") refusals=$(nlog "$sb" "$K9REFUSED") reads=$(k128reads "$sb") under-lock=$(k128under "$sb") (a stamp taken after the read lets the launch through on the stale read)"; fi
+
 # no CLI: both sides WARN and exit 0. This PATH has every binary EXCEPT yakos.
 NOCLI="$TMP/nocli-bin"; mkdir -p "$NOCLI"
 for _dir in /usr/bin /bin /usr/local/bin /opt/homebrew/bin; do

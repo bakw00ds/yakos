@@ -400,6 +400,9 @@ const (
 // never loosen it (budget.Resolve).
 func (h *Hook) evalBudget(agent string, in hooktype.HookInput) budgetGate {
 	st, err := budget.Evaluate(agent, budget.Options{Project: h.resolveProjectDir(in), Now: h.NowFn})
+	if budgetEvaluatedHook != nil {
+		budgetEvaluatedHook()
+	}
 	if err != nil {
 		return budgetGate{cause: budgetCauseReadError}
 	}
@@ -453,6 +456,15 @@ func gateHold(env map[string]string) {
 // launch gate, and whether the gate lock is held at that moment. It is nil in
 // production. Bash twin: the fake CLI of the stream suite's (k9) and (k10).
 var budgetReadHook func()
+
+// budgetEvaluatedHook is a test seam: a test sets it to run code right after the budget
+// evaluation has read the ledger and before the evaluation returns, i.e. while the read is
+// in progress. A spend appended there is invisible to that read, so only a ledger stamp
+// taken BEFORE the read can notice it under the lock; a stamp taken after the read would
+// include the spend and compare equal (K-128 review finding 9). It is nil in production.
+// Bash twin: the fake CLI of the stream suite's (k19), which appends the spend after it
+// has answered.
+var budgetEvaluatedHook func()
 
 // gatePause is a test seam: with YAKOS_TEST_SEAMS=1 and a file
 // .supervisor-test-pause in the work directory, a hook about to take the gate
