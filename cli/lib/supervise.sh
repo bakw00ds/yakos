@@ -396,7 +396,9 @@ if [ "$SUB" = "clear" ]; then
     PROJECT="$(resolve_project "${1:-}")"
     resolve_project_paths "$PROJECT"
     removed=0
-    for f in "$buffer" "$findings" "$counter" "$work_current/.supervisor-gate-last-surfaced"; do
+    # "$counter".add.*: increments a hook journaled when it could not take the lock (K-128); left
+    # behind, the next hook would fold them into the counter that was just cleared.
+    for f in "$buffer" "$findings" "$counter" "$work_current/.supervisor-gate-last-surfaced" "$counter".add.*; do
         [ -f "$f" ] && rm -f "$f" && removed=$((removed + 1))
     done
     echo "supervise clear: removed $removed file(s) for $PROJECT (config in .yakos.yml preserved)"

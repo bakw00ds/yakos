@@ -177,11 +177,16 @@ func RunWrapper(c WrapperConfig, argv []string, stdout, stderr io.Writer) int {
 		n := 0
 		if rel, ok := lockRetry(c.Lock); ok {
 			st := loadRunState(c.State)
+			// K-128: triggers that hooks journaled because they could not take the
+			// lock join the claim (their previews land in the pending file first).
+			folded := foldGate(c.State, c.Pending, &st)
 			n = st.pending
 			if n > 0 {
 				_ = os.Rename(c.Pending, c.Pending+".run")
 				st.pending, st.high = 0, 0
-				_ = st.save(c.State)
+				if st.save(c.State) == nil {
+					removeFiles(folded)
+				}
 			}
 			rel()
 		} else {
@@ -217,6 +222,7 @@ func RunWrapper(c WrapperConfig, argv []string, stdout, stderr io.Writer) int {
 			return 0
 		}
 		st := loadRunState(c.State)
+		folded := foldGate(c.State, c.Pending, &st) // K-128: a trigger journaled while the run was in flight still gets its follow-up
 		now := time.Now().Unix()
 		if slimit && st.backoff <= now {
 			st.backoff = now + int64(c.BackoffMin)*60
@@ -254,12 +260,16 @@ func RunWrapper(c WrapperConfig, argv []string, stdout, stderr io.Writer) int {
 				st.launches++
 			}
 			st.last, st.start, st.hasStart = now, now, true
-			_ = st.save(c.State)
+			if st.save(c.State) == nil {
+				removeFiles(folded)
+			}
 			rel()
 			continue
 		}
 		st.hasStart, st.start = false, 0
-		_ = st.save(c.State)
+		if st.save(c.State) == nil {
+			removeFiles(folded)
+		}
 		rel()
 		return 0
 	}

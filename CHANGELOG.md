@@ -428,6 +428,80 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   checked them, so the two reported different findings. The pass now runs
   whatever is missing, and `tests/run-agent-enums-test.sh` compares both
   validators on four such projects.
+- **supervisor-stream: ten concurrent hooks no longer exhaust the lock budget
+  (K-128).** Under load (a 3-core macOS runner, or a team of agents sharing one
+  `work/current/`) the bash hook's lock was held across the budget CLI, several
+  `jq` forks and the log writes, so a hold took 100-300 ms and the tenth hook
+  gave up after its 3 s wait: the coalesce suite counted 7-8 of 9 coalesced
+  hooks, the stream suite lost increments (counter 11 of 12), and a launch was
+  skipped. Both twins now hold the lock only for the counter / run-state
+  read-modify-write (a temp file and a rename) and the wrapper spawn, and do
+  everything else outside it: the budget read, every log record and the
+  synthetic findings. The lock is an `O_EXCL` file create instead of `mkdir`
+  (no fork to take it; the path is unchanged, so old and new hooks still
+  exclude each other), and waiters back off from 5 ms to 160 ms with jitter
+  instead of polling every 20 ms. A hook whose 3 s wait still expires journals
+  its increment (and, for a high-risk trigger, its run-state record) for the
+  next lock holder instead of dropping it; the folder covers any score-every
+  crossing the records skipped, and the session's wrapper folds trigger records
+  too, so a trigger journaled while a run is in flight still gets its follow-up.
+  Taking the lock also survives POSIX-mode bash, and the clock is read after the
+  lock is held (to the second, in bash). The budget is still read before the
+  lock, and read again under it when the dispatch log grew in between (a run of
+  this or another session started, spent and ended while the hook waited), so a
+  launch decision never rests on a read older than the lock; in bash that costs
+  one `wc -c` under the lock on the launch-decision path. A counter that cannot
+  be written now logs a WARN and still records a high-risk trigger instead of
+  dropping the tick silently. Projects pick up the bash hook with `yakos
+  refresh --project <path>`; the Go twin ships in the binary. See
+  `docs/supervisor-mode.md` "Lock protocol".
+- **`yakos supervise clear` removes journaled counter increments** with the
+  counter, so the next hook cannot fold them into a counter that was just cleared.
+- **The bounded budget read is bounded in time.** `yakos budget check` was
+  waited on for 40 polls of `sleep 0.05`, which counts iterations: on a loaded
+  runner each poll cost a fork on top of its 50 ms and the "2 s" read took 4 s
+  or more (the budget suite's "hook took 7s"). A watchdog now enforces 2 s of
+  wall-clock time.
+- **Timing-dependent supervisor tests.** The strict-config twin-log comparison
+  decided launch-or-defer by how long each twin took, the in-flight windows
+  were barely wider than a slow bash hook, and the budget suite compared the
+  detached wrapper's records by position and duration. Each is now independent
+  of speed.
+- **supervisor-stream says when it could not read the dollar budget (K-128).** A
+  launch decision whose budget read failed (the bash hook's `yakos budget check`
+  hung past its 2 s bound, printed nothing and failed, or printed something that
+  is not a budget, or `jq` failed on it; or, in either twin, the spend log could
+  not be read) already failed open, as documented, but left only the ordinary
+  "forked async" record, so nothing told the operator the dollar budget had gone
+  unenforced. Both twins now write one WARN to the hook log, ahead of the
+  launch's own record: `supervisor budget unavailable (cause:
+  timeout|no_output|parse|read_error)`, with `budget_reason: budget_unavailable`
+  and a `cause` field. The decision is unchanged and nothing goes to stderr. A
+  budget that is switched off (a limit of 0) and a CLI that prints nothing and
+  exits 0 are not failures and stay silent. `yakos budget check --json` now
+  carries `"read_failed": true` when the spend could not be read (its numbers
+  then read "ok, nothing spent"), set from the error itself, and the bash hook
+  uses that field. It never reads the CLI's stderr, which carries text a project
+  controls: a repeated `agent_budgets` key in `.yakos.yml` is echoed back there
+  by the YAML error. A CLI built before the field existed is read as an ordinary
+  one (the bash hook then cannot report an unreadable spend log). See `docs/budgets.md`, "Failure posture".
+- **supervisor-stream lock files are owner-only in both twins (K-128).** The bash
+  hook and its wrapper created the lock with the caller's umask (0644, or 0666
+  under umask 0) where the Go twin's is 0600; both now create it 0600 whatever
+  the umask, setting the mask with builtins around the create so taking the lock
+  still forks nothing. The pending-preview file was already created 0600 under
+  any umask by every writer; a test now pins that under umask 0. The Go twin also
+  opens its test-only lock-stats file with `O_NOFOLLOW`, closing the gap between
+  its symlink check and the open.
+- **A cleanup race in the supervisor shell suites (closes K-130).** The prefilter
+  suite passed every check and still exited 1 about once in 20 runs (3 of 60 local
+  runs on the base commit, and one CI rerun of the K-128 PR): the detached wrapper
+  of its test (h) writes its end-of-run state, log and lock a few milliseconds
+  after its dispatch returns, and the bare removal of the sandbox in the EXIT trap
+  ran into it ("Directory not empty"). The prefilter suite now waits for that
+  wrapper to go idle and retries the removal. The stream and coalesce suites, which
+  also leave detached wrappers behind, wait (10 s at most) for the wrappers of their
+  own run and retry the removal too. All three keep the suite's own exit status.
 
 ### Security
 

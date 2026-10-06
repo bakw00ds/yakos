@@ -242,13 +242,16 @@ func resolveLimits(cfg *supervisorConfig, model string, env map[string]string) l
 // budgetGate is the supervisor budget as the launch gate sees it. hard is
 // state hard_stop (spent >= limit); over is spent >= the dispatch stop (2x the
 // limit), the ceiling for high-risk launches. Both false when the budget is
-// off or the read failed (fail open). Bash twin: _ss_budget.
+// off or the read failed (fail open). cause is empty unless the read failed
+// (K-128, S3): then it says why and the gate writes one WARN naming it. A budget
+// that is merely off is not a failure. Bash twin: _ss_budget.
 type budgetGate struct {
 	hard, over bool
 	state      string
 	spent      float64
 	limit      float64
 	stop       float64
+	cause      string
 }
 
 // denyReason is why allowLaunch refused ("" means allow).

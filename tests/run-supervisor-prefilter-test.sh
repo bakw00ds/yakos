@@ -35,7 +35,22 @@ bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail + 1)); fail_log=
 # ---------------------------------------------------------------------------
 
 TMP="$(mktemp -d -t yakos-prefilter-XXXXXX)"
-trap 'rm -rf "$TMP"' EXIT INT TERM
+# The detached wrapper of test (h)'s async dispatch still writes its end-of-run bookkeeping into the sandbox
+# (state, log, lock) a few ms after its dispatch returns, so a bare `rm -rf` raced it ("Directory not empty",
+# and the failing rm in the EXIT trap made a suite that had passed 18 of 18 exit 1: about 1 run in 20 on the
+# base commit too, K-128). Retry the removal for a moment, and keep the suite's own exit status.
+cleanup() {
+    local rc=$? i=0
+    while [ "$i" -lt 100 ]; do
+        rm -rf "$TMP" 2>/dev/null
+        [ -e "$TMP" ] || break
+        sleep 0.1; i=$((i + 1))
+    done
+    exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 ORIG_PATH="$PATH"
 
@@ -477,6 +492,19 @@ fi
 : > "$H_RELEASE"
 h_i=0
 while [ ! -e "$H_DONE" ] && [ "$h_i" -lt 200 ]; do
+    sleep 0.05
+    h_i=$((h_i + 1))
+done
+# The mock is done, but the detached wrapper around it still has its end-of-run bookkeeping to write (state, log,
+# lock): wait for it (10 s at most) so it does not run into the cleanup.
+h_i=0
+while [ "$h_i" -lt 200 ]; do
+    h_busy=0
+    for h_f in "$WORK_CURRENT"/.supervisor-run.*; do
+        if [ -f "$h_f" ] && grep -q '^start=[0-9]' "$h_f" 2>/dev/null; then h_busy=1; fi
+    done
+    if [ -e "$WORK_CURRENT/.supervisor-counter.lock" ]; then h_busy=1; fi
+    [ "$h_busy" = 0 ] && break
     sleep 0.05
     h_i=$((h_i + 1))
 done

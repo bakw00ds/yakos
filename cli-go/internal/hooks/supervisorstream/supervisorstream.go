@@ -34,7 +34,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -369,13 +368,33 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	}
 
 	// ---- 3. Increment escalation counter ----
-	cur, ok := incrementCounter(counterFile)
-	if !ok {
-		// No lock within the wait budget: skip this tick (bash: exit 0)
-		// rather than block the hook or risk a double launch.
+	// K-128: the increment is never dropped. If the lock cannot be taken within
+	// its ceiling, incrementCounter has journaled it for the next lock holder; a
+	// high-risk trigger also owes the session's run state a record.
+	cur, folded, res := incrementCounter(counterFile)
+	switch res {
+	case counterBusy, counterBusyUnjournaled:
+		if triggerHigh {
+			journalGate(filepath.Join(h.WorkCurrentDir, ".supervisor-run."+sessionKey(sessionID)), true, event)
+		}
+		note := "increment journaled for the next lock holder"
+		if res == counterBusyUnjournaled {
+			note = "could not journal the increment"
+		}
 		h.appendLog(&out, in, logFile, "WARN", "pass",
-			"counter lock busy or unremovable; skipping this escalation tick",
+			"counter lock busy or unremovable; "+note+", skipping this escalation tick",
 			map[string]any{"lock": counterFile + ".lock"})
+		return out, nil
+	case counterWriteFailed:
+		// The counter cannot be written (a directory in its place, say), so this
+		// tick cannot be counted. Say so, and still record a high-risk trigger
+		// in the session's run state. Bash twin: _ss_counter_unwritable.
+		h.appendLog(&out, in, logFile, "WARN", "pass",
+			"counter not writable; skipping this escalation tick",
+			map[string]any{"counter": counterFile})
+		if triggerHigh {
+			h.gateNote(&out, in, cfg, logFile, event)
+		}
 		return out, nil
 	}
 
@@ -385,7 +404,9 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		scoreEvery = cfg.ScoreEveryN.v
 	}
 
-	if cur%scoreEvery != 0 {
+	// A threshold is crossed when a multiple of scoreEvery lies in
+	// (cur-1-folded, cur]: with no journaled records that is cur%scoreEvery == 0.
+	if cur/scoreEvery <= (cur-1-folded)/scoreEvery {
 		h.appendLog(&out, in, logFile, "REPORT", "pass",
 			"escalation buffered; not yet at score-every threshold",
 			map[string]any{"counter": cur, "score_every": scoreEvery, "will_score": false})
@@ -633,87 +654,6 @@ func trimBuffer(bufferFile string, maxLines int) {
 	_ = os.Rename(tmp, bufferFile)
 }
 
-// ---- counter -----------------------------------------------------------------
-
-func readCounter(counterFile string) int {
-	data, err := os.ReadFile(counterFile) //nolint:gosec
-	if err != nil {
-		return 0
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return 0
-	}
-	return n
-}
-
-// counterLockStale is how old an abandoned counter lock must be before it is
-// reaped (bash: find -mmin +1).
-const counterLockStale = time.Minute
-
-// incrementCounter is the K-110 atomic read-increment-write. It takes the
-// same mkdir lock as supervisor-stream.sh (<counter>.lock), so concurrent
-// bash and Go hooks serialize too: every caller gets a unique value and at
-// most one crosses a score-every multiple. ok is false when the lock could
-// not be taken within ~3 s.
-func incrementCounter(counterFile string) (cur int, ok bool) {
-	release, ok := acquireLock(counterFile + ".lock")
-	if !ok {
-		return 0, false
-	}
-	defer release()
-	cur = readCounter(counterFile) + 1
-	writeCounter(counterFile, cur)
-	return cur, true
-}
-
-// acquireLock takes the mkdir lock (rename-then-recheck stale reap, ~3 s
-// budget) shared with supervisor-stream.sh. release removes it.
-func acquireLock(lock string) (release func(), ok bool) {
-	_ = os.MkdirAll(filepath.Dir(lock), 0755) //nolint:gosec
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		if err := os.Mkdir(lock, 0700); err == nil {
-			break
-		}
-		// Every retry sleeps and is bounded by the deadline, reaping included,
-		// so a stale lock that cannot be removed never spins this loop.
-		if time.Now().After(deadline) {
-			return nil, false
-		}
-		reapStaleLock(lock)
-		time.Sleep(5 * time.Millisecond)
-	}
-	return func() { _ = os.Remove(lock) }, true
-}
-
-// reapStaleLock removes a lock older than counterLockStale. It renames first
-// (atomic, one winner) and re-checks the age of what it moved, so a waiter
-// never deletes a lock another hook has just created. Mirrors the bash hook.
-func reapStaleLock(lock string) {
-	fi, err := os.Lstat(lock)
-	if err != nil || time.Since(fi.ModTime()) <= counterLockStale {
-		return
-	}
-	moved := fmt.Sprintf("%s.reap.%d", lock, os.Getpid())
-	if os.Rename(lock, moved) != nil {
-		return
-	}
-	if mfi, merr := os.Lstat(moved); merr == nil && time.Since(mfi.ModTime()) <= counterLockStale {
-		if os.Rename(moved, lock) == nil {
-			return // was fresh after all; put it back
-		}
-	}
-	_ = os.RemoveAll(moved)
-}
-
-func writeCounter(counterFile string, n int) {
-	_ = os.MkdirAll(filepath.Dir(counterFile), 0755) //nolint:gosec
-	tmp := counterFile + ".tmp"
-	_ = os.WriteFile(tmp, []byte(strconv.Itoa(n)+"\n"), 0644) //nolint:gosec
-	_ = os.Rename(tmp, counterFile)
-}
-
 // ---- log helper --------------------------------------------------------------
 
 // logExtraOrder is the order bash's ho_log extras appear in (jq keeps the
@@ -724,7 +664,7 @@ func writeCounter(counterFile string, n int) {
 var logExtraOrder = []string{
 	"ignored_keys", "invalid_keys", "lock", "age_s",
 	"coalesced", "high_risk", "throttled", "backoff_until", "capped", "cap", "ceiling",
-	"agent", "spent_usd", "limit_usd", "ceiling_usd", "budget_reason",
+	"agent", "spent_usd", "limit_usd", "ceiling_usd", "budget_reason", "cause",
 	"pre_filter", "trigger", "tool", "file",
 	"counter", "score_every", "will_score",
 	"dispatch", "model", "runtime", "deadline_s", "deferred_s", "pending", "session_key", "kind",
