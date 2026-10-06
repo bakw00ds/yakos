@@ -328,6 +328,20 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
     `docs/mcp-integration.md`, `docs/unified-console.md` and both package
     READMEs document the new results.
 
+- **Model registry and `yakos models` (K-138, routing P1).** The catalog
+  `lib/settings/model-catalog.json`, embedded in the binary, says what each of 29
+  models is: its harness, who serves it, how it is billed (`subscription`, `api`
+  or `local`; only an `api` model has a price) and its effort levels and limits.
+  Its `aliases` key equals `lib/settings/model-aliases.json`, which stays as it
+  was for the bash CLI. An optional overlay, `~/.yakos-state/model-registry.yml`,
+  enables or disables models, states billing, prices `api` models, maps codex and
+  agy tier aliases and admits discovered ids; it is ignored when it is a symlink,
+  another user's or writable by group or others. A project's `.yakos.yml`
+  `models: {disable: [...]}` can only switch models off. `agy models` discovery,
+  bounded and cached, sets an availability flag and adds no model unless the
+  overlay admits it. `yakos models list`, `show <id>` and `probe` read all of it.
+  Nothing about dispatch changes yet. Reference: `docs/routing.md`.
+
 ### Removed
 
 - **`gemini` is gone from the Go runtime registry (K-132 P0a).** It is also

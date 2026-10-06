@@ -97,6 +97,36 @@ only when it is a regular file owned by you that no one else can write, in a
 directory with the same properties, not a symlink. A file that fails this is
 ignored with a one-line notice. A file `yakos auth set-default` wrote passes.
 
+### 7. `lib/settings/model-catalog.json` supersedes `model-aliases.json` (no action needed)
+
+The model registry (`yakos models`, K-138) reads a new catalog,
+`lib/settings/model-catalog.json`, which the Go binary embeds. It lists each model
+by harness with its billing, effort levels and limits, and its `aliases` key
+carries the same semantic alias table (`cheap`, `balanced`, `best`, `reasoning`,
+`frontier`) as `lib/settings/model-aliases.json`. Nothing you run changes:
+
+- `model-aliases.json` stays. The bash CLI still reads it
+  (`cli/lib/project-config.sh`), and the Go dispatcher still resolves aliases
+  through its own embedded copy. A test keeps the catalog's `aliases` key equal to
+  the file, so bash and Go cannot resolve an alias differently.
+- If you edited `lib/settings/model-aliases.json` in a checkout or a fork, make
+  the same edit to the `aliases` key of `model-catalog.json` and refresh the
+  embedded copies:
+
+  ```sh
+  cp lib/settings/model-aliases.json cli-go/internal/runtime/model-aliases.json
+  cp lib/settings/model-catalog.json cli-go/internal/modelreg/model-catalog.json
+  ```
+
+  The drift tests (`TestEmbeddedAliasTableMatchesLib`,
+  `TestCatalogAliasesMatchLegacyFile`, `TestEmbeddedCatalogMatchesLib`) fail until
+  all of them agree.
+- `~/.yakos-state/model-registry.yml` is optional; without it the catalog's
+  defaults apply. If you add one, keep it owner-only: a symlink, another user's
+  file, or one writable by group or others is ignored with a warning.
+- `yakos models list`, `show <id>` and `probe` are new; see
+  [docs/routing.md](docs/routing.md#model-registry).
+
 ## Unreleased: codex runs in an OS sandbox, agy gets `--sandbox` but is not contained (K-133)
 
 The Go dispatcher (the console, MCP, Flows, JSON-RPC, and `yakos dispatch` with
