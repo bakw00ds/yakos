@@ -147,3 +147,55 @@ func TestReadTrusted_CapsTheRead(t *testing.T) {
 		t.Fatalf("read %d bytes, err %v, want 16", len(got), err)
 	}
 }
+
+// sec-324 F2 lists "owned by another user" among the planted-file cases, but no
+// test could make one: a file another user owns needs a second account. The
+// ownership test is a variable (ownedBy) so the guard can be exercised: these two
+// tests model the entry another user owns, once for the file and once for the
+// directory holding it, and mutate away the guard to see them fail.
+func TestReadTrusted_RefusesAFileOwnedByAnotherUser(t *testing.T) {
+	_, path := trustedState(t, "default-runtime", "codex\n")
+	restore := ownedBy
+	t.Cleanup(func() { ownedBy = restore })
+	ownedBy = func(fi os.FileInfo) bool { return fi.Name() != "default-runtime" }
+
+	data, err := ReadTrusted(path, 256)
+	if err == nil {
+		t.Fatalf("read %q from a file another user owns", data)
+	}
+	if !IsUntrusted(err) || !strings.Contains(err.Error(), ": is owned by another user") {
+		t.Errorf("err = %v, want an untrusted error saying the file is owned by another user", err)
+	}
+	var u *UntrustedError
+	if !errors.As(err, &u) || u.Path != path {
+		t.Errorf("the refusal must name the file (%s), got %+v", path, u)
+	}
+}
+
+func TestReadTrusted_RefusesADirectoryOwnedByAnotherUser(t *testing.T) {
+	dir, path := trustedState(t, "default-runtime", "codex\n")
+	restore := ownedBy
+	t.Cleanup(func() { ownedBy = restore })
+	ownedBy = func(fi os.FileInfo) bool { return fi.Name() != filepath.Base(dir) }
+
+	data, err := ReadTrusted(path, 256)
+	if err == nil {
+		t.Fatalf("read %q from a directory another user owns", data)
+	}
+	if !IsUntrusted(err) || !strings.Contains(err.Error(), ": is owned by another user") {
+		t.Errorf("err = %v, want an untrusted error saying the directory is owned by another user", err)
+	}
+	var u *UntrustedError
+	if !errors.As(err, &u) || u.Path != dir {
+		t.Errorf("the refusal must name the directory (%s), got %+v", dir, u)
+	}
+}
+
+// The same tests pass for an entry the current user owns: the variable defaults
+// to the real check, so nothing above weakens it.
+func TestReadTrusted_OwnerCheckDefaultsToTheRealOne(t *testing.T) {
+	_, path := trustedState(t, "default-runtime", "codex\n")
+	if _, err := ReadTrusted(path, 256); err != nil {
+		t.Fatalf("a file this user owns must be trusted: %v", err)
+	}
+}

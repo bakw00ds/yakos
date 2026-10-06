@@ -1,0 +1,134 @@
+package modelreg
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestLoadProject_NoFileNoPolicy(t *testing.T) {
+	if pol, warns := LoadProject(""); len(pol.Disable) != 0 || len(warns) != 0 {
+		t.Errorf("empty project: %+v %v", pol, warns)
+	}
+	if pol, warns := LoadProject(t.TempDir()); len(pol.Disable) != 0 || len(warns) != 0 {
+		t.Errorf("no .yakos.yml: %+v %v", pol, warns)
+	}
+	dir := writeProject(t, "default-runtime: codex\nper-domain:\n  code-review: codex\n")
+	if pol, warns := LoadProject(dir); len(pol.Disable) != 0 || len(warns) != 0 {
+		t.Errorf("a .yakos.yml without models: must say nothing: %+v %v", pol, warns)
+	}
+}
+
+func TestParseProject_DisableList(t *testing.T) {
+	pol, warns := ParseProject([]byte("default-runtime: claude\nmodels:\n  disable: [opus, gpt-5.6-sol, opus, \"Bad Id\", 7]\n"))
+	if got := strings.Join(pol.Disable, ","); got != "opus,gpt-5.6-sol" {
+		t.Errorf("Disable = %q, want the valid ids once each", got)
+	}
+	if len(warns) != 2 || !strings.Contains(strings.Join(warns, "\n"), "skipping an entry that is not a model id") {
+		t.Errorf("warnings = %v", warns)
+	}
+}
+
+// A project can narrow what runs and never widen it: `disable` is the only key
+// that does anything, and every key that tries to add, enable, alias or price is
+// reported and has no effect.
+func TestParseProject_CannotWiden(t *testing.T) {
+	body := `
+models:
+  disable: [haiku]
+  enable: [gpt-reserve]
+  add:
+    - id: my-model
+      harnesses: [claude]
+  aliases:
+    best: {codex: gpt-5.6-sol}
+  providers:
+    evil: {url: "http://example.invalid"}
+  pricing: {haiku: {input: 0, output: 0}}
+  gpt-5.5: {enabled: true}
+`
+	pol, warns := ParseProject([]byte(body))
+	if len(pol.Disable) != 1 || pol.Disable[0] != "haiku" {
+		t.Errorf("Disable = %v", pol.Disable)
+	}
+	joined := strings.Join(warns, "\n")
+	for _, k := range []string{`"enable"`, `"add"`, `"aliases"`, `"providers"`, `"pricing"`, `"gpt-5.5"`} {
+		if !strings.Contains(joined, k+" ignored: a project can only disable models") {
+			t.Errorf("no warning for the key %s in:\n%s", k, joined)
+		}
+	}
+	// The only field of the policy is the disable list: there is nothing else a
+	// project could set, by construction.
+	if got := reflectFieldCount(pol); got != 1 {
+		t.Errorf("ProjectPolicy has %d fields; it must stay disable-only", got)
+	}
+}
+
+func TestParseProject_Malformed(t *testing.T) {
+	cases := []struct{ name, body, warn string }{
+		{"not YAML", "models: [unclosed {", "cannot parse"},
+		{"models is a list", "models:\n  - opus\n", "want a mapping with a disable: list"},
+		{"models is a string", "models: opus\n", "want a mapping with a disable: list"},
+		{"disable is a string", "models:\n  disable: opus\n", "disable: want a list"},
+		{"disable is a mapping", "models:\n  disable: {opus: true}\n", "disable: want a list"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pol, warns := ParseProject([]byte(c.body))
+			if len(pol.Disable) != 0 {
+				t.Errorf("Disable = %v", pol.Disable)
+			}
+			if len(warns) == 0 || !strings.Contains(strings.Join(warns, "\n"), c.warn) {
+				t.Errorf("warnings = %v, want %q", warns, c.warn)
+			}
+		})
+	}
+}
+
+func TestParseProject_BoundsTheList(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("models:\n  disable:\n")
+	for i := 0; i < maxProjectDisables+40; i++ {
+		b.WriteString("    - m-" + string(rune('a'+i%26)) + string(rune('a'+(i/26)%26)) + string(rune('a'+(i/676)%26)) + "\n")
+	}
+	pol, warns := ParseProject([]byte(b.String()))
+	if len(pol.Disable) != maxProjectDisables {
+		t.Errorf("read %d ids, want the cap %d", len(pol.Disable), maxProjectDisables)
+	}
+	if !hasWarning(warns, "only the first") {
+		t.Errorf("no cap warning: %v", warns)
+	}
+}
+
+// .yakos.yml is a repository file. A FIFO, a device or an enormous file must not
+// block or slow every registry load.
+func TestLoadProject_HostileFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ".yakos.yml")
+	if err := os.WriteFile(path, []byte("models:\n  disable: [haiku]\n"+"#"+strings.Repeat("x", maxProjectBytes)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pol, warns := LoadProject(dir)
+	if len(pol.Disable) != 0 || !hasWarning(warns, "larger than") {
+		t.Errorf("an oversized .yakos.yml: %+v %v", pol, warns)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o755); err != nil { // a directory in place of the file
+		t.Fatal(err)
+	}
+	pol, warns = LoadProject(dir)
+	if len(pol.Disable) != 0 || !hasWarning(warns, "not a regular file") {
+		t.Errorf("a directory named .yakos.yml: %+v %v", pol, warns)
+	}
+}
+
+func TestLoadProject_ReadsTheFile(t *testing.T) {
+	dir := writeProject(t, "models:\n  disable: [opus]\n")
+	pol, warns := LoadProject(dir)
+	if len(pol.Disable) != 1 || pol.Disable[0] != "opus" || len(warns) != 0 {
+		t.Errorf("%+v %v", pol, warns)
+	}
+}

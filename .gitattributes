@@ -48,6 +48,14 @@ lib/rules/*.md text eol=lf
 tests/fixtures/refresh/**/.claude/rules/*.md text eol=lf
 cli-go/cmd/yakos/testdata/fixtures/refresh/**/.claude/rules/*.md text eol=lf
 
+# Model registry (K-138). The embedded catalog is compared with the lib copy byte
+# for byte, and the CLI goldens with the printed output; force LF so a Windows
+# autocrlf checkout cannot turn either compare into a CRLF mismatch.
+lib/settings/model-catalog.json text eol=lf
+cli-go/internal/modelreg/model-catalog.json text eol=lf
+cli-go/internal/modelreg/testdata/* text eol=lf
+cli-go/cmd/yakos/testdata/models-*.golden text eol=lf
+
 # Byte-exact test fixtures (K-132). The cache-stability golden is compared with
 # the generated --agents JSON byte for byte, and the routing reader's fixtures
 # are compared with the bash reader's reading of the same bytes. Force LF so a
