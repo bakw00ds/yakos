@@ -43,6 +43,9 @@
 #               stricter one holds, the stop is the smaller absolute stop (not the stop of the
 #               side with the smaller amount), and the window is lifetime if either side is.
 #               Each twin reads the name its own way (Go as YAML, bash with a line scan).
+# 14. project    a project's agent_budgets value (.inf, 1e308, 5e-324, below the one-cent floor) cannot
+#               switch the gate off: with the operator's dollar limit off, both twins still refuse the
+#               routine launch at the token hard stop, and `budget check --json` still marshals.
 # Run under both `bash` and `/bin/bash` (3.2 on macOS).
 set -u
 
@@ -694,6 +697,32 @@ for side in bash go; do
     else bad "(13) $side renamed, monthly window: rc=$rc runs=$(runs "$sb") $(logs "$sb" | grep -i budget)"; fi
 done
 
+# 14. K-136 (rev-327's finding on #330): a project's agent_budgets value cannot switch the gate off. With the operator's
+# supervisor dollar limit off (limit_usd 0, a token limit left: the token-only budget a subscription operator has) a project
+# value of .inf or 1e308, or one below the one-cent floor, used to be applied as the dollar limit. Its stop of twice it
+# overflowed to +Inf, json could not encode the status, `budget check --json` printed no JSON, and the bash gate, which reads
+# that line alone, launched at a token hard stop while the Go twin refused. Now the value is ignored with a warning, the
+# status marshals, and both twins refuse the routine launch at 40M of 33M tokens, in tokens. The sandboxes feed (9).
+for side in bash go; do
+    for spec in 'projinf|.inf' 'projbig|1e308' 'projtiny|5e-324' 'projcent|0.009'; do
+        name="${spec%%|*}"; val="${spec#*|}"
+        sb="$(mksbt "$name-$side" 0 33000000 40000000 0 $'agent_budgets:\n  supervisor: '"$val"$'\n')"
+        if [ "$side" = bash ]; then
+            # the line the bash hook reads, from the real CLI: one object with a numeric limit_usd, a string state and the token limit
+            if YAKOS_DISPATCH_LOG="$sb/state" "$GO_BINARY" budget check supervisor --project "$sb" --json 2>/dev/null \
+                | jq -e '(.limit_usd | type) == "number" and (.state | type) == "string" and .limit_tokens == 33000000' >/dev/null; then
+                ok "(14) budget check --json for a project value of $val is one usable object (numeric limit_usd, string state)"
+            else bad "(14) budget check --json for a project value of $val is not a usable object"; fi
+        fi
+        fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+        r="$(logs "$sb" | grep 'skipping this routine')"
+        if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && printf '%s' "$r" | grep -q '"spent_tokens":40000000,"limit_tokens":33000000,"budget_reason":"budget_exhausted","kind":"routine"' \
+            && ! printf '%s' "$r" | grep -q '_usd' && [ -z "$(unavail "$sb")" ]; then
+            ok "(14) $side a project agent_budgets value of $val does not switch the gate off: the routine launch is refused at 40M of 33M tokens"
+        else bad "(14) $side project value $val: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")] $r"; fi
+    done
+done
+
 # 9. K-122: the two twins write the same hook-log records, field for field AND in
 # the same order (jq keeps an object literal's insertion order, so `jq -c` of each
 # record is a byte comparison with only the timestamp removed). That holds for the HOOK's
@@ -708,7 +737,7 @@ cmp_norm() { # cmp_norm <sandbox>
 }
 for scen in routine high ceil warn proj quiet flags unread unreadtok off stub spoof spoofsup spoofctl \
             tokhard tokhigh tokceil tokwarn bothtok bothusd bothboth bothceil usdexempt usdwarn offboth dolloff flagstok \
-            rengain renhigh renloose rentight renstopok renstopceil renlife renmonth; do
+            rengain renhigh renloose rentight renstopok renstopceil renlife renmonth projinf projbig projtiny projcent; do
     b="$(cmp_norm "$TMP/$scen-bash")"
     g="$(cmp_norm "$TMP/$scen-go")"
     if [ -n "$b" ] && [ "$b" = "$g" ]; then ok "(9) $scen hook-log records are byte-identical across twins"; else
