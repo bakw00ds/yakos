@@ -24,5 +24,27 @@ import (
 func TestMain(m *testing.M) {
 	restore := userstore.SetArgon2ParamsForTest(1, 64, 1)
 	defer restore()
-	os.Exit(m.Run())
+
+	// K-136: an interactive chat turn now writes dispatch_started/finished
+	// events (dispatch.Account), and the billing mode of a turn is read from the
+	// provider credentials in the environment. Keep every test out of the
+	// operator's real state directory and start from no credentials, so a
+	// developer's exported API key cannot change what a test sees. A test that
+	// wants a log of its own sets YAKOS_DISPATCH_LOG itself.
+	stateDir, err := os.MkdirTemp("", "consoleui-test-state-")
+	if err != nil {
+		panic(err)
+	}
+	_ = os.Setenv("YAKOS_DISPATCH_LOG", stateDir)
+	for _, k := range []string{
+		"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN",
+		"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+		"CODEX_API_KEY", "OPENAI_API_KEY",
+		"ANTIGRAVITY_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "GOOGLE_GENAI_USE_VERTEXAI",
+	} {
+		_ = os.Unsetenv(k)
+	}
+	code := m.Run()
+	_ = os.RemoveAll(stateDir)
+	os.Exit(code)
 }

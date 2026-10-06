@@ -184,6 +184,10 @@ type chatHandlers struct {
 	// pendingQuestions holds the per-conversation pending AskUserQuestion state
 	// for forged-answer prevention.  Always non-nil after New().
 	pendingQuestions *pendingQuestionStore
+
+	// turns gives every turn of an interactive session its dispatch-log event
+	// pair (K-136); see chat_account.go.  Always non-nil.
+	turns *turnLedger
 }
 
 // interactiveSender is the minimal interface covering the Send method consumed
@@ -202,6 +206,7 @@ func newChatHandlers(hub *ChatHub, transcripts *Transcripts, svc *dispatch.Servi
 		state:       newChatState(),
 		svc:         svc,
 		serverCtx:   serverCtx,
+		turns:       newTurnLedger(),
 	}
 }
 
@@ -805,6 +810,12 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		// Accumulate assistant text for a single coalesced assistant turn.
 		var assistantBuf strings.Builder
 
+		// An interactive session's turns are accounted here, by turnLedger: the
+		// session outlives any single call, so the dispatch layer cannot open and
+		// finish an Account around a turn. A one-shot turn is accounted inside
+		// Service.RunStream and must not be counted a second time.
+		interactiveTurns := dispReq.Interactive && ch.interactiveMgr != nil
+
 		onChunk := func(chunk dispatch.StreamChunk) {
 			ev := SSEEvent{
 				SessionID:      dispReq.SessionID,
@@ -838,12 +849,18 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				if code != 0 {
 					exitStatus = dispatch.StatusFailed
 				}
+				if interactiveTurns {
+					ch.turns.finish(conversationID, chunk)
+				}
 
 				// Continuity (K-132): remember claude's own session id so the
 				// next one-shot turn of this conversation can --resume it. Not
 				// in worktree mode: a per-turn worktree is a different working
 				// directory each time, and claude files sessions by directory.
-				if chunk.NativeSessionID != "" && chunk.RuntimeResolved == "claude" && capturedWorktreeOverride == "" {
+				// Not for an interactive session either (K-136): its process still
+				// holds that session, and a one-shot --resume of the same id while
+				// it is open would have two claude processes writing one session.
+				if chunk.NativeSessionID != "" && chunk.RuntimeResolved == "claude" && capturedWorktreeOverride == "" && !interactiveTurns {
 					if err := ch.transcripts.SetNativeSession(conversationID, "claude", chunk.NativeSessionID, capturedOperatorID); err != nil {
 						slog.Warn("consoleui: store native session id", "conversation", conversationID, "err", err)
 					}
@@ -872,6 +889,9 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 
 			case "token":
 				assistantBuf.WriteString(chunk.Text)
+				if interactiveTurns {
+					ch.turns.noteOutput(conversationID, len(chunk.Text))
+				}
 
 			case "tool_use":
 				// Populate the tool_use SSE fields; transcript persistence is
@@ -975,9 +995,14 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				return
 			}
 
-			// Deliver the first turn.
+			// Deliver the first turn. The ledger entry is opened before the frame
+			// is written, so a fast engine cannot answer before the turn is known,
+			// and dropped if the frame is not delivered (K-136).
+			ch.turns.register(conversationID, ch.interactiveTurnTemplate(dispReq.Agent, modelName, conversationID, capturedOperatorID, dispReq.SessionID))
+			turn := ch.turns.begin(conversationID, dispReq.Task, dispReq.SessionID)
 			frame := runtime.EncodeUserTurn(dispReq.Task)
 			if sendErr := ch.interactiveMgr.Send(conversationID, capturedOperatorID, frame); sendErr != nil {
+				ch.turns.drop(conversationID, turn)
 				exitStatus = dispatch.StatusFailed
 				exitCode = -1
 				errText := fmt.Sprintf("interactive: SDK send failed: %s", sendErr.Error())
@@ -1004,6 +1029,8 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			case <-ctx.Done():
 				ch.interactiveMgr.Close(conversationID)
 			}
+			// A turn still running when the session ended is finished as failed.
+			ch.turns.closeConversation(conversationID)
 
 			// Clear any stale pending question on session close.
 			if ch.pendingQuestions != nil {
@@ -1068,9 +1095,13 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				return
 			}
 
-			// Deliver the first turn.
+			// Deliver the first turn (ledger entry opened before the write, dropped
+			// if it fails; see the SDK branch above).
+			ch.turns.register(conversationID, ch.interactiveTurnTemplate(dispReq.Agent, capturedModel, conversationID, capturedOperatorID, dispReq.SessionID))
+			turn := ch.turns.begin(conversationID, dispReq.Task, dispReq.SessionID)
 			frame := runtime.EncodeUserTurn(dispReq.Task)
 			if sendErr := ch.interactiveMgr.Send(conversationID, capturedOperatorID, frame); sendErr != nil {
+				ch.turns.drop(conversationID, turn)
 				exitStatus = dispatch.StatusFailed
 				exitCode = -1
 				errText := fmt.Sprintf("interactive: send failed: %s", sendErr.Error())
@@ -1100,6 +1131,8 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				// Server shutdown or cancel: close the session gracefully.
 				ch.interactiveMgr.Close(conversationID)
 			}
+			// A turn still running when the session ended is finished as failed.
+			ch.turns.closeConversation(conversationID)
 
 			sharedAtFinish = ch.hub.IsShared(dispReq.SessionID)
 			return
@@ -1137,6 +1170,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			// WorkDirOverride is set server-side from the worktreemgr path when
 			// WorktreeMode is true.  It is NEVER derived from the client request body.
 			WorkDirOverride: capturedWorktreeOverride,
+			Surface:         dispatch.SurfaceConsoleChat,
 		}
 
 		res, err := ch.svc.RunStream(ctx, params, onChunk)
@@ -1683,9 +1717,14 @@ func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		effectiveOperatorID = req.OperatorID
 	}
 
+	// The turn's ledger entry is opened before the frame is written and dropped
+	// when the engine refuses it, so a refused send (404/403/409/500) leaves no
+	// event and a delivered one always finishes as a pair (K-136).
+	turn := ch.turns.begin(req.ConversationID, req.Text, req.SessionID)
 	frame := runtime.EncodeUserTurn(req.Text)
 	err := ch.interactiveSend.Send(req.ConversationID, effectiveOperatorID, frame)
 	if err != nil {
+		ch.turns.drop(req.ConversationID, turn)
 		switch {
 		case errors.Is(err, interactive.ErrNoSession):
 			http.Error(w, "no live session for this conversationId", http.StatusNotFound)
