@@ -811,6 +811,39 @@ if mkfifo "$sb/state/dispatch-log.ndjson" 2>/dev/null; then
     wait "$_hp" 2>/dev/null || true
 fi
 
+# ---- K-128 round 2 (PR #327, S5): files the hook creates are owner-only whatever the caller's umask ---------------
+# (k17) The bash hook and its wrapper used to create the lock with the caller's mask (0644 normally, 0666 under umask 0) where
+# the Go twin's is 0600. The lock is gone again a few ms after it is taken, so a `mv` shim samples its mode at each rename
+# the hook and the wrapper make while they hold it (the counter and the run-state writes) and says which of the two asked:
+# the wrapper's environment carries _SSW_LOCK. Under umask 0 every file not forced owner-only shows as 666, and the counter
+# file, which the hook creates with the caller's mask, shows that the mask was put back after the lock was created. Bash
+# only: the Go twin's lock is a fixed 0600 (TestLockFileIsOwnerOnlyWhateverTheUmask).
+K17="$TMP/k17"; mkdir -p "$K17/shims"
+printf '#!/bin/sh\nm="$(stat -c %%a "$K17_LOCK" 2>/dev/null || stat -f %%Lp "$K17_LOCK" 2>/dev/null)"\nwho=hook\n[ -n "${_SSW_LOCK:-}" ] && who=wrapper\nprintf "%%s %%s\\n" "$who" "${m:-none}" >> "$K17_LOG"\nexec "$K17_REAL_MV" "$@"\n' > "$K17/shims/mv"
+chmod +x "$K17/shims/mv"
+sb="$(k128sb "k17-bash" $'supervisor:\n  score_every_n_calls: 1\n' 'if [ "$1" = budget ]; then exit 0; fi
+printf "run\n" >> "$0.runs"')"
+: > "$K17/log"
+( umask 000; k128run bash "$sb" "$TMP/k128-benign.json" PATH="$K17/shims:$PATH" K17_LOCK="$sb/work/current/.supervisor-counter.lock" K17_LOG="$K17/log" K17_REAL_MV="$(command -v mv)" )
+for _w in $(seq 1 300); do [ -f "$sb/work/current/.supervisor-run.k128" ] && [ -z "$(sed -n 's/^start=//p' "$sb/work/current/.supervisor-run.k128" 2>/dev/null)" ] && break; sleep 0.1; done
+lock_gone "$sb/work/current" || true
+_kh="$(grep -c '^hook ' "$K17/log" || true)"; _kw="$(grep -c '^wrapper ' "$K17/log" || true)"; _kb="$(grep -vc ' 600$' "$K17/log" || true)"
+_cm="$(stat -c %a "$sb/work/current/.supervisor-counter" 2>/dev/null || stat -f %Lp "$sb/work/current/.supervisor-counter" 2>/dev/null)"
+if [ "${_kh:-0}" -ge 2 ] && [ "${_kw:-0}" -ge 1 ] && [ "${_kb:-1}" = 0 ]; then ok "(k128) bash the hook's and the wrapper's lock files are 0600 under umask 0 (${_kh} hook and ${_kw} wrapper samples)"
+else bad "(k128) bash lock modes under umask 0: hook samples=${_kh:-?} wrapper samples=${_kw:-?} not 0600=${_kb:-?}: $(tr '\n' ' ' < "$K17/log")"; fi
+if [ "$_cm" = 666 ]; then ok "(k128) bash the caller's umask is put back after the lock is created (the counter file is 666 under umask 0)"
+else bad "(k128) bash the caller's umask was not put back: the counter file is ${_cm:-missing}, want 666 under umask 0"; fi
+
+# (k18) The pending file is created owner-only whatever the umask, in both twins (bash: a umask-077 subshell for the first
+# record, so nothing forks per append under the lock; Go: 0600 and a chmod). A high-risk trigger below the threshold is
+# recorded in the run state and previewed in the pending file.
+for side in $sides; do
+    sb="$(k128sb "k18-$side" $'supervisor:\n  score_every_n_calls: 1000\n' 'true')"
+    ( umask 000; k128run "$side" "$sb" "$TMP/k128-high.json" )
+    _pm="$(stat -c %a "$sb/work/current/.supervisor-pending.s" 2>/dev/null || stat -f %Lp "$sb/work/current/.supervisor-pending.s" 2>/dev/null)"
+    if [ "$_pm" = 600 ]; then ok "(k128) $side the pending file is created 0600 under umask 0"; else bad "(k128) $side pending file mode ${_pm:-missing} under umask 0, want 600"; fi
+done
+
 # no CLI: both sides WARN and exit 0. This PATH has every binary EXCEPT yakos.
 NOCLI="$TMP/nocli-bin"; mkdir -p "$NOCLI"
 for _dir in /usr/bin /bin /usr/local/bin /opt/homebrew/bin; do

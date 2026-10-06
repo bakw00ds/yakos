@@ -16,6 +16,12 @@
 #   5. project    a project agent_budgets: value above the user limit is
 #                 ignored: routine launches are still refused;
 #   6. quiet      under the warning level nothing budget-related is printed.
+# Bash alone: 7. a hung CLI cannot stall the hook. Both again: 8. the count and
+# dollar ceilings report once each, 9. both twins write the same records, and
+# 10. unavailable  a budget that cannot be read (a hung, silent or garbled CLI, a
+#                 failing jq, an unreadable spend log) still fails open and the
+#                 launch still happens, but ONE WARN names the cause (K-128, S3);
+#                 a budget that is switched off is not such a failure.
 # Run under both `bash` and `/bin/bash` (3.2 on macOS).
 set -u
 
@@ -70,6 +76,19 @@ fire() {
 runs() { [ -f "$1/runs" ] && wc -l < "$1/runs" | tr -d ' ' || echo 0; }
 logs() { cat "$1/work/current/logs/supervisor-stream.ndjson" 2>/dev/null; }
 findings() { cat "$1/work/current/supervisor-findings.ndjson" 2>/dev/null; }
+# unavail <sandbox>: the "budget unavailable" WARN records (K-128, S3), one per line.
+unavail() { logs "$1" | grep '"budget_reason":"budget_unavailable"'; }
+# unavail_is <sandbox> <cause>: exactly one such WARN, with that cause, in the hook's own records.
+unavail_is() {
+    local u; u="$(unavail "$1")"
+    [ "$(printf '%s\n' "$u" | grep -c .)" = 1 ] && printf '%s' "$u" | grep -q '"severity":"WARN"' \
+        && printf '%s' "$u" | grep -q "\"cause\":\"$2\"" && printf '%s' "$u" | grep -q "(cause: $2); failing open"
+}
+# fakecli <sandbox> <shell body of the budget subcommand>: replace the sandbox's fake CLI; a dispatch is still recorded.
+fakecli() {
+    printf '#!/bin/sh\nif [ "$1" = budget ]; then\n%s\nfi\nprintf "run\\n" >> "%s/runs"\n' "$2" "$1" > "$1/bin/fakeyakos"
+    chmod +x "$1/bin/fakeyakos"
+}
 # settle: wait for the wrapper of the last fired hook to finish (its in-flight marker clears; the
 # wrapper's own log records are written before that), instead of a blind 0.4 s that a slow runner
 # outran: the twin-log comparison below then saw the wrapper's records on one side only (K-128).
@@ -170,6 +189,8 @@ else bad "(7) bash the hung CLI was not killed by the watchdog at ~2 s (start=$(
 polls="$(grep -c '^0\.05$' "$sb/sleeps" 2>/dev/null || true)"
 [ "${polls:-0}" = 0 ] && ok "(7) bash the budget read does not poll (no sleep 0.05 spawned)" || bad "(7) bash the budget read polled: ${polls} x sleep 0.05 (the iteration-counted bound)"
 [ "$(runs "$sb")" = 1 ] && ok "(7) bash fails open: the launch still happens" || bad "(7) bash runs=$(runs "$sb")"
+# (10) K-128 (S3): that fail-open is no longer silent: the hung read is named, once, in the hook log.
+unavail_is "$sb" timeout && ok "(10) bash a hung budget CLI is named: one WARN, cause timeout" || bad "(10) bash hung CLI: not one timeout WARN: $(unavail "$sb")"
 
 # 8. the count ceiling and the dollar ceiling each report once, independently:
 # the first CRITICAL must not suppress the other. Spend is past 2x (dollar ceiling
@@ -196,6 +217,53 @@ for side in bash go; do
     [ "$(findings "$sb" | grep -c CRITICAL)" = 2 ] && ok "(8) $side neither repeats" || bad "(8) $side repeated findings"
 done
 
+# 10. K-128 (S3): a budget that cannot be read fails open (the launch still happens, as documented) but says why:
+# ONE WARN naming the cause, ahead of the launch's own record, in the hook log only. It runs before (9), whose
+# twin comparison covers the "unread", "off" and "stub" sandboxes. The bash twin forks the CLI, so it has four causes: a
+# hung CLI (timeout, checked after (7) above), one that prints nothing and fails (no_output; one that exits 0 has
+# no budget to report and is not a failure, checked in the loop below), one whose output is not a
+# budget (parse: not JSON, JSON without a limit, or a failing jq) and one that says on stderr it could not read
+# the spend log and failed open (read_error: its JSON then reads "ok, nothing spent"). The Go twin evaluates
+# in-process, so only read_error exists there. A budget switched off (limit 0) is not a failure and stays silent,
+# and neither is a CLI that prints nothing and exits 0.
+jqshim="$TMP/jqshim"; mkdir -p "$jqshim"
+printf '#!/bin/sh\nfor a in "$@"; do case "$a" in *limit_usd*) exit 1 ;; esac; done\nexec "%s" "$@"\n' "$(command -v jq)" > "$jqshim/jq"
+chmod +x "$jqshim/jq"
+for spec in 'silent|exit 1|no_output' 'garbage|echo not-json; exit 4|parse' 'notbudget|echo "{}"; exit 0|parse'; do
+    name="${spec%%|*}"; rest="${spec#*|}"; body="${rest%%|*}"; cause="${rest#*|}"
+    sb="$(mksb "unavail-$name-bash" 100 0)"; fakecli "$sb" "$body"
+    fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
+    if unavail_is "$sb" "$cause" && [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ]; then ok "(10) bash a CLI that gives '$name' output: one WARN, cause $cause, the launch still happens"
+    else bad "(10) bash '$name' CLI: wanted cause $cause: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
+done
+# a failing jq (the CLI is healthy, its answer cannot be read)
+sb="$(mksb "unavail-jqfail-bash" 100 0)"
+env PATH="$jqshim:$PATH" YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/bin/fakeyakos" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" \
+    "${BASH:-bash}" "$HOOK" < "$TMP/benign.json" >/dev/null 2>>"$sb/hook.stderr"; rc=$?
+LAST_SB="$sb"; settle
+if unavail_is "$sb" parse && [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ]; then ok "(10) bash a failing jq: one WARN, cause parse, the launch still happens"
+else bad "(10) bash failing jq: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
+for side in bash go; do
+    # an unreadable spend log: a directory where the log belongs (a chmod 000 file would not stop root)
+    sb="$(mksb "unread-$side" 100 0)"; mkdir "$sb/state/dispatch-log.ndjson"
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    if unavail_is "$sb" read_error && [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ]; then ok "(10) $side an unreadable spend log: one WARN, cause read_error, the launch still happens"
+    else bad "(10) $side unreadable spend log: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
+    w="$(logs "$sb" | grep -n 'budget_unavailable' | head -n 1 | cut -d: -f1)"; l="$(logs "$sb" | grep -n 'forked async' | head -n 1 | cut -d: -f1)"
+    if [ -n "$w" ] && [ -n "$l" ] && [ "$w" -lt "$l" ]; then ok "(10) $side the WARN comes ahead of the launch record"; else bad "(10) $side WARN at record ${w:-none}, launch at ${l:-none}"; fi
+    if grep -qi budget "$sb/hook.stderr"; then bad "(10) $side the WARN must stay in the hook log, stderr: $(cat "$sb/hook.stderr")"; else ok "(10) $side nothing on stderr"; fi
+    # a CLI that prints nothing and exits 0 has no budget to report (the stub the other suites use): not a failure
+    sb="$(mksb "stub-$side" 100 0)"; fakecli "$sb" "exit 0"
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ] && ! logs "$sb" | grep -qi budget && ! grep -qi budget "$sb/hook.stderr"; then ok "(10) $side a CLI that prints nothing and exits 0 has no budget to report: no WARN"
+    else bad "(10) $side silent exit-0 stub: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
+    # a budget switched off is not a failed read
+    sb="$(mksb "off-$side" 0 0)"
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ] && ! logs "$sb" | grep -qi budget && ! grep -qi budget "$sb/hook.stderr"; then ok "(10) $side a budget that is off launches and logs nothing budget-related"
+    else bad "(10) $side budget off: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
+done
+
 # 9. K-122: the two twins write the same hook-log records, field for field AND in
 # the same order (jq keeps an object literal's insertion order, so `jq -c` of each
 # record is a byte comparison with only the timestamp removed). That holds for the HOOK's
@@ -208,7 +276,7 @@ cmp_norm() { # cmp_norm <sandbox>
     echo '-- the wrapper records, as a set --'
     logs "$1" | jq -c 'select(has("session_id") | not) | del(.ts, .duration_s)' 2>&1 | sort
 }
-for scen in routine high ceil warn proj quiet flags; do
+for scen in routine high ceil warn proj quiet flags unread off stub; do
     b="$(cmp_norm "$TMP/$scen-bash")"
     g="$(cmp_norm "$TMP/$scen-go")"
     if [ -n "$b" ] && [ "$b" = "$g" ]; then ok "(9) $scen hook-log records are byte-identical across twins"; else

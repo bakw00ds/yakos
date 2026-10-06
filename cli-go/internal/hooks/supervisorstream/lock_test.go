@@ -188,3 +188,40 @@ func TestLockStatsSeamFileIsOwnerOnly(t *testing.T) {
 		t.Errorf("stats file mode = %v, want 0600", fi.Mode().Perm())
 	}
 }
+
+// The Lstat check in front of the stats seam is check-then-open: a link planted
+// between the two would be followed. The open itself therefore refuses a link
+// (O_NOFOLLOW, K-128 S6), checked here with no Lstat in front of it.
+func TestOpenStatsFileRefusesALink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("windows has no O_NOFOLLOW, and creating a symlink needs a privilege there")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(target, []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, ".supervisor-lock-stats")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	f, err := openStatsFile(link)
+	if err == nil {
+		_, _ = f.WriteString("planted\n")
+		_ = f.Close()
+		t.Error("openStatsFile followed a planted symlink")
+	}
+	if b, _ := os.ReadFile(target); string(b) != "keep\n" {
+		t.Errorf("the link's target was written through: %q", b)
+	}
+	// Without a link it opens, creating the file owner-only.
+	fresh := filepath.Join(dir, "fresh")
+	g, err := openStatsFile(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = g.Close()
+	if fi, err := os.Stat(fresh); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("a fresh stats file: %v, mode %v, want 0600", err, fi)
+	}
+}

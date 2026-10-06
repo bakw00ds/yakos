@@ -120,6 +120,58 @@ func TestBudgetOffAndUnderLimitUntouched(t *testing.T) {
 	}
 }
 
+// K-128 (S3): a budget whose spend cannot be read still fails open, as documented,
+// but no longer silently: one WARN names the cause, ahead of the launch's own
+// record, and nothing is printed on stderr. Bash twin:
+// tests/run-supervisor-budget-test.sh (10).
+func TestBudgetUnreadableSpendWarnsAndFailsOpen(t *testing.T) {
+	b, work := budgetHook(t, 100, 0)
+	// A directory where the spend log belongs: the read fails whoever runs the
+	// test (a chmod 000 file would not stop root).
+	if err := os.Mkdir(filepath.Join(os.Getenv("YAKOS_DISPATCH_LOG"), "dispatch-log.ndjson"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	out := bigEditOut(t, b)
+	if out.ExitCode != 0 || len(b.rec.specs) != 1 {
+		t.Fatalf("an unreadable spend log must fail open: exit %d launches %d", out.ExitCode, len(b.rec.specs))
+	}
+	warn, launch, n := -1, -1, 0
+	for i, rec := range logMessages(t, work) {
+		switch {
+		case strings.Contains(rec, `"budget_reason":"budget_unavailable"`):
+			warn, n = i, n+1
+			for _, want := range []string{`"severity":"WARN"`, `"decision":"pass"`, `"cause":"read_error"`, "(cause: read_error); failing open", `"agent":"supervisor"`} {
+				if !strings.Contains(rec, want) {
+					t.Errorf("the WARN lacks %s: %s", want, rec)
+				}
+			}
+		case strings.Contains(rec, "forked async"):
+			launch = i
+		}
+	}
+	if n != 1 {
+		t.Fatalf("want exactly one budget_unavailable WARN, got %d:\n%s", n, allLogs(t, work))
+	}
+	if launch < 0 || warn > launch {
+		t.Errorf("the WARN (record %d) must come ahead of the launch record (%d)", warn, launch)
+	}
+	if strings.Contains(string(out.Stderr), "budget") {
+		t.Errorf("the WARN is a hook-log record only, got stderr %q", out.Stderr)
+	}
+}
+
+// A budget that is switched off (a limit of 0) is not a failed read: no WARN.
+func TestBudgetOffIsNotUnavailable(t *testing.T) {
+	b, work := budgetHook(t, 0, 0)
+	out := bigEditOut(t, b)
+	if out.ExitCode != 0 || len(b.rec.specs) != 1 {
+		t.Fatalf("a budget that is off must not stop a launch: exit %d launches %d", out.ExitCode, len(b.rec.specs))
+	}
+	if logs := allLogs(t, work); strings.Contains(logs, "budget") {
+		t.Errorf("nothing budget-related may be logged when the budget is off:\n%s", logs)
+	}
+}
+
 func TestBudgetProjectCannotLoosen(t *testing.T) {
 	// The user limit is 100 and spend 150. A project asking for 1000 is
 	// ignored, so routine launches are still refused.
