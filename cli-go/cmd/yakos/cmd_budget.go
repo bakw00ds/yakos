@@ -254,6 +254,17 @@ func budgetCheck(stdout, stderr io.Writer, agent string, opts budget.Options, as
 		}
 	}()
 	st, err := budget.Evaluate(agent, opts)
+	return reportCheck(stdout, stderr, agent, st, err, asJSON)
+}
+
+// reportCheck prints the answer of a budget check and returns its exit code: 0, or
+// budget.ExitHardStop for a refused agent, never 2. It takes the evaluated status so
+// that a status json cannot encode can be tested: Evaluate keeps every amount and stop
+// finite (a limit above the bound is ignored, an off unit is 0), so no real status is
+// one, but if one ever were, the line must still be a JSON object. A hook reads stdout
+// only, and an empty line is what it takes for "no budget": the bash supervisor gate
+// fails open on it, with no decision and no finding (sec-330, final round of #330).
+func reportCheck(stdout, stderr io.Writer, agent string, st budget.Status, err error, asJSON bool) int {
 	if err != nil {
 		fmt.Fprintf(stderr, "yakos budget check: %v (failing open)\n", err)
 	}
@@ -261,7 +272,15 @@ func budgetCheck(stdout, stderr io.Writer, agent string, opts budget.Options, as
 		fmt.Fprintf(stderr, "yakos budget: %s\n", w)
 	}
 	if asJSON {
-		b, _ := json.Marshal(st)
+		b, merr := json.Marshal(st)
+		if merr != nil {
+			// A status that cannot be encoded is a failed read, as a panic is: the same
+			// {"agent", "read_failed": true} object, and the same exit 0 (it fails open).
+			fmt.Fprintf(stderr, "yakos budget check: encoding the status: %v (failing open)\n", merr)
+			b, _ = json.Marshal(map[string]any{"agent": agent, "read_failed": true})
+			fmt.Fprintln(stdout, string(b))
+			return 0
+		}
 		fmt.Fprintln(stdout, string(b))
 	} else {
 		line := fmt.Sprintf("reason=%s state=%s agent=%s spent_usd=%.2f limit_usd=%.2f window=%s", st.Reason, st.State, st.Agent, st.SpentUSD, st.LimitUSD, st.Window)
