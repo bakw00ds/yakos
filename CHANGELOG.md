@@ -271,7 +271,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regardless of locale. A control character, DEL or a lone carriage return in an
   agent's text is invalid TOML (and invalid in a YAML double-quoted scalar), so
   both emitters now write it as `\u00XX`, as the chat path already did.
-
 - **supervisor-stream: ten concurrent hooks no longer exhaust the lock budget
   (K-128).** Under load (a 3-core macOS runner, or a team of agents sharing one
   `work/current/`) the bash hook's lock was held across the budget CLI, several
@@ -290,9 +289,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   crossing the records skipped, and the session's wrapper folds trigger records
   too, so a trigger journaled while a run is in flight still gets its follow-up.
   Taking the lock also survives POSIX-mode bash, and the clock is read after the
-  lock is held. Projects pick up the bash hook with `yakos refresh --project
-  <path>`; the Go twin ships in the binary. See `docs/supervisor-mode.md`
-  "Lock protocol".
+  lock is held (to the second, in bash). The budget is still read before the
+  lock, and read again under it when the dispatch log grew in between (a run of
+  this or another session started, spent and ended while the hook waited), so a
+  launch decision never rests on a read older than the lock; in bash that costs
+  one `wc -c` under the lock on the launch-decision path. A counter that cannot
+  be written now logs a WARN and still records a high-risk trigger instead of
+  dropping the tick silently. Projects pick up the bash hook with `yakos
+  refresh --project <path>`; the Go twin ships in the binary. See
+  `docs/supervisor-mode.md` "Lock protocol".
 - **`yakos supervise clear` removes journaled counter increments** with the
   counter, so the next hook cannot fold them into a counter that was just cleared.
 - **The bounded budget read is bounded in time.** `yakos budget check` was

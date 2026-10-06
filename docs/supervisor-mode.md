@@ -285,19 +285,29 @@ both wrappers speak the same protocol, so a mixed fleet still serialises.
   synthetic finding run before the lock is taken or after it is dropped. Before
   K-128 a bash gate hold was 100-300 ms of forks and ten concurrent hooks
   exhausted the wait on a slow runner.
+- **The budget read is checked under the lock.** A read taken before the lock
+  can be stale by the time the lock is held: a run of this session or another
+  may have started, spent the rest of the limit and ended while the hook read and
+  waited, and the run state then shows nothing in flight. The hook therefore
+  stamps the spend ledger (the dispatch log: its size, and in Go its
+  modification time) before it reads the budget, and compares the stamp under
+  the lock on the launch-decision path. If the log grew, the budget is read
+  again under the lock, as it was before K-128, so a launch decision never rests
+  on a read older than the lock. That re-read is the one time the budget CLI
+  runs under it; the check itself costs one `wc -c` in bash and a `stat` in Go.
 - **Waiters back off.** A hook that finds the lock held sleeps 5 ms, then 10,
   20 ... up to 160 ms, each with +-50 % jitter, and polls with a builtin test
   rather than forking a doomed create. It checks the lock's age on its fifth
   miss and every eighth after, not on its first. The wait ends after 3 s at the
   latest (the hard ceiling; in bash `$SECONDS` ticks in whole seconds, so 2 to
   3 s).
-- **A tick is never dropped.** A hook whose wait expires leaves an owner-only
+- **A timed-out tick is recorded, not dropped.** A hook whose wait expires leaves an owner-only
   record in `work/current/` and exits 0; the next lock holder folds it in:
 
   | Record | Content | Folded by | Effect |
   |---|---|---|---|
-  | `.supervisor-counter.add.<pid>.<n>` | `1` | the next counter holder (256 per fold) | counter +1. If that moves the counter past a `score_every_n_calls` multiple, the folder covers the crossing, because the hook that owed it has exited. |
-  | `.supervisor-run.<session>.add.<pid>.<n>` | `high=<0\|1>`, then the event preview | the next gate holder of that session, and that session's wrapper (32 per fold) | `pending` +1, `high` +1 when flagged, preview appended to the pending file |
+  | `.supervisor-counter.add.<pid>.<id>` | `1` | the next counter holder (256 per fold) | counter +1. If that moves the counter past a `score_every_n_calls` multiple, the folder covers the crossing, because the hook that owed it has exited. |
+  | `.supervisor-run.<session>.add.<pid>.<id>` | `high=<0\|1>`, then the event preview | the next gate holder of that session, and that session's wrapper (32 per fold) | `pending` +1, `high` +1 when flagged, preview appended to the pending file |
 
   Records are created exclusively (a planted symlink is never followed), read
   with bounded reads, folded only when complete and well formed, and removed only
@@ -309,7 +319,12 @@ both wrappers speak the same protocol, so a mixed fleet still serialises.
   next crossing, covers it.
 - **Observing it.** `YAKOS_TEST_SEAMS=1 YAKOS_TEST_LOCK_STATS=1` (tests only)
   appends one line per lock take to `work/current/.supervisor-lock-stats`:
-  label, wait, retries and hold in microseconds. Leftover `.add.` files mean the
+  label, wait, retries and hold in microseconds. With `YAKOS_TEST_SEAMS=1` a
+  file `work/current/.supervisor-test-pause` parks a hook just before its gate
+  lock (it creates `.supervisor-test-reached` and waits, 20 s at most, for the
+  pause file to go), so a test can change the world between the budget read and
+  the lock. Both seams use fixed names in `work/current/`, never a path from the
+  environment, and never follow a link. Leftover `.add.` files mean the
   wait expired and nothing has folded them yet; `yakos supervise clear` removes
   the counter's with the counter.
 
@@ -321,7 +336,9 @@ both wrappers speak the same protocol, so a mixed fleet still serialises.
 - Check buffer is being populated — `wc -l work/current/supervisor-buffer.ndjson`
 - Check counter — `cat work/current/.supervisor-counter` (a hook that could
   not take the lock within 3 s leaves a `.supervisor-counter.add.*` record
-  that the next hook folds in; see "Lock protocol")
+  that the next hook folds in, and a WARN `counter not writable` means
+  something other than a file sits at `.supervisor-counter`; see "Lock
+  protocol")
 - Look at `.supervisor-stderr.log` for fork errors
 
 **Supervisor fires but findings are empty/garbage:**
