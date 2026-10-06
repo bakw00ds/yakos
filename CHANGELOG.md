@@ -502,16 +502,21 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   without blocking, and the open file must be a regular file and the same file
   that was checked. In Go, a link retargeted to an outside file, a directory
   swapped for a link, or a file swapped for a FIFO between the check and the
-  read is a skip, not a leak or a hang (rev-324). The bash composer still
-  checks and then reads: the open by descriptor that closes the race has no
-  bash equivalent, so a link retargeted between the check and the read can
-  still be followed there (rev-324 saw the retargeting link win in 3 of 17 runs
-  of a tight loop). The bash composer is the parity oracle that K-143 retires,
-  and the race is not closed in it. If you linked an agent or skill file to
-  another file of the project, move that file into `.claude/agents` or
-  `.claude/skills` (a subdirectory is fine). If you linked `.claude/agents`,
-  `.claude/skills` or `.claude` itself, make it a real directory. Links into
-  `lib/agents` and `lib/skills` keep working.
+  read is a skip, not a leak or a hang (rev-324). The one window left in Go is
+  the project's own agents or skills directory. It is checked by path, so one
+  swapped for a link between that check and the per-file reads is not caught.
+  The per-file rules still apply to every entry read through it, with the roots
+  following the swapped directory, and only `*.md` files are read. An
+  `os.OpenRoot` design that opens the directory once and reads through it is
+  tracked on K-143. The bash composer still checks and then reads: the open by
+  descriptor that closes the race has no bash equivalent, so a link retargeted
+  between the check and the read can still be followed there (rev-324 saw the
+  retargeting link win in 3 of 17 runs of a tight loop). The bash composer is
+  the parity oracle that K-143 retires, and the race is not closed in it. If
+  you linked an agent or skill file to another file of the project, move that
+  file into `.claude/agents` or `.claude/skills` (a subdirectory is fine). If
+  you linked `.claude/agents`, `.claude/skills` or `.claude` itself, make it a
+  real directory. Links into `lib/agents` and `lib/skills` keep working.
 
 - **The skills listing skips a `SKILL.md` it may not read instead of failing
   (K-132 follow-up, sec-324).** `ComposeSkills`, behind `GET /api/skills`, read
