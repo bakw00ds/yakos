@@ -76,6 +76,19 @@ func newLedgerServer(t *testing.T) ledgerServer { return newLedgerServerWith(t, 
 // newLedgerServerWith is newLedgerServer with an Agent SDK engine factory wired
 // into the chat handlers (nil: the SDK engine is not configured).
 func newLedgerServerWith(t *testing.T, sdk *interactive.SDKEngineFactory) ledgerServer {
+	return newLedgerServerScript(t, sdk, "")
+}
+
+// newLedgerServerScript is newLedgerServerWith with a script of its own for the
+// fake claude ("" is the default one, which answers every turn).
+func newLedgerServerScript(t *testing.T, sdk *interactive.SDKEngineFactory, claudeScript string) ledgerServer {
+	return newLedgerServerOpts(t, sdk, claudeScript, nil)
+}
+
+// newLedgerServerOpts is newLedgerServerScript with a wrapper for the handlers'
+// send path: wrap receives the real manager and returns what the handlers send
+// through, so a test can make the engine refuse a frame on demand (nil: none).
+func newLedgerServerOpts(t *testing.T, sdk *interactive.SDKEngineFactory, claudeScript string, wrap func(real consoleui.InteractiveSender) consoleui.InteractiveSender) ledgerServer {
 	t.Helper()
 	if goruntime.GOOS == "windows" {
 		t.Skip("shell stub")
@@ -85,7 +98,10 @@ func newLedgerServerWith(t *testing.T, sdk *interactive.SDKEngineFactory) ledger
 
 	binDir := t.TempDir()
 	launches := filepath.Join(t.TempDir(), "launches")
-	script := strings.Replace(fakeClaudeScript, "#!/bin/sh\n", "#!/bin/sh\nprintf 'x\\n' >> '"+launches+"'\n", 1)
+	if claudeScript == "" {
+		claudeScript = fakeClaudeScript
+	}
+	script := strings.Replace(claudeScript, "#!/bin/sh\n", "#!/bin/sh\nprintf 'x\\n' >> '"+launches+"'\n", 1)
 	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
@@ -131,6 +147,9 @@ func newLedgerServerWith(t *testing.T, sdk *interactive.SDKEngineFactory) ledger
 		InteractiveManager: mgr,
 		SDKEngineFactory:   sdk,
 	})
+	if wrap != nil {
+		consoleui.SetInteractiveSender(srv, wrap(mgr))
+	}
 	ts := httptest.NewServer(consoleui.RequireTokenForNonStatic(tok, consoleui.RequireJSONForMutations(srv.HandlerForTest())))
 	t.Cleanup(ts.Close)
 	return ledgerServer{ts: ts, tok: tok, logDir: logDir, workDir: workDir, mgr: mgr, launches: launches}

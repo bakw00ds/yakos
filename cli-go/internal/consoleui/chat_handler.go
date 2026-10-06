@@ -866,7 +866,11 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 					}
 				}
 
-				// Append coalesced assistant turn, then summary turn.
+				// Append coalesced assistant turn, then summary turn. The buffer
+				// holds one turn's text: an interactive session emits a summary for
+				// every turn, so it is emptied here, or each stored assistant entry
+				// after the first would repeat all the turns before it (K-136; a
+				// one-shot dispatch has a single summary, which hid this).
 				if text := assistantBuf.String(); text != "" {
 					_ = ch.transcripts.Append(TranscriptEntry{
 						SessionID:      dispReq.SessionID,
@@ -876,6 +880,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 						Text:           text,
 					})
 				}
+				assistantBuf.Reset()
 				_ = ch.transcripts.Append(TranscriptEntry{
 					SessionID:      dispReq.SessionID,
 					ConversationID: conversationID,
@@ -1011,7 +1016,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			ch.turns.register(conversationID, ch.interactiveTurnTemplate(dispReq.Agent, modelName, conversationID, capturedOperatorID, dispReq.SessionID))
 			turn := ch.turns.begin(conversationID, dispReq.Task, dispReq.SessionID, capturedOperatorID)
 			frame := runtime.EncodeUserTurn(dispReq.Task)
-			if sendErr := ch.interactiveMgr.Send(conversationID, capturedOperatorID, frame); sendErr != nil {
+			if sendErr := ch.sendFrame(conversationID, capturedOperatorID, frame); sendErr != nil {
 				ch.turns.drop(conversationID, turn)
 				exitStatus = dispatch.StatusFailed
 				exitCode = -1
@@ -1120,7 +1125,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			ch.turns.register(conversationID, ch.interactiveTurnTemplate(dispReq.Agent, capturedModel, conversationID, capturedOperatorID, dispReq.SessionID))
 			turn := ch.turns.begin(conversationID, dispReq.Task, dispReq.SessionID, capturedOperatorID)
 			frame := runtime.EncodeUserTurn(dispReq.Task)
-			if sendErr := ch.interactiveMgr.Send(conversationID, capturedOperatorID, frame); sendErr != nil {
+			if sendErr := ch.sendFrame(conversationID, capturedOperatorID, frame); sendErr != nil {
 				ch.turns.drop(conversationID, turn)
 				exitStatus = dispatch.StatusFailed
 				exitCode = -1

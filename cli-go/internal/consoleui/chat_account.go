@@ -255,6 +255,17 @@ func (ch *chatHandlers) interactiveTurnTemplate(agent, model, conversationID, op
 	}
 }
 
+// sendFrame delivers a user-turn frame to a live interactive session. It goes
+// through the interactiveSend seam, which is the manager in production and a stub in
+// the tests that need the engine to refuse a frame on demand, so the dispatch path's
+// handling of a refused frame is testable the way the send path's is.
+func (ch *chatHandlers) sendFrame(conversationID, operatorID string, frame []byte) error {
+	if ch.interactiveSend != nil {
+		return ch.interactiveSend.Send(conversationID, operatorID, frame)
+	}
+	return ch.interactiveMgr.Send(conversationID, operatorID, frame)
+}
+
 // interactivePreflight is the budget pre-flight for an interactive turn (K-136): a
 // new session, a dispatch on a live one, or a follow-up send. Run and RunStream run
 // the same check for one-shot turns; without it a persistent session was the one

@@ -40,13 +40,18 @@ done
 // the counter of how many times a sidecar process was built. The engine's own
 // API-key gate (K-137) needs a key to be present, so the test sets a fake one.
 func sdkFactory(t *testing.T) (*interactive.SDKEngineFactory, *atomic.Int32) {
+	return sdkFactoryWith(t, fakeSDKSidecarScript)
+}
+
+// sdkFactoryWith is sdkFactory for a sidecar script of the test's own.
+func sdkFactoryWith(t *testing.T, script string) (*interactive.SDKEngineFactory, *atomic.Int32) {
 	t.Helper()
 	t.Setenv("ANTHROPIC_API_KEY", "fake-key-for-the-budget-tests")
 	var spawns atomic.Int32
 	var f interactive.SDKEngineFactory = func(p interactive.SDKEngineParams) (*interactive.SDKEngine, error) {
 		return interactive.NewSDKEngineWithProvider(p, func() *exec.Cmd {
 			spawns.Add(1)
-			return exec.Command("sh", "-c", fakeSDKSidecarScript) //nolint:gosec
+			return exec.Command("sh", "-c", script) //nolint:gosec
 		})
 	}
 	return &f, &spawns
