@@ -143,18 +143,65 @@ func (s Status) tokensTripped() bool {
 	return s.LimitTokens > 0 && s.SpentTokens >= s.StopTokens
 }
 
-// spentDesc is "$3.00 of $5.00", "1,200 of 1,000 tokens", or both joined by
-// "and", for the limits the agent has. A dollar-only agent reads exactly as it
-// did before token limits existed.
+// spentDesc is "1,200 of 1,000 tokens", "$3.00 of $5.00", or both joined by
+// "and" with the tokens first (tokens are the primary unit), for the limits the
+// agent has. A dollar-only agent reads exactly as it did before token limits
+// existed.
 func (s Status) spentDesc() string {
 	var parts []string
-	if s.LimitUSD > 0 || s.LimitTokens <= 0 {
-		parts = append(parts, fmt.Sprintf("$%.2f of $%.2f", s.SpentUSD, s.LimitUSD))
-	}
 	if s.LimitTokens > 0 {
 		parts = append(parts, fmt.Sprintf("%s of %s tokens", commas(s.SpentTokens), commas(s.LimitTokens)))
 	}
+	if s.LimitUSD > 0 || s.LimitTokens <= 0 {
+		parts = append(parts, fmt.Sprintf("$%.2f of $%.2f", s.SpentUSD, s.LimitUSD))
+	}
 	return strings.Join(parts, " and ")
+}
+
+// Usage is what the agent has used against each of its limits, tokens first:
+// "34,000,000 of 33,000,000 tokens", "$3.00 of $5.00", or both joined by "and".
+// It is the text `yakos doctor` and the budget messages share.
+func (s Status) Usage() string { return s.spentDesc() }
+
+// ReachedLimits says which of the agent's limits it has reached, the test for
+// hard_stop: the dollar limit, the token limit, or both. A limit that is not
+// configured is never reached.
+func (s Status) ReachedLimits() (usd, tokens bool) {
+	return s.LimitUSD > 0 && s.SpentUSD+1e-9 >= s.LimitUSD, s.LimitTokens > 0 && s.SpentTokens >= s.LimitTokens
+}
+
+// ReachedDesc names the limit or limits the agent has reached, for a message:
+// "token limit", "dollar limit" or "token and dollar limits"; "" when it has
+// reached none.
+func (s Status) ReachedDesc() string {
+	usd, tok := s.ReachedLimits()
+	switch {
+	case usd && tok:
+		return "token and dollar limits"
+	case tok:
+		return "token limit"
+	case usd:
+		return "dollar limit"
+	}
+	return ""
+}
+
+// RaiseHint is the command that raises the limit that was reached: the dollar
+// form for a dollar stop, `--tokens <n>` for a token stop, and both for both. An
+// agent that has reached neither (a warning, or a stop that is only the 2x
+// dispatch stop of one limit) gets the form for the limit it has.
+func (s Status) RaiseHint() string {
+	usd, tok := s.ReachedLimits()
+	if !usd && !tok {
+		usd, tok = s.LimitUSD > 0, s.LimitTokens > 0
+	}
+	switch {
+	case usd && tok:
+		return fmt.Sprintf("`yakos budget set %s <usd> --tokens <n>`", s.Agent)
+	case tok:
+		return fmt.Sprintf("`yakos budget set %s --tokens <n>`", s.Agent)
+	}
+	return fmt.Sprintf("`yakos budget set %s <usd>`", s.Agent)
 }
 
 // commas formats n with thousands separators.
