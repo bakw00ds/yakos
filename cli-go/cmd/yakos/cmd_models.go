@@ -523,6 +523,14 @@ func modelsProbe(stdout, stderr io.Writer, env modelsEnv, harness string, timeou
 		_, _ = fmt.Fprintf(stderr, "yakos models: %v\n", err)
 		return 1
 	}
+	// Which harnesses the overlay admits discovered ids for: what is said about an id
+	// the catalog lacks depends on it. Warnings about the overlay are not repeated
+	// here (list prints them).
+	ov, _ := modelreg.LoadOverlay(env.stateDir)
+	admitted := map[string]bool{}
+	for _, h := range ov.Admit {
+		admitted[h] = true
+	}
 	out := probeOutput{NotInCatalog: map[string][]string{}}
 	failed := false
 	for _, h := range targets {
@@ -546,7 +554,7 @@ func modelsProbe(stdout, stderr io.Writer, env modelsEnv, harness string, timeou
 			return code
 		}
 	} else {
-		printProbes(stdout, out, catalog)
+		printProbes(stdout, out, catalog, admitted)
 	}
 	if failed {
 		for _, rep := range out.Probes {
@@ -571,7 +579,7 @@ func notInCatalog(cat *modelreg.Registry, harness string, snap modelreg.Snapshot
 	return missing
 }
 
-func printProbes(w io.Writer, out probeOutput, cat *modelreg.Registry) {
+func printProbes(w io.Writer, out probeOutput, cat *modelreg.Registry, admitted map[string]bool) {
 	for _, rep := range out.Probes {
 		switch rep.Status {
 		case modelreg.ProbeUpdated:
@@ -590,7 +598,11 @@ func printProbes(w io.Writer, out probeOutput, cat *modelreg.Registry) {
 			}
 			if missing := out.NotInCatalog[rep.Harness]; len(missing) > 0 {
 				_, _ = fmt.Fprintf(w, "  not in the catalog: %s\n", strings.Join(missing, ", "))
-				_, _ = fmt.Fprintf(w, "    they stay unregistered unless model-registry.yml says `discovery: {admit: [%s]}`\n", rep.Harness)
+				if admitted[rep.Harness] {
+					_, _ = fmt.Fprintf(w, "    model-registry.yml admits them: they are registered as discovered entries (a name that is a tier alias or a Claude tier is skipped)\n")
+				} else {
+					_, _ = fmt.Fprintf(w, "    they stay unregistered unless model-registry.yml says `discovery: {admit: [%s]}`\n", rep.Harness)
+				}
 			}
 			if unlisted := catalogUnlisted(cat, rep.Harness, rep.Snapshot); len(unlisted) > 0 {
 				_, _ = fmt.Fprintf(w, "  catalog entries this account does not list: %s\n", strings.Join(unlisted, ", "))

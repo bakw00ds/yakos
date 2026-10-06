@@ -30,10 +30,12 @@ type Entry struct {
 	Description string `json:"description,omitempty"`
 
 	// Billing is how the model is paid for, and BillingBy where that was decided
-	// (catalog or overlay). The catalog states the mode of the harness's own
-	// login; a dispatch authenticated by an API key is billed per call whatever
-	// the entry says, which dispatch accounting decides (K-136). An operator on a
-	// pay-per-token login says so with `billing: api` in the overlay.
+	// (catalog, overlay, or discovered for an id the overlay admitted: the harness
+	// default, assumed and not stated by the catalog). The catalog states the mode
+	// of the harness's own login; a dispatch authenticated by an API key is billed
+	// per call whatever the entry says, which dispatch accounting decides (K-136).
+	// An operator on a pay-per-token login says so with `billing: api` in the
+	// overlay.
 	Billing   Billing `json:"billing"`
 	BillingBy string  `json:"billing_by"`
 	// Cost is the price in dollars per million tokens. It is set only when Billing
@@ -231,11 +233,15 @@ func (r *Registry) admit(harnesses []string, snaps map[string]Snapshot) {
 			if _, have := r.index[key(h, d.ID)]; have {
 				continue
 			}
+			if r.reserved(d.ID) {
+				r.warn("discovery: %s on %s is not registered: dispatch reads that word as a tier alias or a Claude tier, not as this model", d.ID, h)
+				continue
+			}
 			e := Entry{
 				// The name is display text from another program: the Discoverer
 				// sanitizes it, and this is the last line for any other SnapshotSource.
 				ID: d.ID, Harness: h, Name: sanitizeText(d.Name, maxNameRunes), Provider: DefaultProvider[h],
-				Billing: BillingSubscription, BillingBy: FromCatalog,
+				Billing: BillingSubscription, BillingBy: FromDiscovery,
 				Enabled: true, EnabledBy: FromOverlay, Source: FromDiscovery,
 				Availability: Availability{State: AvailUnknown},
 			}
@@ -254,6 +260,19 @@ func (r *Registry) admit(harnesses []string, snaps map[string]Snapshot) {
 			r.add(e)
 		}
 	}
+}
+
+// reserved reports whether id is a word dispatch reads as something other than the
+// id of a model on a harness that is not claude: a tier alias (expanded through the
+// alias table, so the model would be unreachable by that name) or a Claude tier name
+// (dropped, because it names no model on another harness). A discovered id with such
+// a name is not registered.
+func (r *Registry) reserved(id string) bool {
+	if IsAlias(id) {
+		return true
+	}
+	_, tier := r.index[key("claude", id)]
+	return tier
 }
 
 // agyEffortSuffix returns the reasoning effort an agy model id carries, or "".
