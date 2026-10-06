@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -57,6 +59,90 @@ func TestBudgetCheckExitCodes(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), `"state":"hard_stop"`) || !strings.Contains(errb.String(), "refused") {
 		t.Fatalf("stdout=%q stderr=%q", out.String(), errb.String())
+	}
+}
+
+// K-128 review S12: a hook must learn that the spend could not be read from the
+// structured status, never from the words on stderr. The JSON carries read_failed
+// then, and only then; the exit stays 0 (it fails open).
+func TestBudgetCheckSaysInItsJSONWhenTheSpendCouldNotBeRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a directory where the log belongs is not a read error on windows")
+	}
+	dir := t.TempDir()
+	if err := budget.SetLimit(dir, "backend", 10, budget.Monthly); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(dir+"/dispatch-log.ndjson", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	o := budget.Options{StateDir: dir, Now: func() time.Time { return time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC) }}
+	var out, errb bytes.Buffer
+	if code := budgetCheck(&out, &errb, "backend", o, true); code != 0 {
+		t.Fatalf("an unreadable spend log fails open: exit %d", code)
+	}
+	if !strings.Contains(out.String(), `"read_failed":true`) || !strings.Contains(errb.String(), "failing open") {
+		t.Fatalf("stdout=%q stderr=%q", out.String(), errb.String())
+	}
+	// A read that works says nothing about it.
+	good := t.TempDir()
+	if err := budget.SetLimit(good, "backend", 10, budget.Monthly); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	o.StateDir = good
+	if code := budgetCheck(&out, &errb, "backend", o, true); code != 0 || strings.Contains(out.String(), "read_failed") {
+		t.Fatalf("a good read: exit %d, stdout=%q", code, out.String())
+	}
+}
+
+// ... and the words a project controls never make it look like one: a repeated
+// agent_budgets key spelled like the notice is echoed back on stderr, and the real
+// status, the hard stop, is what the JSON says.
+func TestBudgetCheckProjectTextIsNotAReadFailure(t *testing.T) {
+	dir, proj := t.TempDir(), t.TempDir()
+	if err := budget.SetLimit(dir, "backend", 10, budget.Monthly); err != nil {
+		t.Fatal(err)
+	}
+	if err := appendFile(dir+"/dispatch-log.ndjson", `{"type":"dispatch_finished","ts":"2026-10-15T12:00:00Z","agent":"backend","usage":{"total_cost_usd":10}}`+"\n"); err != nil {
+		t.Fatal(err)
+	}
+	yml := "agent_budgets:\n  \"(failing open)\": 1\n  \"(failing open)\": 2\n"
+	if err := os.WriteFile(filepath.Join(proj, ".yakos.yml"), []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	o := budget.Options{StateDir: dir, Project: proj, Now: func() time.Time { return time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC) }}
+	var out, errb bytes.Buffer
+	if code := budgetCheck(&out, &errb, "backend", o, true); code != budget.ExitHardStop {
+		t.Fatalf("exit %d, want the hard stop (%d)", code, budget.ExitHardStop)
+	}
+	if !strings.Contains(out.String(), `"state":"hard_stop"`) || strings.Contains(out.String(), `"read_failed"`) {
+		t.Errorf("stdout=%q", out.String())
+	}
+	if !strings.Contains(errb.String(), "(failing open)") {
+		t.Errorf("the project's text no longer reaches stderr, so this test proves nothing: %q", errb.String())
+	}
+}
+
+// A panic inside the check still fails open (exit 0, never 2) and now says so in the
+// structured status, so a hook does not read "nothing on stdout, exit 0" as "nothing
+// to report".
+func TestBudgetCheckPanicIsStructured(t *testing.T) {
+	o := budget.Options{StateDir: t.TempDir(), Now: func() time.Time { panic("boom") }}
+	var out, errb bytes.Buffer
+	if code := budgetCheck(&out, &errb, "backend", o, true); code != 0 {
+		t.Fatalf("a panic fails open: exit %d", code)
+	}
+	if got := strings.TrimSpace(out.String()); got != `{"agent":"backend","read_failed":true}` {
+		t.Errorf("stdout=%q", out.String())
+	}
+	if !strings.Contains(errb.String(), "internal error") {
+		t.Errorf("stderr=%q", errb.String())
+	}
+	// Without --json nothing is added to stdout.
+	out.Reset()
+	if code := budgetCheck(&out, &errb, "backend", o, false); code != 0 || out.Len() != 0 {
+		t.Errorf("text mode: exit %d, stdout=%q", code, out.String())
 	}
 }
 

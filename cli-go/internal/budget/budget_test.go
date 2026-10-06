@@ -601,3 +601,55 @@ func TestPreflightLatencyTarget(t *testing.T) {
 		t.Fatalf("median pre-flight %v exceeds the budget", d[n/2])
 	}
 }
+
+// The CLI says explicitly when it could not read the spend (K-128 review S12): the
+// field is set from the error itself, never from text. A directory where the log
+// belongs is a read error on unix; windows opens it without one.
+func TestEvaluateReadFailedWhenTheSpendLogCannotBeRead(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a directory where the log belongs is not a read error on windows")
+	}
+	dir := t.TempDir()
+	setLimit(t, dir, "backend", 10, Monthly)
+	if err := os.Mkdir(filepath.Join(dir, logFileName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Evaluate("backend", Options{StateDir: dir, Now: clock(octMid)})
+	if err == nil || !st.ReadFailed || st.State != StateOK || st.SpentUSD != 0 {
+		t.Fatalf("an unreadable log: err=%v status=%+v", err, st)
+	}
+	if b, _ := json.Marshal(st); !strings.Contains(string(b), `"read_failed":true`) {
+		t.Errorf("read_failed is not in the JSON: %s", b)
+	}
+	// A read that works never carries the field.
+	good := t.TempDir()
+	setLimit(t, good, "backend", 10, Monthly)
+	st = mustEval(t, "backend", Options{StateDir: good, Now: clock(octMid)})
+	if b, _ := json.Marshal(st); st.ReadFailed || strings.Contains(string(b), "read_failed") {
+		t.Errorf("a good read carries read_failed: %s", b)
+	}
+}
+
+// Text a project controls reaches Warnings (and the CLI's stderr): a repeated
+// agent_budgets key is echoed back in the YAML error. It must not look like a read
+// failure to anything: the status is the real one, the hard stop, and read_failed
+// stays false.
+func TestProjectConfigTextCannotFakeAReadFailure(t *testing.T) {
+	dir, proj := t.TempDir(), t.TempDir()
+	setLimit(t, dir, "backend", 10, Monthly)
+	appendLog(t, dir, finished("backend", octMid, 10))
+	yml := "agent_budgets:\n  \"(failing open)\": 1\n  \"(failing open)\": 2\n"
+	if err := os.WriteFile(filepath.Join(proj, ".yakos.yml"), []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := Evaluate("backend", Options{StateDir: dir, Project: proj, Now: clock(octMid)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.ReadFailed || st.State != StateHardStop {
+		t.Errorf("project text must not change the status: %+v", st)
+	}
+	if !strings.Contains(strings.Join(st.Warnings, "\n"), "(failing open)") {
+		t.Errorf("the project's text no longer reaches Warnings, so this test proves nothing: %v", st.Warnings)
+	}
+}
