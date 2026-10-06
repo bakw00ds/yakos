@@ -161,6 +161,30 @@ func TestReadAgentFile_AFileSwappedForALinkIsNotFollowed(t *testing.T) {
 	}
 }
 
+// The file is swapped for a link that leads back to the very file that was
+// inspected, through another name. The identity check would pass, so only the open
+// itself, which refuses a link in the last component, tells: no link is followed
+// at that moment, wherever it leads.
+func TestReadAgentFile_AFileSwappedForALinkBackToItselfIsNotFollowed(t *testing.T) {
+	f := newRaceFixture(t)
+	path := filepath.Join(f.agents, "x.md")
+	writeFileT(t, path, "IN-MARKER\n")
+	alias := filepath.Join(f.agents, "alias.md")
+	setRaceHook(t, func(string) {
+		_ = os.Link(path, alias)
+		_ = os.Remove(path)
+		_ = os.Symlink(alias, path)
+	})
+
+	data, skip, err := readAgentFile(path, f.rules)
+	if err != nil {
+		t.Fatalf("readAgentFile = %v", err)
+	}
+	if len(data) != 0 || skip != ProblemChanged.warning("") {
+		t.Errorf("data = %q, skip = %q, want a skip %q: no link is followed at the open", data, skip, ProblemChanged.warning(""))
+	}
+}
+
 // A file replaced by another regular file is not the file that was inspected.
 func TestReadAgentFile_AFileReplacedByAnotherIsSkipped(t *testing.T) {
 	f := newRaceFixture(t)
@@ -216,5 +240,30 @@ func TestReadAgentFile_ALinkFlippedConcurrentlyNeverLeaksTheOutsideFile(t *testi
 		if strings.Contains(string(data), "TOPSECRET") {
 			t.Fatalf("read %d returned the outside file: %q", i, data)
 		}
+	}
+}
+
+// A file that grows past the cap after the inspection. The inspection saw a few
+// bytes, so only the bounded read and the check after it can tell, and the file
+// is the one inspected, so the identity check does not.
+func TestReadAgentFile_AFileThatGrowsPastTheCapAfterTheInspectionIsSkipped(t *testing.T) {
+	f := newRaceFixture(t)
+	path := filepath.Join(f.agents, "x.md")
+	writeFileT(t, path, "IN-MARKER\n")
+	setRaceHook(t, func(string) {
+		grow, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+		if err != nil {
+			return
+		}
+		defer func() { _ = grow.Close() }()
+		_, _ = grow.Write([]byte(strings.Repeat("x", MaxAgentFileBytes)))
+	})
+
+	data, skip, err := readAgentFile(path, f.rules)
+	if err != nil {
+		t.Fatalf("readAgentFile = %v", err)
+	}
+	if len(data) != 0 || skip != ProblemTooLarge.warning("") {
+		t.Errorf("data = %d bytes, skip = %q, want a skip %q", len(data), skip, ProblemTooLarge.warning(""))
 	}
 }

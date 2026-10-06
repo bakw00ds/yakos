@@ -238,7 +238,9 @@ func readAgentFile(path string, rules fileRules) (data []byte, skip string, err 
 	defer func() { _ = f.Close() }()
 	// What was opened must be what was inspected: a regular file, and that one.
 	// Without this a directory swapped for a link, or a file replaced by another,
-	// is read as though nothing happened.
+	// is read as though nothing happened. Both halves are needed: a file system may
+	// hand a deleted file's inode number to the FIFO that replaces it, and then the
+	// identity matches and only the type tells.
 	opened, err := f.Stat()
 	if err != nil {
 		return nil, "", err
@@ -246,8 +248,16 @@ func readAgentFile(path string, rules fileRules) (data []byte, skip string, err 
 	if !opened.Mode().IsRegular() || !os.SameFile(opened, inspected) {
 		return nil, ProblemChanged.warning(""), nil
 	}
-	// One byte past the cap, to tell "exactly the cap" from "more".
-	data, err = io.ReadAll(io.LimitReader(f, MaxAgentFileBytes+1))
+	return readBounded(f)
+}
+
+// readBounded reads r, which holds at most MaxAgentFileBytes if it is to be used.
+// It stops one byte past that, to tell "exactly the cap" from "more", and an
+// input of more is a skip. The size seen by the inspection does not bound this: a
+// file can grow after it, and some regular files (under /proc) report no size at
+// all. So the read itself is bounded, and no input can exhaust the daemon.
+func readBounded(r io.Reader) (data []byte, skip string, err error) {
+	data, err = io.ReadAll(io.LimitReader(r, MaxAgentFileBytes+1))
 	if err != nil {
 		return nil, "", err
 	}
