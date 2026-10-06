@@ -105,9 +105,10 @@ yakos budget check <agent> [--project <path>] [--json]
   dollar limit off, including a built-in default. `set <agent> --tokens <n>` sets
   a token limit and leaves the dollar limit as it was; give `<usd>`, `--tokens`,
   or both. The agent has one window, shared by both limits, so `set` without
-  `--window` keeps the agent's current window (monthly for an agent that has
-  none): adding a token limit never turns a lifetime dollar limit monthly. Give
-  `--window` to change it. The supervisor and librarian also have a built-in token
+  `--window` keeps the agent's current window (its own entry's, else the policy
+  `default:` window, else monthly): adding a token limit never turns a lifetime
+  dollar limit monthly. Give `--window` to change it. The supervisor and
+  librarian also have a built-in token
   limit, which stays on when the dollar limit is turned off: `set supervisor 0`
   prints a note saying so, and the budget is off only after
   `set supervisor 0 --tokens 0`.
@@ -370,7 +371,7 @@ unreadable spend log into "off".
 ## Where it is enforced
 
 - `dispatch.Run` (the Go dispatch, also used by the daemon and MCP paths).
-- `dispatch.RunStream`, the console's one-shot Chat turns.
+- `dispatch.RunStream`, the console's one-shot Chat turns and the gRPC `Stream`.
 - The console's interactive Chat sessions, on both engines, before a new session
   starts and before each follow-up message is delivered (`dispatch.PreflightBudget`,
   the same check as the two above).

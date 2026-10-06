@@ -56,9 +56,10 @@ Subcommands:
 Flags:
     --json                Machine-readable output.
     --window <w>          monthly (calendar month, local time) or lifetime. Without
-                          it, set keeps the agent's current window (monthly for an
-                          agent that has none): the dollar and token limits share
-                          one window, so changing one never changes the other's.
+                          it, set keeps the agent's current window (its own entry's,
+                          else the policy default's, else monthly): the dollar and
+                          token limits share one window, so changing one never
+                          changes the other's.
     --by-project          status: list spend per project under each agent.
     --tokens <n>          set: token limit (see set).
     --max-model <tier>    set: model-tier ceiling applied at dispatch.

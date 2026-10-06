@@ -518,8 +518,8 @@ subscription harness or a local model; see UPGRADING.md.
   dollar and token limits share one window, and `yakos budget set` without
   `--window` wrote `monthly`, so adding a token limit to an agent with a lifetime
   dollar cap silently made the cap re-open every month. `set` now keeps the
-  agent's current window (monthly for an agent that has none) and prints the
-  window it applied; `--window` still changes it.
+  agent's current window (its own entry's, else the policy default's, else
+  monthly) and prints the window it applied; `--window` still changes it.
 
 - **The interactive chat pane gets an end-of-turn event for the CLI engine
   (K-136).** The persistent CLI engine parsed claude's result line and dropped
