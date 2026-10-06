@@ -460,7 +460,12 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   and the read itself is bounded. Each is skipped with the same once-per-file
   warning that names the file, and so is any failure to read a file in the
   project directory, so one bad file no longer stops the other agents. A
-  framework file that cannot be read is still an error.
+  framework file that cannot be read is still an error. What is checked is what
+  is read: the file is opened by the path the check resolved, without following a
+  link and without blocking, and the open file must be a regular file and the
+  same file that was checked. A link retargeted to an outside file, a directory
+  swapped for a link, or a file swapped for a FIFO between the check and the read
+  is a skip, not a leak or a hang (rev-324).
 
 - **The skills listing skips a `SKILL.md` it may not read instead of failing
   (K-132 follow-up, sec-324).** `ComposeSkills`, behind `GET /api/skills`, read a

@@ -20,6 +20,12 @@ package agentscompose
 //     FIFO blocks open(2) for good, and a device such as /dev/zero never ends.
 //   - A file over MaxAgentFileBytes is skipped, and the read itself is bounded,
 //     so a file whose size is not known up front cannot exhaust the daemon.
+//   - What is inspected is what is read. Inspecting a path and then opening it
+//     again lets the entry change in between: a symlink retargeted to an outside
+//     file, or a regular file swapped for a FIFO. So the file is opened by the
+//     path the inspection resolved, without following a link and without
+//     blocking, and the opened descriptor must be a regular file and the same
+//     file (os.SameFile) as the one inspected. Anything else is a skip.
 //
 // `yakos validate` (Go) calls the same functions, so what it rejects is exactly
 // what Compose leaves out. The bash validator mirrors the rules by hand and the
@@ -60,6 +66,9 @@ const (
 	ProblemNotRegular
 	// ProblemTooLarge: a regular file over MaxAgentFileBytes.
 	ProblemTooLarge
+	// ProblemChanged: the file opened is not the one inspected, or is not a
+	// regular file. Only a read returns it, never InspectAgentFile.
+	ProblemChanged
 )
 
 // AgentOutsideReason and SkillOutsideReason are what is said of a symlink that
@@ -97,6 +106,8 @@ func (p Problem) warning(outside string) string {
 		return "not a regular file"
 	case ProblemTooLarge:
 		return fmt.Sprintf("larger than %d bytes", MaxAgentFileBytes)
+	case ProblemChanged:
+		return "changed while it was being read"
 	}
 	return ""
 }
@@ -133,30 +144,39 @@ func SkillFileRoots(yakosRoot, project string) []string {
 // without opening it, so a FIFO cannot block it. The error is for a file that
 // cannot even be examined, which is not the same as a file that is refused.
 func InspectAgentFile(path string, roots []string) (Problem, error) {
+	_, _, problem, err := inspect(path, roots)
+	return problem, err
+}
+
+// inspect is InspectAgentFile that also says what it looked at: the identity of
+// the file that would be read, and the path to open it by, which for a symlink is
+// the path it resolves to and not the link.
+func inspect(path string, roots []string) (target os.FileInfo, openPath string, problem Problem, err error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
-		return ProblemNone, err
+		return nil, "", ProblemNone, err
 	}
+	openPath = path
 	if fi.Mode()&os.ModeSymlink != 0 {
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
-			return ProblemUnresolved, nil
+			return nil, "", ProblemUnresolved, nil
 		}
-		target, err := os.Stat(resolved)
-		if err != nil || !target.Mode().IsRegular() {
-			return ProblemUnresolved, nil
+		resolvedInfo, err := os.Stat(resolved)
+		if err != nil || !resolvedInfo.Mode().IsRegular() {
+			return nil, "", ProblemUnresolved, nil
 		}
 		if !insideRoots(resolved, roots) {
-			return ProblemOutside, nil
+			return nil, "", ProblemOutside, nil
 		}
-		fi = target
+		fi, openPath = resolvedInfo, resolved
 	} else if !fi.Mode().IsRegular() {
-		return ProblemNotRegular, nil
+		return nil, "", ProblemNotRegular, nil
 	}
 	if fi.Size() > MaxAgentFileBytes {
-		return ProblemTooLarge, nil
+		return nil, "", ProblemTooLarge, nil
 	}
-	return ProblemNone, nil
+	return fi, openPath, ProblemNone, nil
 }
 
 // insideRoots reports whether the file at resolved, a path with no symlinks left
@@ -190,26 +210,41 @@ func insideRoots(resolved string, roots []string) bool {
 	}
 }
 
+// raceHook, when a test sets it, runs between inspecting a file and opening it,
+// where the entry can change under a real reader. It is nil otherwise.
+var raceHook func(path string)
+
 // readAgentFile reads the agent file at path when InspectAgentFile allows it. A
 // non-empty skip is the reason to leave the file out, and err is an I/O failure
 // on a file that was allowed.
 func readAgentFile(path string, rules fileRules) (data []byte, skip string, err error) {
-	problem, err := InspectAgentFile(path, rules.roots)
+	inspected, openPath, problem, err := inspect(path, rules.roots)
 	if err != nil {
 		return nil, "", err
 	}
 	if problem != ProblemNone {
 		return nil, problem.warning(rules.outside), nil
 	}
-	f, err := os.Open(path) //nolint:gosec // inspected just above
+	if raceHook != nil {
+		raceHook(path)
+	}
+	f, err := os.OpenFile(openPath, readFlags, 0) //nolint:gosec // the path the inspection resolved
 	if err != nil {
+		if linkRefused(err) {
+			return nil, ProblemChanged.warning(""), nil // a link swapped in for the file
+		}
 		return nil, "", err
 	}
 	defer func() { _ = f.Close() }()
-	if fi, err := f.Stat(); err != nil {
+	// What was opened must be what was inspected: a regular file, and that one.
+	// Without this a directory swapped for a link, or a file replaced by another,
+	// is read as though nothing happened.
+	opened, err := f.Stat()
+	if err != nil {
 		return nil, "", err
-	} else if !fi.Mode().IsRegular() {
-		return nil, ProblemNotRegular.warning(""), nil // swapped between the two looks
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(opened, inspected) {
+		return nil, ProblemChanged.warning(""), nil
 	}
 	// One byte past the cap, to tell "exactly the cap" from "more".
 	data, err = io.ReadAll(io.LimitReader(f, MaxAgentFileBytes+1))
