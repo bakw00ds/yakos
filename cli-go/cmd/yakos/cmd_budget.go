@@ -44,7 +44,8 @@ Subcommands:
                           when both are 0.
                           --max-model also sets a model-tier ceiling for the agent
                           (a project cannot raise its cost with a dearer model).
-    reset <agent>         Start the agent's current window over. Spend already
+    reset <agent> [--project <path>]
+                          Start the agent's current window over. Spend already
                           logged stops counting; the dispatch-log is untouched.
     check <agent> [--project <path>] [--json]
                           Pre-flight for hooks and scripts. Exit 0 when the agent
@@ -61,7 +62,8 @@ Flags:
     --by-project          status: list spend per project under each agent.
     --tokens <n>          set: token limit (see set).
     --max-model <tier>    set: model-tier ceiling applied at dispatch.
-    --project <path>      Project whose .yakos.yml agent_budgets: may LOWER a limit.
+    --project <path>      Project whose .yakos.yml agent_budgets: may LOWER a limit, and
+                          whose supervisor: agent: name keeps the supervisor's budget.
 
 States: ok, warning (default 80% of the limit), hard_stop (100% of either limit:
 new dispatches are refused, exit 4; a run in flight is not killed). Agents have no
@@ -100,6 +102,7 @@ func runBudget(args []string) {
 			cliflag.Spec{Name: "--tokens", Kind: cliflag.String, Str: &tokensArg, ValueDesc: "a token count"},
 			cliflag.Spec{Name: "--max-model", Kind: cliflag.String, Str: &maxModel, ValueDesc: "a model tier"})
 	case "reset":
+		specs = append(specs, cliflag.Spec{Name: "--project", Kind: cliflag.String, Str: &project, ValueDesc: "a path"})
 	case "check":
 		specs = append(specs, cliflag.Spec{Name: "--json", Kind: cliflag.Bool, Bool: &asJSON},
 			cliflag.Spec{Name: "--project", Kind: cliflag.String, Str: &project, ValueDesc: "a path"})
@@ -211,8 +214,13 @@ func runBudget(args []string) {
 		}
 	case "reset":
 		if len(pos) != 1 {
-			fmt.Fprintln(os.Stderr, "usage: yakos budget reset <agent>")
+			fmt.Fprintln(os.Stderr, "usage: yakos budget reset <agent> [--project <path>]")
 			os.Exit(1)
+		}
+		if opts.Project == "" {
+			// As for status: the project in the working directory, whose
+			// supervisor: agent: name keeps the supervisor's budget.
+			opts.Project, _ = os.Getwd()
 		}
 		st, err := budget.Reset(pos[0], opts)
 		if err != nil {
@@ -276,9 +284,8 @@ func budgetStatus(w io.Writer, opts budget.Options, asJSON, byProject bool) {
 	if perr != nil {
 		fmt.Fprintf(os.Stderr, "yakos budget: %v\n", perr)
 	}
-	projLimits, _ := budget.ProjectLimits(opts.Project)
 	var rows []budget.Status
-	for _, a := range budget.AgentNamesWith(pol, projLimits) {
+	for _, a := range budget.AgentNamesForProject(pol, opts.Project) {
 		st, err := budget.Evaluate(a, opts)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "yakos budget: %s: %v\n", a, err)

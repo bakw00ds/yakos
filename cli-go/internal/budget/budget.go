@@ -237,12 +237,16 @@ func Evaluate(agent string, o Options) (Status, error) {
 	if perr != nil {
 		warns = append(warns, perr.Error())
 	}
-	if pl, w := ProjectLimits(o.Project); w != "" {
-		warns = append(warns, w)
-	} else if v, ok := pl[agent]; ok {
+	cfg := readProjectConfig(o.Project)
+	if cfg.warn != "" {
+		warns = append(warns, cfg.warn)
+	} else if v, ok := cfg.limits[agent]; ok {
 		projectUSD = &v
 	}
-	lim := Resolve(agent, pol, projectUSD)
+	// The agent a project names as its supervisor keeps the supervisor's budget
+	// under that name: a project can rename it, never escape the built-in limits
+	// (K-136, sec-330 finding 8).
+	lim := resolve(agent, cfg.aliasFor(agent), pol, projectUSD)
 	st := Status{
 		Agent: agent, State: StateOff, Window: lim.Window, WindowKey: WindowKey(lim.Window, now),
 		LimitUSD: lim.USD, StopUSD: lim.USD * lim.StopFactor, WarnPct: lim.WarnPct, Source: lim.Source, Warnings: append(warns, lim.Warnings...),
@@ -334,7 +338,7 @@ func Reset(agent string, o Options) (Status, error) {
 	dir := o.dir()
 	now := o.now()
 	pol, _ := LoadPolicy(dir)
-	lim := Resolve(agent, pol, nil)
+	lim := resolve(agent, readProjectConfig(o.Project).aliasFor(agent), pol, nil)
 	key := WindowKey(lim.Window, now)
 	if err := resetLocked(dir, agent, lim.Window, key, now); err != nil {
 		return Status{}, err

@@ -374,9 +374,24 @@ func parseWindow(s string, fallback Window) Window {
 // default, else off. projectUSD is the project's requested limit (nil when
 // the project sets none) and can only lower the result.
 func Resolve(agent string, p Policy, projectUSD *float64) Limit {
+	return resolve(agent, "", p, projectUSD)
+}
+
+// resolve is Resolve for an agent that is also known by another agent's budget.
+// When alias is not empty, the alias's built-in limits and stop factor and its
+// own entry in the policy apply to agent too, before agent's own, which are more
+// specific and win. It is how the agent a project names as its supervisor keeps
+// the supervisor's budget, whatever it is called (see projectConfig).
+func resolve(agent, alias string, p Policy, projectUSD *float64) Limit {
+	names := []string{agent}
+	if alias != "" && alias != agent {
+		names = []string{alias, agent}
+	}
 	l := Limit{Window: Monthly, WarnPct: DefaultWarnPct, Source: "none", StopFactor: 1}
-	if f, ok := builtinStopFactor[agent]; ok {
-		l.StopFactor = f
+	for _, n := range names {
+		if f, ok := builtinStopFactor[n]; ok {
+			l.StopFactor = f
+		}
 	}
 	apply := func(a AgentLimit, src string) {
 		if a.WarnPct > 0 && a.WarnPct <= 100 {
@@ -404,17 +419,21 @@ func Resolve(agent string, p Policy, projectUSD *float64) Limit {
 	}
 	// Global default first so agent-level values override it field by field.
 	apply(p.Default, "policy-default")
-	if v, ok := builtinLimits[agent]; ok {
-		// A built-in is more specific than the global default.
-		l.USD, l.Source = v, "builtin"
+	for _, n := range names {
+		if v, ok := builtinLimits[n]; ok {
+			// A built-in is more specific than the global default.
+			l.USD, l.Source = v, "builtin"
+		}
+		if v, ok := builtinTokenLimits[n]; ok {
+			// So is a built-in token limit (K-136); it keeps the budget tripping for
+			// a subscription operator, whose runs never move the dollar limit.
+			l.Tokens, l.Source = v, "builtin"
+		}
 	}
-	if v, ok := builtinTokenLimits[agent]; ok {
-		// So is a built-in token limit (K-136); it keeps the budget tripping for
-		// a subscription operator, whose runs never move the dollar limit.
-		l.Tokens, l.Source = v, "builtin"
-	}
-	if a, ok := p.Agents[agent]; ok {
-		apply(a, "policy")
+	for _, n := range names {
+		if a, ok := p.Agents[n]; ok {
+			apply(a, "policy")
+		}
 	}
 	if projectUSD != nil {
 		pv := *projectUSD
@@ -432,28 +451,153 @@ func Resolve(agent string, p Policy, projectUSD *float64) Limit {
 	return l
 }
 
-// ProjectLimits reads the `agent_budgets:` map from <project>/.yakos.yml. A
-// missing file or key yields nil; a malformed one yields a warning string.
-func ProjectLimits(project string) (map[string]float64, string) {
+// projectConfig is what the budget reads from <project>/.yakos.yml: the
+// agent_budgets: map, and the names the project gives its supervisor agent.
+type projectConfig struct {
+	limits     map[string]float64 // agent_budgets:
+	warn       string             // set when the file could not be parsed
+	supervisor []string           // supervisor: agent: (see readProjectConfig)
+}
+
+// supervisorAgent is the one agent whose budget is built in: the supervisor.
+const supervisorAgent = "supervisor"
+
+// aliasFor returns the agent whose budget agent keeps: "supervisor" when agent is
+// a name the project gives its supervisor (and is not "supervisor" itself), else
+// "". It can only add the supervisor's built-in limits and stop factor to an agent
+// that has none, so it can only tighten.
+func (c projectConfig) aliasFor(agent string) string {
+	if agent == supervisorAgent {
+		return ""
+	}
+	for _, n := range c.supervisor {
+		if n == agent {
+			return supervisorAgent
+		}
+	}
+	return ""
+}
+
+func (c *projectConfig) addSupervisor(name string) {
+	if ValidateAgent(name) != nil {
+		return
+	}
+	for _, n := range c.supervisor {
+		if n == name {
+			return
+		}
+	}
+	c.supervisor = append(c.supervisor, name)
+}
+
+// readProjectConfig reads <project>/.yakos.yml. A missing file or key yields the
+// zero config; a malformed file sets warn and no limits.
+//
+// The supervisor's agent name is a project setting: the supervisor hook launches
+// `yakos dispatch <name>` and its budget is keyed on that name, so a project that
+// renames its supervisor would otherwise leave it without the supervisor's
+// built-in budget. Both hook twins read the name, and they read it differently:
+// the Go twin as YAML (supervisor.agent), the bash twin with a line scan (the
+// first agent: line within 20 lines after a supervisor: line). Every name either
+// of them can arrive at is returned, so a file the two disagree about cannot
+// pick a name the budget does not know.
+func readProjectConfig(project string) projectConfig {
+	var c projectConfig
 	if project == "" {
-		return nil, ""
+		return c
 	}
 	data, err := os.ReadFile(filepath.Join(project, ".yakos.yml")) //nolint:gosec
 	if err != nil {
-		return nil, ""
+		return c
 	}
 	var doc struct {
 		AgentBudgets map[string]float64 `yaml:"agent_budgets"`
+		// Supervisor is decoded loosely: a project that writes `supervisor: true`
+		// must not lose its agent_budgets to a decode error.
+		Supervisor any `yaml:"supervisor"`
 	}
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil, fmt.Sprintf(".yakos.yml agent_budgets ignored: %v", err)
+		c.warn = fmt.Sprintf(".yakos.yml agent_budgets ignored: %v", err)
+	} else {
+		c.limits = doc.AgentBudgets
+		if m, ok := doc.Supervisor.(map[string]any); ok {
+			if name, ok := m["agent"].(string); ok {
+				c.addSupervisor(strings.TrimSpace(name))
+			}
+		}
 	}
-	return doc.AgentBudgets, ""
+	c.addSupervisor(scanSupervisorAgent(data))
+	return c
+}
+
+// scanSupervisorAgent reads the supervisor's agent name the way the bash hook does:
+//
+//	grep -A 20 '^[[:space:]]*supervisor:' | grep -E '^[[:space:]]*agent:[[:space:]]*' |
+//	  head -1 | awk -F: '{print $2}' | tr -d '[:space:]'
+//
+// that is, the first agent: line within 20 lines after a supervisor: line, its
+// text between the first and the second colon, with every space removed. It is ""
+// when there is none, or the first one is empty (and the hook keeps its default).
+func scanSupervisorAgent(data []byte) string {
+	lines := strings.Split(string(data), "\n")
+	inContext := make([]bool, len(lines))
+	for i, l := range lines {
+		if strings.HasPrefix(strings.TrimLeft(l, " \t\r\f\v"), "supervisor:") {
+			for j := i; j <= i+20 && j < len(lines); j++ {
+				inContext[j] = true
+			}
+		}
+	}
+	for i, l := range lines {
+		if !inContext[i] || !strings.HasPrefix(strings.TrimLeft(l, " \t\r\f\v"), "agent:") {
+			continue
+		}
+		fields := strings.Split(l, ":")
+		if len(fields) < 2 {
+			return ""
+		}
+		return strings.Join(strings.Fields(fields[1]), "")
+	}
+	return ""
+}
+
+// ProjectLimits reads the `agent_budgets:` map from <project>/.yakos.yml. A
+// missing file or key yields nil; a malformed one yields a warning string.
+func ProjectLimits(project string) (map[string]float64, string) {
+	c := readProjectConfig(project)
+	return c.limits, c.warn
+}
+
+// ProjectSupervisorAgents returns the agent names <project>/.yakos.yml gives the
+// supervisor (supervisor: agent:), valid names only, in the order found. The
+// supervisor hook runs under such a name, so its budget is the supervisor's.
+func ProjectSupervisorAgents(project string) []string {
+	return readProjectConfig(project).supervisor
 }
 
 // AgentNames returns every agent that has a limit configured (policy or
 // built-in), sorted.
 func AgentNames(p Policy) []string { return AgentNamesWith(p, nil) }
+
+// AgentNamesForProject is AgentNamesWith over the project's own agent_budgets:,
+// plus the agent the project names as its supervisor, which has the supervisor's
+// budget under whatever name it gives it.
+func AgentNamesForProject(p Policy, project string) []string {
+	c := readProjectConfig(project)
+	names := AgentNamesWith(p, c.limits)
+	have := make(map[string]bool, len(names))
+	for _, n := range names {
+		have[n] = true
+	}
+	for _, n := range c.supervisor {
+		if !have[n] {
+			names = append(names, n)
+			have[n] = true
+		}
+	}
+	sort.Strings(names)
+	return names
+}
 
 // AgentNamesWith is AgentNames plus the agents a project limits through
 // agent_budgets: (K-119 review: an agent limited only by its project must
