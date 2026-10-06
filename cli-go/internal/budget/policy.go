@@ -62,6 +62,39 @@ var builtinLimits = map[string]float64{
 	"librarian":  40,
 }
 
+// Built-in token limits (tokens per month, K-136), the same two agents. They
+// exist so the two built-in budgets still trip for an operator on a subscription,
+// whose runs cost no dollars (cost.CountsAsSpend) and so never move limit_usd. A
+// token limit counts every run of the agent whatever its billing.
+//
+// Each is the dollar ceiling above converted at the Sonnet reference rate of $3
+// per million tokens (efficiency audit 2026-10-01: sonnet $3 input and $15 output
+// per million tokens, cache reads at 0.1x, cache writes at about 1.25x), rounded
+// down to a whole million:
+//
+//	supervisor: $100 / ($3 per 1M tokens) = 33.3M tokens  ->  33,000,000
+//	librarian:  $40  / ($3 per 1M tokens) = 13.3M tokens  ->  13,000,000
+//
+// Observed on the operator's dispatch-log (all four token kinds summed, cost as
+// the CLI reported it): the supervisor's blended cost was $2.76 to $3.83 per
+// million tokens in May, June, Sep and Oct 2026, so the conversion holds for it
+// (Sep, a healthy month, used 15.1M tokens for $58; May and June used 263M and
+// 292M). The librarian ran on a dearer model, $7.77 and $10.34 per million tokens
+// in May and June, so its token ceiling is looser than its dollar ceiling (May,
+// healthy, used 2.9M tokens; June, the runaway, 15.4M). TestBuiltinTokenLimits_
+// FollowTheDollarCeilings keeps the numbers tied to this arithmetic.
+//
+// An operator overrides either in budget-policy.yml (limit_tokens: 0 turns it
+// off; the dollar limit is separate).
+var builtinTokenLimits = map[string]int64{
+	"supervisor": 33_000_000,
+	"librarian":  13_000_000,
+}
+
+// builtinTokenRateUSDPerMTok is the reference rate the built-in token limits are
+// derived from: the Sonnet fresh-input price, dollars per million tokens.
+const builtinTokenRateUSDPerMTok = 3.0
+
 // builtinStopFactor lets an agent run past its limit up to factor x limit
 // before `yakos dispatch` refuses it. Only the supervisor has one: the
 // supervisor-stream hook refuses ROUTINE launches at 1x (state hard_stop) but
@@ -73,6 +106,13 @@ var builtinStopFactor = map[string]float64{"supervisor": 2}
 // BuiltinLimit returns the built-in default monthly limit for agent, if any.
 func BuiltinLimit(agent string) (float64, bool) {
 	v, ok := builtinLimits[agent]
+	return v, ok
+}
+
+// BuiltinTokenLimit returns the built-in default monthly token limit for agent,
+// if any.
+func BuiltinTokenLimit(agent string) (int64, bool) {
+	v, ok := builtinTokenLimits[agent]
 	return v, ok
 }
 
@@ -349,6 +389,11 @@ func Resolve(agent string, p Policy, projectUSD *float64) Limit {
 	if v, ok := builtinLimits[agent]; ok {
 		// A built-in is more specific than the global default.
 		l.USD, l.Source = v, "builtin"
+	}
+	if v, ok := builtinTokenLimits[agent]; ok {
+		// So is a built-in token limit (K-136); it keeps the budget tripping for
+		// a subscription operator, whose runs never move the dollar limit.
+		l.Tokens, l.Source = v, "builtin"
 	}
 	if a, ok := p.Agents[agent]; ok {
 		apply(a, "policy")

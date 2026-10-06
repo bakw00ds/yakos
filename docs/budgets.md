@@ -62,9 +62,10 @@ for claude; `OPENAI_API_KEY` or `CODEX_API_KEY` for codex; `GEMINI_API_KEY`,
   Go dispatcher becomes the default.
 - Codex and agy report tokens and no dollar figure, so under a subscription they
   show tokens and no dollars anywhere. Only a token limit can stop them.
-- The built-in supervisor ($100) and librarian ($40) limits are dollar limits. For
-  a subscription operator they never trip, because those runs cost no dollars.
-  Add `limit_tokens` for them if you want a backstop; the built-ins do not have one.
+- The built-in supervisor and librarian budgets carry a token limit as well as a
+  dollar limit, so they still stop for a subscription operator, whose runs cost no
+  dollars and never move `limit_usd`. "Default limits" gives the numbers and the
+  arithmetic.
 
 Limits of the billing detection: only the environment the dispatcher itself
 passes to the harness is read. A harness signed in through a pay-per-token console
@@ -91,10 +92,9 @@ yakos budget check <agent> [--project <path>] [--json]
 - `status` shows one row per agent that has a budget, whether it comes from the
   policy file, a built-in default, or only from the current project's
   `agent_budgets:` (the project is `--project`, else the working directory):
-  state, spend, limit, percentage, window and where the limit came from. When an
-  agent has used tokens or has a token limit, the table gains `TOKENS` and
-  `TOKEN LIMIT` columns, ahead of the dollar columns; without any it is the dollar
-  table it always was.
+  state, tokens used and their limit, dollars spent and their limit, percentage,
+  window and where the limit came from. The table leads with `TOKENS` and
+  `TOKEN LIMIT`, ahead of the dollar columns.
   `--by-project` lists each agent's dollar spend per project (the `project` recorded on
   each dispatch-log entry). `--json` carries the same, top 10 projects per agent,
   plus `limit_tokens`, `stop_tokens`, `spent_tokens` and `tokens_pct`.
@@ -102,7 +102,10 @@ yakos budget check <agent> [--project <path>] [--json]
 - `set` writes `~/.yakos-state/budget-policy.yml`. `set <agent> 0` turns the
   dollar limit off, including a built-in default. `set <agent> --tokens <n>` sets
   a token limit and leaves the dollar limit as it was; give `<usd>`, `--tokens`,
-  or both. The agent has one window, shared by both limits.
+  or both. The agent has one window, shared by both limits. The supervisor and
+  librarian also have a built-in token limit, which stays on when the dollar limit
+  is turned off: `set supervisor 0` prints a note saying so, and the budget is off
+  only after `set supervisor 0 --tokens 0`.
 - `reset` starts the agent's current window over. Spend already logged stops
   counting. The dispatch-log is not edited. A reset belongs to the window it was
   made in and does not carry into the next month.
@@ -114,8 +117,9 @@ yakos budget check <agent> [--project <path>] [--json]
   `reason=<code> state=<state> agent=<agent> spent_usd=... limit_usd=... window=...`
   with `reason` one of `budget_off`, `budget_ok`, `budget_warning`,
   `budget_exhausted` (`--json` has the same `reason` field). For an agent that
-  has a token limit the line ends with ` spent_tokens=<n> limit_tokens=<n>`; for
-  every other agent it is unchanged.
+  has a token limit, the supervisor and librarian always, the line ends with
+  ` spent_tokens=<n> limit_tokens=<n>`; for every other agent it is unchanged. The
+  state is `hard_stop`, and the exit code 4, when either limit is reached.
 - `yakos doctor` lists agents in `warning` or `hard_stop`, and prints nothing
   about budgets when every agent is healthy. The supervisor is special: at
   `hard_stop` doctor reports an **error**, "LLM supervision disabled: supervisor
@@ -127,19 +131,45 @@ yakos budget check <agent> [--project <path>] [--json]
 Agents have no budget unless one is configured, with two exceptions chosen from
 the dispatch-log (efficiency audit 2026-10-01):
 
-| Agent | Default | Observed | Basis |
+| Agent | Default (per month) | Observed | Basis |
 |---|---|---|---|
-| `supervisor` | $100 per month (dispatch stops at 2x) | $58 in Sep 2026 (107 calls on haiku); $800-900 per month before the switch | About 1.7x the current rate. It would have stopped the May and June burn in the first week. |
-| `librarian` | $40 per month | $22 in May, $159 in Jun (36% of runs failed); none since | About 1.8x the healthy May figure. |
+| `supervisor` | $100 and 33,000,000 tokens (dispatch stops at 2x each) | $58 and 15.1M tokens in Sep 2026 (107 calls on haiku); $800-900 and 263M to 292M tokens per month in May and June, before the switch | About 1.7x the current dollar rate and 2.2x the current token volume. It would have stopped the May and June burn in the first week. |
+| `librarian` | $40 and 13,000,000 tokens | $22 and 2.9M tokens in May, $159 and 15.4M in Jun (36% of runs failed); none since | The dollar limit is about 1.8x the healthy May figure. The token limit is about 4.5x the healthy May volume and still trips inside June's total. |
 
 The supervisor limit is a placeholder sized for today's rate. Once K-116 and
 K-117 land and routine supervisor cost drops, lower it to about $25 (a few times
 the new steady state, still far below the old $800 burn). That is the operator's
 call, not automatic.
 
-Override either in the policy file, or turn it off with `yakos budget set
-supervisor 0`. A malformed or untrusted policy file never disables these two
-defaults.
+### How the built-in token limits were sized
+
+Dollars mean nothing for a subscription run, so a dollar ceiling alone would leave
+the supervisor and librarian with no hard stop for an operator on a subscription.
+Each token limit is the dollar ceiling converted at the Sonnet reference rate of $3
+per million tokens (the Sonnet price in the efficiency audit of 2026-10-01: $3 input
+and $15 output per million, cache reads at 0.1x, cache writes at about 1.25x),
+rounded down to a whole million:
+
+```
+supervisor   $100 / ($3 per 1M tokens) = 33.3M  ->  33,000,000
+librarian     $40 / ($3 per 1M tokens) = 13.3M  ->  13,000,000
+```
+
+A token limit counts all four token kinds of every run of the agent, whatever the
+run was billed, so it trips for subscription, API and local runs alike. Checked
+against the dispatch-log (the four kinds summed, cost as the CLI reported it): the
+supervisor's blended cost was $2.76 to $3.83 per million tokens in May, June,
+September and early October 2026, so the conversion holds for it and its token
+limit lands where its dollar limit would. The librarian ran on a dearer model,
+$7.77 and $10.34 per million tokens in May and June, so its token limit is looser
+than its dollar limit: it does not trip a healthy month and does trip June.
+`TestBuiltinTokenLimits_FollowTheDollarCeilings` ties the numbers in the code to
+this arithmetic.
+
+Override either limit in the policy file. `yakos budget set supervisor 0` turns the
+dollar limit off, `--tokens 0` turns the token limit off, and the budget is off only
+when both are. `yakos budget set supervisor --tokens 60m` raises the token limit. A
+malformed or untrusted policy file never disables these defaults.
 
 ## Policy file
 
@@ -294,6 +324,15 @@ gate, next to the launch cap:
 | warning (default 80%) | runs, with a WARN in the hook log and one stderr line | same |
 | at the limit (`hard_stop`) | **refused**: WARN in the hook log, one stderr line, hook exits 0, no "forked async" | runs, with a WARN noting the exemption |
 | at 2x the limit | refused | **refused**, and one synthetic CRITICAL finding is written so `block_on_critical` operators are alerted |
+
+"The limit" is either limit. The supervisor's `hard_stop` state is reached at 100%
+of its dollar limit or of its token limit (33,000,000 tokens a month by default),
+and the hook reads that state, so a supervisor on a subscription, which spends no
+dollars, stops routine launches at its token limit with the gate unchanged. The 2x
+ceiling for high-risk launches is still computed in the hook from dollars alone;
+`yakos dispatch` itself refuses the supervisor at 2x its token limit, so a
+high-risk launch past 2x the tokens starts the wrapper and the dispatch it forks
+exits 4. Teaching the hook the token ceiling is a follow-up.
 
 The exemption is decided inside the hook. There is no env var or flag that
 carries it. To make that work without one, `yakos dispatch` itself refuses the

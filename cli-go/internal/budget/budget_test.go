@@ -98,10 +98,16 @@ func TestBuiltinDefaults(t *testing.T) {
 	if !strings.Contains(err.Error(), "exceeded 2x the $100.00 monthly supervisor budget (high-risk exemption ceiling") || strings.Contains(err.Error(), "of its $100.00") {
 		t.Fatalf("2x refusal message: %v", err)
 	}
-	// The operator can turn the default off explicitly.
+	// The operator can turn the built-in dollar limit off explicitly. The agent's
+	// built-in token limit (K-136) is a separate limit and stays on until it is
+	// turned off too, so the built-in budget is off only when both are.
 	setLimit(t, dir, "supervisor", 0, Monthly)
+	if st := mustEval(t, "supervisor", o); st.LimitUSD != 0 || st.LimitTokens != 33_000_000 || st.State == StateOff {
+		t.Fatalf("limit 0 turns the built-in dollar limit off and leaves the token limit: %+v", st)
+	}
+	setTokenLimit(t, dir, "supervisor", 0, Monthly)
 	if st := mustEval(t, "supervisor", o); st.State != StateOff {
-		t.Fatalf("limit 0 must turn the built-in off: %+v", st)
+		t.Fatalf("both limits 0 must turn the built-in budget off: %+v", st)
 	}
 }
 

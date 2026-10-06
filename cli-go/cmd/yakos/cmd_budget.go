@@ -29,17 +29,19 @@ func printBudgetHelp(w io.Writer) {
 Subcommands:
     status [--json] [--by-project] [--project <path>]
                           One row per agent with a budget (user-level, built-in, or
-                          a project agent_budgets: entry): state, spend, limit.
-                          Token columns appear when an agent has used tokens or has
-                          a token limit. --by-project adds each agent's spend per project.
+                          a project agent_budgets: entry): state, tokens used and
+                          their limit, then dollars spent and their limit.
+                          --by-project adds each agent's spend per project.
     set <agent> [<usd>] [--tokens <n>] [--window monthly|lifetime] [--max-model haiku|sonnet|opus|fable]
                           Set an agent's limits in ~/.yakos-state/budget-policy.yml.
                           <usd> is a dollar limit; it counts only runs billed per API
                           call, never a subscription or a local model.
                           --tokens is a token limit: the input, output and cache tokens of
                           every run, whatever it is billed (5000000, 500k, 1.5m, 2b).
-                          Give <usd>, --tokens, or both. 0 turns a limit off
-                          (including a built-in default).
+                          Give <usd>, --tokens, or both. 0 turns a limit off, including
+                          a built-in default. The supervisor and librarian have a built-in
+                          dollar limit AND a built-in token limit; their budget is off only
+                          when both are 0.
                           --max-model also sets a model-tier ceiling for the agent
                           (a project cannot raise its cost with a dearer model).
     reset <agent>         Start the agent's current window over. Spend already
@@ -60,7 +62,8 @@ Flags:
 
 States: ok, warning (default 80% of the limit), hard_stop (100% of either limit:
 new dispatches are refused, exit 4; a run in flight is not killed). Agents have no
-budget unless one is set, except supervisor ($100/month) and librarian ($40/month).
+budget unless one is set, except supervisor ($100 and 33M tokens per month) and
+librarian ($40 and 13M tokens per month).
 See docs/budgets.md.
 `)
 }
@@ -175,7 +178,7 @@ func runBudget(args []string) {
 		}
 		if len(pos) == 2 {
 			if usd == 0 {
-				fmt.Printf("budget for %s turned off\n", pos[0])
+				fmt.Printf("dollar budget for %s turned off\n", pos[0])
 			} else {
 				fmt.Printf("budget for %s set to $%.2f (%s)\n", pos[0], usd, window)
 			}
@@ -185,6 +188,15 @@ func runBudget(args []string) {
 				fmt.Printf("token budget for %s turned off\n", pos[0])
 			} else {
 				fmt.Printf("token budget for %s set to %d tokens (%s)\n", pos[0], tokens, window)
+			}
+		}
+		// A dollar limit turned off while a token limit remains (the supervisor and
+		// librarian carry a built-in one) leaves the agent budgeted: say so, so
+		// "set <agent> 0" is not mistaken for "no budget".
+		if len(pos) == 2 && usd == 0 && tokensArg == "" {
+			pol, _ := budget.LoadPolicy(opts.StateDirOrDefault())
+			if lim := budget.Resolve(pos[0], pol, nil); lim.Tokens > 0 {
+				fmt.Printf("note: %s still has a token budget of %d tokens (%s); turn it off too with: yakos budget set %s --tokens 0\n", pos[0], lim.Tokens, lim.Window, pos[0])
 			}
 		}
 	case "reset":
@@ -262,43 +274,26 @@ func budgetStatus(w io.Writer, opts budget.Options, asJSON, byProject bool) {
 		fmt.Fprintln(w, string(b))
 		return
 	}
-	// Tokens are the primary unit (K-136): when any agent has used tokens or has a
-	// token limit, the table gains TOKENS and TOKEN LIMIT columns. Without any, the
-	// table is exactly the dollar table it always was.
-	showTokens := false
-	for _, st := range rows {
-		showTokens = showTokens || st.SpentTokens > 0 || st.LimitTokens > 0
-	}
+	// Tokens are the primary unit (K-136), so they lead: TOKENS and TOKEN LIMIT come
+	// before the dollar columns. (The supervisor and librarian always have a token
+	// limit, so the columns are always meaningful.)
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
-	if showTokens {
-		fmt.Fprintln(tw, "AGENT\tSTATE\tTOKENS\tTOKEN LIMIT\tSPENT\tLIMIT\tUSED\tWINDOW\tSOURCE")
-	} else {
-		fmt.Fprintln(tw, "AGENT\tSTATE\tSPENT\tLIMIT\tUSED\tWINDOW\tSOURCE")
-	}
+	fmt.Fprintln(tw, "AGENT\tSTATE\tTOKENS\tTOKEN LIMIT\tSPENT\tLIMIT\tUSED\tWINDOW\tSOURCE")
 	for _, st := range rows {
-		limit, used := "off", "-"
+		limit, tokLimit, used := "off", "off", "-"
 		if st.LimitUSD > 0 || st.LimitTokens > 0 {
 			used = fmt.Sprintf("%.0f%%", st.Pct)
 		}
 		if st.LimitUSD > 0 {
 			limit = fmt.Sprintf("$%.2f", st.LimitUSD)
 		}
-		if showTokens {
-			tokLimit := "off"
-			if st.LimitTokens > 0 {
-				tokLimit = fmt.Sprintf("%d", st.LimitTokens)
-			}
-			fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t$%.2f\t%s\t%s\t%s\t%s\n", st.Agent, st.State, st.SpentTokens, tokLimit, st.SpentUSD, limit, used, st.Window, st.Source)
-		} else {
-			fmt.Fprintf(tw, "%s\t%s\t$%.2f\t%s\t%s\t%s\t%s\n", st.Agent, st.State, st.SpentUSD, limit, used, st.Window, st.Source)
+		if st.LimitTokens > 0 {
+			tokLimit = fmt.Sprintf("%d", st.LimitTokens)
 		}
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t$%.2f\t%s\t%s\t%s\t%s\n", st.Agent, st.State, st.SpentTokens, tokLimit, st.SpentUSD, limit, used, st.Window, st.Source)
 		if byProject {
 			for _, p := range st.Projects {
-				if showTokens {
-					fmt.Fprintf(tw, "  %s\t\t\t\t$%.2f\t\t\t\t\n", p.Project, p.SpentUSD)
-				} else {
-					fmt.Fprintf(tw, "  %s\t\t$%.2f\t\t\t\t\n", p.Project, p.SpentUSD)
-				}
+				fmt.Fprintf(tw, "  %s\t\t\t\t$%.2f\t\t\t\t\n", p.Project, p.SpentUSD)
 			}
 		}
 	}

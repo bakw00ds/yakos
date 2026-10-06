@@ -103,22 +103,33 @@ Tokens are now the primary unit. The Go dispatcher (the console, MCP, Flows,
 JSON-RPC, REST, gRPC and `yakos dispatch` with `YAKOS_IMPL=go`) records how each
 run was billed. A run on a harness with no API key in its environment is a
 `subscription` run: its tokens are counted, its dollar figure is kept only as
-`api_equivalent_usd`, and it no longer counts toward `limit_usd`. That includes
-the built-in $100 supervisor and $40 librarian limits.
+`api_equivalent_usd`, and it no longer counts toward `limit_usd`. To keep the
+built-in budgets tripping for subscription operators, the supervisor and
+librarian now also have a built-in monthly token limit, which counts every run
+whatever its billing (the dollar ceilings converted at $3 per million tokens, the
+Sonnet reference rate: $100 becomes 33,000,000 tokens and $40 becomes
+13,000,000; the arithmetic is in [docs/budgets.md](docs/budgets.md)).
 
 What changes for you:
 
-- **Subscription operators:** `limit_usd` never trips for your runs. If you want
-  a backstop, set a token limit:
+- **Subscription operators:** `limit_usd` never trips for your runs, but the
+  built-in token limits do: the supervisor stops routine launches at 33,000,000
+  tokens a month and the librarian at 13,000,000. `yakos budget status` now shows
+  tokens used and the token limit first. If your normal month is larger, raise the
+  limit, and set limits for other agents the same way:
 
   ```sh
-  yakos budget set supervisor --tokens 20m
+  yakos budget set supervisor --tokens 60m
   yakos budget set general-codex --tokens 5m
   ```
 
-  A token limit counts input, output and cache tokens of every run, whatever its
-  billing. Codex and agy report tokens and no dollars, so a token limit is the
-  only budget that can stop them.
+  Codex and agy report tokens and no dollars, so a token limit is the only budget
+  that can stop them.
+- **Turning a built-in budget off:** `yakos budget set supervisor 0` now turns off
+  the dollar limit only, and prints a note that the token limit remains. Use
+  `yakos budget set supervisor 0 --tokens 0` to turn the whole budget off.
+  `yakos budget check` exits 4 when either limit is reached, so the supervisor
+  hook's gate stops on the token limit with no change.
 - **API-key operators:** nothing moves. A run with `ANTHROPIC_API_KEY`,
   `OPENAI_API_KEY`, `GEMINI_API_KEY` (or their siblings) in its environment is
   `api`, and its dollars count as before. Rows written before this release, and

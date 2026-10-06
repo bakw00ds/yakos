@@ -841,3 +841,34 @@ func TestEveryTransportStampsASurface(t *testing.T) {
 		t.Errorf("%s builds a dispatch Params/Request without a Surface: its events would carry no surface", m)
 	}
 }
+
+// ---- the built-in token limit refuses a subscription agent at dispatch -------------
+
+// The built-in librarian budget has a token limit as well as a dollar limit, so a
+// librarian whose runs all cost no dollars (a subscription) is still refused when the
+// month's tokens reach it. Both Run and RunStream refuse, before anything is written.
+func TestRunAndRunStream_BuiltinTokenLimitRefusesASubscriptionLibrarian(t *testing.T) {
+	state := isolatedLogDir(t)
+	yakosRoot := buildFakeRoster(t, "librarian", "p")
+	writeFinishedLine(t, state, `{"type":"dispatch_finished","ts":"`+time.Now().UTC().Format(time.RFC3339)+
+		`","agent":"librarian","billing":"subscription","usage":{"input_tokens":10000000,"output_tokens":1000000,"cache_read":2000000,"total_cost_usd":0}}`)
+	before, _ := os.ReadFile(filepath.Join(state, "dispatch-log.ndjson"))
+
+	_, _, err := Run(context.Background(), Request{AgentName: "librarian", Task: "t", Project: t.TempDir(), YakosRoot: yakosRoot})
+	if !budget.IsRefused(err) || !strings.Contains(err.Error(), "13,000,000 tokens") {
+		t.Fatalf("Run: want a refusal naming the built-in token limit, got %v", err)
+	}
+	svc := NewService(ServiceConfig{YakosRoot: yakosRoot, WorkspaceRoot: state, OperatorID: "op"})
+	withStreamRunFn(func(context.Context, Request, runtime.Adapter, runtime.ChatDispatchRequest, func(StreamChunk)) (Result, error) {
+		t.Fatal("a refused streamed dispatch must not execute")
+		return Result{}, nil
+	}, func() {
+		if _, err := svc.RunStream(context.Background(), Params{Agent: "librarian", Task: "t", Project: state}, func(StreamChunk) {}); !budget.IsRefused(err) {
+			t.Fatalf("RunStream: want a refusal, got %v", err)
+		}
+	})
+	after, _ := os.ReadFile(filepath.Join(state, "dispatch-log.ndjson"))
+	if string(after) != string(before) {
+		t.Fatalf("a refused dispatch must not touch the log:\n%s", after)
+	}
+}

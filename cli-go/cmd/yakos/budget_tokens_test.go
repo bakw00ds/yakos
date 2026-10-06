@@ -164,35 +164,81 @@ func TestBudgetGateBlocksBashPassthroughOnATokenLimit(t *testing.T) {
 	}
 }
 
-// The status table gains token columns only when there is a token to show; without
-// one it is byte-for-byte the dollar table.
-func TestBudgetStatusTable_TokenColumnsAppearOnlyWhenNeeded(t *testing.T) {
+// Tokens are the primary unit, so the status table leads with them: TOKENS and TOKEN
+// LIMIT come before the dollar columns, the built-in agents show their built-in token
+// limits, and an agent with only a dollar limit shows its tokens used and "off".
+func TestBudgetStatusTable_TokensLeadTheDollarColumns(t *testing.T) {
 	state := t.TempDir()
 	if err := budget.SetLimit(state, "plain", 10, budget.Monthly); err != nil {
 		t.Fatal(err)
 	}
 	code, out := runYakos(t, state, nil, "budget", "status", "--project", t.TempDir())
-	if code != 0 || strings.Join(strings.Fields(strings.SplitN(out, "\n", 2)[0]), " ") != "AGENT STATE SPENT LIMIT USED WINDOW SOURCE" || strings.Contains(out, "TOKEN") {
-		t.Fatalf("no tokens: exit %d:\n%s", code, out)
+	if want := "AGENT STATE TOKENS TOKEN LIMIT SPENT LIMIT USED WINDOW SOURCE"; code != 0 || strings.Join(strings.Fields(strings.SplitN(out, "\n", 2)[0]), " ") != want {
+		t.Fatalf("header: exit %d:\n%s", code, out)
+	}
+	rows := map[string][]string{}
+	for _, l := range strings.Split(out, "\n")[1:] {
+		if f := strings.Fields(l); len(f) > 0 {
+			rows[f[0]] = f
+		}
+	}
+	if r := rows["supervisor"]; len(r) < 4 || r[3] != "33000000" {
+		t.Errorf("supervisor row = %v, want its built-in token limit 33000000", r)
+	}
+	if r := rows["librarian"]; len(r) < 4 || r[3] != "13000000" {
+		t.Errorf("librarian row = %v, want its built-in token limit 13000000", r)
 	}
 
 	writeTokenLog(t, state, "plain", 5, 5)
-	code, out = runYakos(t, state, nil, "budget", "status", "--project", t.TempDir())
-	if code != 0 || !strings.Contains(out, "TOKENS") || !strings.Contains(out, "TOKEN LIMIT") {
-		t.Fatalf("with tokens used: exit %d:\n%s", code, out)
-	}
-	hdr := strings.SplitN(out, "\n", 2)[0]
-	if strings.Index(hdr, "TOKENS") > strings.Index(hdr, "SPENT") {
-		t.Errorf("tokens come before dollars (tokens are primary): %q", hdr)
-	}
-	var plainRow string
+	_, out = runYakos(t, state, nil, "budget", "status", "--project", t.TempDir())
+	var plainRow []string
 	for _, l := range strings.Split(out, "\n") {
-		if strings.HasPrefix(l, "plain") {
-			plainRow = l
+		if f := strings.Fields(l); len(f) > 0 && f[0] == "plain" {
+			plainRow = f
 		}
 	}
-	if !strings.Contains(plainRow, "10") || !strings.Contains(plainRow, "off") {
-		t.Errorf("row = %q (10 tokens used, no token limit)", plainRow)
+	// plain: state ok, 10 tokens used, no token limit, $0 spent of $10.
+	if len(plainRow) < 7 || plainRow[2] != "10" || plainRow[3] != "off" || plainRow[5] != "$10.00" {
+		t.Errorf("plain row = %v", plainRow)
+	}
+}
+
+// Turning the built-in agents' dollar limit off leaves their built-in token limit
+// on, and the command says so; the budget is off only when both are.
+func TestBudgetSet_ZeroDollarsKeepsTheBuiltinTokenBudget(t *testing.T) {
+	state := t.TempDir()
+	code, out := runYakos(t, state, nil, "budget", "set", "supervisor", "0")
+	if code != 0 || !strings.Contains(out, "dollar budget for supervisor turned off") ||
+		!strings.Contains(out, "note: supervisor still has a token budget of 33000000 tokens") ||
+		!strings.Contains(out, "--tokens 0") {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	if code, out = runYakos(t, state, nil, "budget", "check", "supervisor"); code != 0 || strings.Contains(out, "reason=budget_off") || !strings.Contains(out, "limit_tokens=33000000") {
+		t.Fatalf("the token budget still applies: exit %d: %s", code, out)
+	}
+	code, out = runYakos(t, state, nil, "budget", "set", "supervisor", "0", "--tokens", "0")
+	if code != 0 || strings.Contains(out, "note:") || !strings.Contains(out, "token budget for supervisor turned off") {
+		t.Fatalf("both off: exit %d: %s", code, out)
+	}
+	if code, out = runYakos(t, state, nil, "budget", "check", "supervisor"); code != 0 || !strings.Contains(out, "reason=budget_off") {
+		t.Fatalf("both limits 0 turns the built-in budget off: exit %d: %s", code, out)
+	}
+}
+
+// The built-in supervisor token limit trips for a subscription operator: `budget check`
+// reports hard_stop (exit 4) once the month's tokens reach it, so the supervisor-stream
+// hook, which reads the state, refuses routine launches with no change of its own.
+func TestBudgetCheck_BuiltinSupervisorTokenLimitTrips(t *testing.T) {
+	state := t.TempDir()
+	writeTokenLog(t, state, "supervisor", 32_000_000, 0)
+	code, out := runYakos(t, state, nil, "budget", "check", "supervisor", "--json")
+	if code != 0 || !strings.Contains(out, `"state":"warning"`) || !strings.Contains(out, `"limit_tokens":33000000`) {
+		t.Fatalf("97%% of the built-in token limit is a warning, not a stop: exit %d: %s", code, out)
+	}
+	writeTokenLog(t, state, "supervisor", 1_000_000, 0)
+	code, out = runYakos(t, state, nil, "budget", "check", "supervisor", "--json")
+	if code != budget.ExitHardStop || !strings.Contains(out, `"state":"hard_stop"`) || !strings.Contains(out, `"spent_tokens":33000000`) || !strings.Contains(out, `"spent_usd":0`) {
+		t.Fatalf("at the built-in token limit with no dollars spent: exit %d (want %d): %s", code, budget.ExitHardStop, out)
 	}
 }
 

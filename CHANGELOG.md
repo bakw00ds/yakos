@@ -28,21 +28,32 @@ subscription harness or a local model; see UPGRADING.md.
   A subscription run's cost as the harness reported it (claude's
   `total_cost_usd`) is kept as `api_equivalent_usd` and `usage.total_cost_usd`
   is written as 0, so no reader that sums it counts it as spend. **Behavior
-  change:** a dollar budget (`limit_usd`, including the built-in supervisor and
-  librarian limits) no longer moves for subscription runs. See UPGRADING.md and
+  change:** a dollar budget (`limit_usd`) no longer moves for subscription runs,
+  so the built-in supervisor and librarian budgets also carry a token limit (see
+  the next entry) and keep tripping for every billing class. See UPGRADING.md and
   `docs/budgets.md`.
 
-- **Budgets gain token limits (K-136).** `budget-policy.yml` entries accept
-  `limit_tokens` next to `limit_usd`, set with
+- **Budgets gain token limits, and the built-in budgets have them (K-136).**
+  `budget-policy.yml` entries accept `limit_tokens` next to `limit_usd`, set with
   `yakos budget set <agent> [<usd>] [--tokens <n>]` (`5000000`, `500k`, `1.5m`,
   `2b`). It counts the input, output and cache tokens of every run whatever its
   billing, and trips exactly like `limit_usd` (warning at `warn_pct`, hard stop
   at 100%, same window and reset rules); an agent with both stops when either is
-  reached. `budget status` gains `TOKENS` and `TOKEN LIMIT` columns when there is
-  a token to show, `--json` and `budget check --json` gain `limit_tokens`,
-  `stop_tokens`, `spent_tokens` and `tokens_pct`, and the `budget check` first
-  line gains ` spent_tokens=<n> limit_tokens=<n>` only for an agent that has a
-  token limit. The spend cache is rebuilt from the log once.
+  reached, and `yakos budget check` reports `hard_stop` (exit 4) for either, so
+  the supervisor hook's gate stops on tokens with no change. **The supervisor and
+  librarian get a built-in monthly token limit** next to their dollar limit:
+  33,000,000 and 13,000,000 tokens, each the dollar ceiling converted at the
+  Sonnet reference rate of $3 per million tokens and rounded down to a whole
+  million ($100 / $3 = 33.3M, $40 / $3 = 13.3M; the dispatch-log shows the
+  supervisor's blended cost at $2.76 to $3.83 per million tokens, so the
+  conversion holds for it). The supervisor keeps its 2x dispatch stop on tokens.
+  Override in the policy file; `yakos budget set supervisor 0` now turns off the
+  dollar limit only and prints a note, and `--tokens 0` turns off the token limit.
+  `budget status` leads with `TOKENS` and `TOKEN LIMIT` columns, `--json` and
+  `budget check --json` gain `limit_tokens`, `stop_tokens`, `spent_tokens` and
+  `tokens_pct`, and the `budget check` first line gains
+  ` spent_tokens=<n> limit_tokens=<n>` for an agent that has a token limit. The
+  spend cache is rebuilt from the log once.
 
 - **`dispatch.Account` is the only writer of `dispatch_started` and
   `dispatch_finished` (K-136).** `Run`, `RunStream`, the MCP, JSON-RPC, REST and
