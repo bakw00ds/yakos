@@ -171,8 +171,8 @@ yk_agents_warn_skip() {
 #   chain of symlinks (a relative link is read from the physical directory of the
 #   link, as the kernel does). Fails on a loop or a directory that is missing.
 #   Every cd in this file empties CDPATH: with it set, cd given a relative path
-#   prints the directory it entered, and the extra line corrupted the answer, so
-#   a link out of the project was taken for one inside it.
+#   prints the directory it entered, and the extra line corrupted the resolved
+#   path, so a link was refused for the wrong reason.
 yk_agents_real_dir() {
     local p="$1" n=0 d l
     while [ -L "$p" ]; do
@@ -222,31 +222,27 @@ yk_agents_warn_dir() {
     printf 'yakos: WARN: ignoring %s directory %s: %s\n' "$1" "$2" "$3" >&2
 }
 
+# What is said of a project agent or skill directory that is a link. The same text
+# as agentscompose.DirLinkReason, in the composers and in both validators.
+YK_AGENTS_DIR_LINK_REASON="a symlinked directory is not followed (this directory or .claude is a symlink)"
+
 # yk_agents_dir_problem <project-root> <dir>
-#   For a project's agent (or skill) directory reached through a symlink, the
-#   directory itself or the .claude above it, print why it may not be read; print
-#   nothing for a plain directory and for a link that resolves to a directory
-#   inside the project. Files seen through a linked directory are regular files and
-#   never reach yk_agents_symlink_problem, so the directory is checked itself. Inside
-#   means an ancestor directory of the target IS the project (same device and
-#   inode). Go twin: agentscompose.InspectProjectDir.
+#   Print why a project's agent (or skill) directory may not be read, and nothing
+#   when it may. It may unless it is there and is a symlink, or the project's
+#   .claude above it is one. The link is not resolved and not followed, wherever it
+#   leads: a file seen through a linked directory is a regular file and never
+#   reaches yk_agents_symlink_problem, so the directory is refused itself, a link to
+#   a directory inside the project included. Nothing there means nothing to refuse.
+#   Only the project's directories are looked at: the framework's root, and its
+#   lib/agents and lib/skills, may be links and are not checked. Go twin:
+#   agentscompose.InspectProjectDir.
 yk_agents_dir_problem() {
-    local project="$1" dir="$2" real d
+    local project="$1" dir="$2"
     [ -n "$project" ] || return 0
-    if [ ! -L "$project/.claude" ] && [ ! -L "$dir" ]; then return 0; fi
-    # Nothing there, so nothing is read through the link.
     if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then return 0; fi
-    if [ ! -d "$dir" ] || ! real="$(CDPATH='' cd -P -- "$dir" 2>/dev/null && pwd -P)"; then
-        echo "symlink does not resolve to a directory"
-        return 0
+    if [ -L "$project/.claude" ] || [ -L "$dir" ]; then
+        echo "$YK_AGENTS_DIR_LINK_REASON"
     fi
-    d="$(dirname -- "$real")"
-    while :; do
-        if [ "$d" -ef "$project" ]; then return 0; fi
-        if [ "$d" = "/" ] || [ "$d" = "." ]; then break; fi
-        d="$(dirname -- "$d")"
-    done
-    echo "symlink resolves outside the project directory"
     return 0
 }
 
@@ -428,8 +424,8 @@ yk_agents_compose() {
     local fw_dir="$yakos_root/lib/agents"
     local proj_dir="" dir_reason=""
     if [ -n "$project_root" ]; then
-        # The project's agent directory is checked itself: a link to a directory
-        # outside the project is skipped whole, with one warning.
+        # The project's agent directory is checked itself: a link, or a link above
+        # it, is skipped whole, with one warning.
         dir_reason="$(yk_agents_dir_problem "$project_root" "$project_root/.claude/agents")"
         if [ -n "$dir_reason" ]; then
             yk_agents_warn_dir agent "$project_root/.claude/agents" "$dir_reason"

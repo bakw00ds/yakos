@@ -186,9 +186,10 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 	}
 
 	// In project mode the agent and skill directories are checked themselves: one
-	// that is a symlink, or has a symlinked .claude above it, must resolve to a
-	// directory inside the project, or the dispatcher skips it whole. It is reported
-	// here, once, and no pass below reads through it.
+	// that is a symlink, or has a symlinked .claude above it, is skipped whole by
+	// the dispatcher, wherever it leads. It is reported here, once, and no pass
+	// below reads through it. The framework's own directories are never checked: a
+	// bare install may leave lib/agents, lib/skills or the root itself as links.
 	if filepath.Base(filepath.Clean(base)) == ".claude" {
 		project := filepath.Dir(filepath.Clean(base))
 		for _, kind := range []string{"agents", "skills"} {

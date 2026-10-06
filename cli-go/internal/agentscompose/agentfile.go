@@ -20,12 +20,15 @@ package agentscompose
 //     FIFO blocks open(2) for good, and a device such as /dev/zero never ends.
 //   - A file over MaxAgentFileBytes is skipped, and the read itself is bounded,
 //     so a file whose size is not known up front cannot exhaust the daemon.
-//   - The project's agent and skill directories are checked themselves. A file
-//     seen through a linked directory is a regular file, so it never reaches the
-//     symlink rule above, and a root that is itself a link resolves outside by
-//     identity. So a project's .claude/agents or .claude/skills that is a symlink,
-//     or has a symlinked .claude above it, must resolve to a directory inside the
-//     project, or the whole directory is skipped, once, with a warning.
+//   - The project's agent and skill directories are refused when they are links.
+//     A file seen through a linked directory is a regular file, so it never
+//     reaches the symlink rule above, and a root that is itself a link resolves
+//     outside by identity. So a project's .claude/agents or .claude/skills that is
+//     a symlink, or has a symlinked .claude above it, is skipped whole, once, with
+//     a warning, wherever it leads, inside the project too. Only the project's
+//     directories are looked at: the framework's root, and its lib/agents and
+//     lib/skills, may be links (a bare install or a re-pointed upgrade leaves
+//     them so) and still compose.
 //   - What is inspected is what is read. Inspecting a path and then opening it
 //     again lets the entry change in between: a symlink retargeted to an outside
 //     file, or a regular file swapped for a FIFO. So the file is opened by the
@@ -189,64 +192,47 @@ func inspect(path string, roots []string) (target os.FileInfo, openPath string, 
 type DirProblem int
 
 const (
-	// DirOK: the directory may be read.
+	// DirOK: the directory may be read, or is not there.
 	DirOK DirProblem = iota
-	// DirUnresolved: a symlink (the directory, or the .claude above it) that does
-	// not end at a directory: dangling, a loop, or a file.
-	DirUnresolved
-	// DirOutside: a symlink that ends at a directory outside the project.
-	DirOutside
+	// DirLinked: the directory is a symlink, or has a symlinked .claude above it.
+	DirLinked
 )
 
-// DirOutsideReason and DirUnresolvedReason are what is said of such a directory.
-// The bash twin prints the same text, and the tests compare them.
-const (
-	DirOutsideReason    = "symlink resolves outside the project directory"
-	DirUnresolvedReason = "symlink does not resolve to a directory"
-)
+// DirLinkReason is what is said of such a directory: by Compose and ComposeSkills
+// (and so by every reader of the roster, /api/skills among them), by both
+// validators and by the bash composer. It is the same text in all of them and the
+// tests compare it.
+const DirLinkReason = "a symlinked directory is not followed (this directory or .claude is a symlink)"
 
 // Reason is the text for the problem, "" for DirOK.
 func (p DirProblem) Reason() string {
-	switch p {
-	case DirUnresolved:
-		return DirUnresolvedReason
-	case DirOutside:
-		return DirOutsideReason
+	if p == DirLinked {
+		return DirLinkReason
 	}
 	return ""
 }
 
 // InspectProjectDir says whether the project's agent or skill directory dir may be
-// read: a plain directory may, and one reached through a symlink (dir itself, or
-// the .claude above it) must resolve to a directory inside the project, compared
-// by directory identity like the files are. Without a link there is nothing to
-// resolve and nothing is looked up, so the common case costs two Lstat calls.
-// The framework's directories are not the project's and are not checked.
+// read. It may unless it is there and is a symlink, or the project's .claude above
+// it is one. The link is not resolved and not followed, wherever it leads: a link
+// to a directory inside the project is refused as well, since a file seen through
+// it never reaches the rule for files. Nothing there means nothing to refuse. Two
+// Lstat calls decide, so the common case costs next to nothing.
+//
+// Only the project's directories are looked at. The framework's root, and its
+// lib/agents and lib/skills, are not the project's, may be links, and are not
+// checked.
 func InspectProjectDir(project, dir string) DirProblem {
 	if project == "" {
 		return DirOK
 	}
-	linked := false
+	if _, err := os.Lstat(dir); err != nil {
+		return DirOK // not there, or no way in to it: nothing is read
+	}
 	for _, p := range []string{filepath.Join(project, ".claude"), dir} {
 		if fi, err := os.Lstat(p); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			linked = true
+			return DirLinked
 		}
-	}
-	if !linked {
-		return DirOK
-	}
-	if _, err := os.Lstat(dir); err != nil {
-		return DirOK // nothing there, so nothing is read through the link
-	}
-	resolved, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		return DirUnresolved
-	}
-	if fi, err := os.Stat(resolved); err != nil || !fi.IsDir() {
-		return DirUnresolved
-	}
-	if !insideRoots(resolved, []string{project}) {
-		return DirOutside
 	}
 	return DirOK
 }

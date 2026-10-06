@@ -155,13 +155,17 @@ type ComposedAgent struct {
 // the file and the value. A template that does not exist means the agent's own
 // body alone.
 //
+// The project's .claude/agents is not read at all when it is a symlink, or sits
+// under a symlinked .claude (InspectProjectDir): the directory is skipped whole,
+// once, with a warning, wherever the link leads. The framework's own root and its
+// lib/agents may be links and are not checked.
+//
 // Files are read by readAgentFile (see agentfile.go): a symlink is followed only
 // to a regular file inside the framework's lib/agents or the project's
 // .claude/agents, anything that is not a regular file is skipped unopened, and a
-// file over
-// MaxAgentFileBytes is skipped. Each is a skip with the same once-per-file
-// warning, and so is any failure to read a file in the project directory. Only
-// a failure to read a framework file is an error.
+// file over MaxAgentFileBytes is skipped. Each is a skip with the same
+// once-per-file warning, and so is any failure to read a file in the project
+// directory. Only a failure to read a framework file is an error.
 func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 	fwDir := filepath.Join(yakosRoot, "lib", "agents")
 	projDir := ""
@@ -630,10 +634,12 @@ type ComposedSkill struct {
 // whole listing with it. That covers a symlink that does not end at a regular
 // file inside the framework's lib/skills or the project's .claude/skills, an
 // entry that is not a regular file, a file over MaxAgentFileBytes, a line over the
-// bound, and a
-// failure to read a file in the project directory. Only a failure to read a
-// framework file is an error. A skill directory without a SKILL.md is skipped
-// silently, as before.
+// bound, and a failure to read a file in the project directory. Only a failure to
+// read a framework file is an error. A skill directory without a SKILL.md is
+// skipped silently, as before. The project's .claude/skills is not read at all
+// when it is a symlink, or sits under a symlinked .claude: it is skipped whole,
+// once, with the same warning Compose gives for .claude/agents. The framework's
+// own root and its lib/skills may be links and are not checked.
 func ComposeSkills(yakosRoot, project string) ([]ComposedSkill, error) {
 	fwDir := filepath.Join(yakosRoot, "lib", "skills")
 	projDir := ""

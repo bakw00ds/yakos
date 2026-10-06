@@ -14,8 +14,9 @@
 #                               .git/config), and an extends: that is a bare agent id
 #                               (sec-324; the second fixture project below)
 #   agent/skill directory       a project's .claude/agents or .claude/skills that is a
-#                               symlink, or sits under a symlinked .claude, must resolve
-#                               to a directory inside the project (rev-324)
+#                               symlink, or sits under a symlinked .claude, is refused,
+#                               wherever it leads; the framework's own directories are
+#                               never refused (rev-324)
 #   FIFO among the files        a FIFO in the agents, rules or skills directory must not
 #                               hang validate: bash's playbook pass read every file
 #                               with `grep -r`, which blocks on a pipe for good
@@ -211,13 +212,16 @@ fi
 
 # ---- project agent and skill directories that are links (rev-324) -----------
 # A file seen through a linked directory is a regular file and never reaches the
-# rule for symlinked files, so the directory is checked itself: `.claude/agents` or
-# `.claude/skills` that is a symlink, or a `.claude` that is one, must resolve to a
-# directory inside the project, or the dispatcher skips it whole and validate says
-# so, once. Neither twin walks into a linked agents or skills directory (find and
-# filepath.WalkDir both stop at a link given as the starting point), so what is in
-# one is not validated, as it never was; a linked `.claude` is walked, and is where
-# the rule for files meets an accepted directory.
+# rule for symlinked files, so the directory is refused itself: `.claude/agents` or
+# `.claude/skills` that is a symlink, or sits under a `.claude` that is one, is
+# skipped whole by the dispatcher, wherever it leads (outside the project, into it,
+# to nothing, to a file), and validate says so, once, with the one text the
+# composers print. Neither twin walks into a linked agents or skills directory
+# (find and filepath.WalkDir both stop at a link given as the starting point); a
+# linked `.claude` is walked, and is where a pass would read what was refused if it
+# were not told to skip it. The framework's own directories are never refused: a
+# bare install or a re-pointed upgrade may leave lib/agents, lib/skills or the root
+# itself as a link.
 #
 # vrun <side> <project>: validate the project; VOUT is the findings, with the project
 # path as <D>, and VHUNG is 1 when the run did not finish in 30 seconds.
@@ -237,8 +241,11 @@ skill_md() { # <dir> <name>
     mkdir -p "$1/$2"
     { printf -- '---\nname: %s\ndescription: a test skill\n---\n# %s\n' "$2" "$2"; printf '%s\n' "$filler"; } > "$1/$2/SKILL.md"
 }
-DIROUT="symlink resolves outside the project directory; $SKIP"
-DIRGONE="symlink does not resolve to a directory; $SKIP"
+rule_md() { # <dir>: one good rule
+    mkdir -p "$1/rules"
+    { printf -- '---\nname: note\n---\n# note\n'; awk 'BEGIN { for (i = 0; i < 70; i++) print "filler" }'; } > "$1/rules/note.md"
+}
+DIRLINK="a symlinked directory is not followed (this directory or .claude is a symlink); $SKIP"
 
 # outside_tree <dir>: an agent and a skill that every pass reading them has something
 # to say about: a runtime that is not one, a short file (the line budget), a playbook
@@ -247,8 +254,8 @@ DIRGONE="symlink does not resolve to a directory; $SKIP"
 # validate stops early when there is nothing, which would hide whether the passes
 # after that point read what was refused.
 outside_tree() {
-    mkdir -p "$1/agents" "$1/skills/evil" "$1/rules"
-    { printf -- '---\nname: note\n---\n# note\n'; awk 'BEGIN { for (i = 0; i < 70; i++) print "filler" }'; } > "$1/rules/note.md"
+    mkdir -p "$1/agents" "$1/skills/evil"
+    rule_md "$1"
     printf -- '---\nid: evil\nrole: specialist\nruntime: gemni\nmodel-policy: haiku\n---\n# evil\n- playbook:evil-agent-ref\n' > "$1/agents/evil.md"
     printf -- '---\nname: evil\ndescription: a test skill\n---\n# evil\n- playbook:evil-skill-ref\n' > "$1/skills/evil/SKILL.md"
 }
@@ -259,59 +266,63 @@ lnk "$TMP/out1/agents" "$D1/.claude/agents"; lnk "$TMP/out1/skills" "$D1/.claude
 # directories are real ones that a pass would walk if it were not told to skip them
 D2="$TMP/d2"; mkdir -p "$D2"; outside_tree "$TMP/out2"
 lnk "$TMP/out2" "$D2/.claude"
-# D3: both are links to directories inside the project
-D3="$TMP/d3"; mkdir -p "$D3/config/agents" "$D3/.claude"
-agent_md "$D3/config/agents" mine; skill_md "$D3/config/skills" mine
-lnk ../config/agents "$D3/.claude/agents"; lnk ../config/skills "$D3/.claude/skills"
-# D4: `.claude` is a link to a directory inside the project, and the rule for files
-# applies inside it: a link to the project's .env is refused, a bad runtime is found
-D4="$TMP/d4"; mkdir -p "$D4/dotclaude/agents"
-agent_md "$D4/dotclaude/agents" good; agent_md "$D4/dotclaude/agents" bad $'runtime: gemni\n'
-printf 'OPENAI_API_KEY=sk-TOPSECRET-1234\n' > "$D4/.env"
-lnk ../../.env "$D4/dotclaude/agents/dotenv.md"; lnk dotclaude "$D4/.claude"
+# D3: both are links to directories inside the project: refused like the outside ones
+D3="$TMP/d3"; mkdir -p "$D3/.claude"; outside_tree "$D3/shared"
+lnk ../shared/agents "$D3/.claude/agents"; lnk ../shared/skills "$D3/.claude/skills"
+# D4: `.claude` is a link to a directory inside the project
+D4="$TMP/d4"; mkdir -p "$D4"; outside_tree "$D4/dotclaude"
+lnk dotclaude "$D4/.claude"
 # D5: links to nothing, and to a file
 D5="$TMP/d5"; mkdir -p "$D5/.claude"; printf 'not a directory\n' > "$D5/notes.txt"
 lnk "$D5/does-not-exist" "$D5/.claude/agents"; lnk "$D5/notes.txt" "$D5/.claude/skills"
-# D6: a linked `.claude` that has no skills directory says nothing about it
-D6="$TMP/d6"; mkdir -p "$D6/dotclaude/agents"; agent_md "$D6/dotclaude/agents" good; lnk dotclaude "$D6/.claude"
+# D6: a linked `.claude` that has an agents directory and no skills directory is
+# refused for the agents directory only
+D6="$TMP/d6"; mkdir -p "$D6/dotclaude/agents"; agent_md "$D6/dotclaude/agents" good; rule_md "$D6/dotclaude"; lnk dotclaude "$D6/.claude"
+# D7: a linked `.claude` that holds neither has nothing to refuse
+D7="$TMP/d7"; mkdir -p "$D7"; rule_md "$D7/dotclaude"; lnk dotclaude "$D7/.claude"
 
 if [ "$dirs_ok" = 1 ]; then
     for side in $sides; do
         vrun "$side" "$D1"; o1="$VOUT"; h1=$VHUNG; printf '%s' "$VOUT" > "$TMP/d1-$side.txt"
-        want_err_f "$o1" "<D>/.claude/agents: $DIROUT" "$side: an agents directory linked outside the project is rejected"
-        want_err_f "$o1" "<D>/.claude/skills: $DIROUT" "$side: a skills directory linked outside the project is rejected"
+        want_err_f "$o1" "<D>/.claude/agents: $DIRLINK" "$side: an agents directory linked outside the project is rejected"
+        want_err_f "$o1" "<D>/.claude/skills: $DIRLINK" "$side: a skills directory linked outside the project is rejected"
         printf '%s' "$o1" | grep -q 'Summary: 2 error(s), 0 warning(s)' && ok "$side: the two linked directories are the only findings" || bad "$side: wrong findings for the outside links: $o1"
         vrun "$side" "$D2"; o2="$VOUT"; h2=$VHUNG; printf '%s' "$VOUT" > "$TMP/d2-$side.txt"
-        want_err_f "$o2" "<D>/.claude/agents: $DIROUT" "$side: agents under a .claude linked outside the project is rejected"
-        want_err_f "$o2" "<D>/.claude/skills: $DIROUT" "$side: skills under a .claude linked outside the project is rejected"
+        want_err_f "$o2" "<D>/.claude/agents: $DIRLINK" "$side: agents under a .claude linked outside the project is rejected"
+        want_err_f "$o2" "<D>/.claude/skills: $DIRLINK" "$side: skills under a .claude linked outside the project is rejected"
         if printf '%s' "$o2" | grep -q 'evil'; then bad "$side: a file under the rejected .claude was read: $o2"; else ok "$side: no pass reads a file under the rejected .claude"; fi
         printf '%s' "$o2" | grep -q 'Summary: 2 error(s), 0 warning(s)' && ok "$side: the two rejected directories are the only findings" || bad "$side: wrong findings for a .claude linked outside: $o2"
         grep -qF 'agents: 0 | skills: 0 | rules: 1' "$TMP/vrun.out" && ok "$side: the rejected directories are not counted" || bad "$side: the rejected directories were counted: $(grep -F 'agents:' "$TMP/vrun.out")"
         vrun "$side" "$D3"; o3="$VOUT"; h3=$VHUNG; printf '%s' "$VOUT" > "$TMP/d3-$side.txt"
-        printf '%s' "$o3" | grep -q 'Summary: 0 error(s), 0 warning(s)' && ok "$side: directories linked inside the project are accepted" || bad "$side: a directory linked inside the project was refused: $o3"
+        want_err_f "$o3" "<D>/.claude/agents: $DIRLINK" "$side: an agents directory linked to a directory of the project is rejected too"
+        want_err_f "$o3" "<D>/.claude/skills: $DIRLINK" "$side: a skills directory linked to a directory of the project is rejected too"
+        printf '%s' "$o3" | grep -q 'Summary: 2 error(s), 0 warning(s)' && ok "$side: the two links into the project are the only findings" || bad "$side: wrong findings for links into the project: $o3"
         vrun "$side" "$D4"; o4="$VOUT"; h4=$VHUNG; printf '%s' "$VOUT" > "$TMP/d4-$side.txt"
-        want_err "$o4" 'agents/bad.md: runtime: "gemni" is not a known runtime'  "$side: a file under a .claude linked inside the project is validated"
-        want_err_f "$o4" "<D>/.claude/agents/dotenv.md: $OUTSIDE"                 "$side: a link to .env under a .claude linked inside the project is refused"
-        printf '%s' "$o4" | grep -q 'Summary: 2 error(s), 0 warning(s)' && ok "$side: a linked .claude inside the project has exactly two findings" || bad "$side: wrong findings for a .claude linked inside: $o4"
-        if printf '%s' "$o4" | grep -q 'TOPSECRET'; then bad "$side: text of the project's .env was printed"; else ok "$side: nothing from the project's .env is printed through a linked .claude"; fi
+        want_err_f "$o4" "<D>/.claude/agents: $DIRLINK" "$side: agents under a .claude linked into the project is rejected"
+        want_err_f "$o4" "<D>/.claude/skills: $DIRLINK" "$side: skills under a .claude linked into the project is rejected"
+        if printf '%s' "$o4" | grep -q 'evil'; then bad "$side: a file under the rejected .claude was read: $o4"; else ok "$side: no pass reads a file under a .claude linked into the project"; fi
         vrun "$side" "$D5"; o5="$VOUT"; h5=$VHUNG; printf '%s' "$VOUT" > "$TMP/d5-$side.txt"
-        want_err_f "$o5" "<D>/.claude/agents: $DIRGONE" "$side: an agents directory linked to nothing is rejected"
-        want_err_f "$o5" "<D>/.claude/skills: $DIRGONE" "$side: a skills directory linked to a file is rejected"
+        want_err_f "$o5" "<D>/.claude/agents: $DIRLINK" "$side: an agents directory linked to nothing is rejected"
+        want_err_f "$o5" "<D>/.claude/skills: $DIRLINK" "$side: a skills directory linked to a file is rejected"
         vrun "$side" "$D6"; o6="$VOUT"; h6=$VHUNG; printf '%s' "$VOUT" > "$TMP/d6-$side.txt"
-        printf '%s' "$o6" | grep -q 'Summary: 0 error(s), 0 warning(s)' && ok "$side: a linked .claude without a skills directory is silent about it" || bad "$side: wrong findings for a .claude with no skills directory: $o6"
-        if [ "$h1$h2$h3$h4$h5$h6" = 000000 ]; then ok "$side: every directory fixture finished"; else bad "$side: a directory fixture did not finish in 30 seconds"; fi
+        want_err_f "$o6" "<D>/.claude/agents: $DIRLINK" "$side: the agents directory under a linked .claude is rejected"
+        printf '%s' "$o6" | grep -q 'Summary: 1 error(s), 0 warning(s)' && ok "$side: a linked .claude without a skills directory is silent about skills" || bad "$side: wrong findings for a .claude with no skills directory: $o6"
+        vrun "$side" "$D7"; o7="$VOUT"; h7=$VHUNG; printf '%s' "$VOUT" > "$TMP/d7-$side.txt"
+        printf '%s' "$o7" | grep -q 'Summary: 0 error(s), 0 warning(s)' && ok "$side: a linked .claude with neither directory has nothing to refuse" || bad "$side: wrong findings for a linked .claude holding no agents or skills: $o7"
+        if [ "$h1$h2$h3$h4$h5$h6$h7" = 0000000 ]; then ok "$side: every directory fixture finished"; else bad "$side: a directory fixture did not finish in 30 seconds"; fi
     done
     # A relative project path with CDPATH set: bash's `cd` then prints the directory
     # it enters, which put a second line into every path the bash twin resolved with
-    # `cd -P`, so a link inside the project was refused as pointing outside it. The Go
-    # twin never looked at CDPATH. Run from $TMP, with the project named relatively.
-    CA="$TMP/cdp-a"; mkdir -p "$CA/config/agents" "$CA/.claude"
-    agent_md "$CA/config/agents" mine; skill_md "$CA/config/skills" mine
-    lnk ../config/agents "$CA/.claude/agents"; lnk ../config/skills "$CA/.claude/skills"
-    CB="$TMP/cdp-b"; mkdir -p "$CB/dotclaude/agents/sub"
-    agent_md "$CB/dotclaude/agents" good; agent_md "$CB/dotclaude/agents/sub" shared
+    # `cd -P`, so a link inside an agent directory was refused for the wrong reason.
+    # The Go twin never looked at CDPATH. Run from $TMP, with the project named
+    # relatively. A directory that is a link is refused without resolving anything,
+    # and must stay refused for a relative path too.
+    CA="$TMP/cdp-a"; mkdir -p "$CA/.claude"; outside_tree "$CA/shared"
+    lnk ../shared/agents "$CA/.claude/agents"; lnk ../shared/skills "$CA/.claude/skills"
+    CB="$TMP/cdp-b"; mkdir -p "$CB/.claude/agents/sub"
+    agent_md "$CB/.claude/agents" good; agent_md "$CB/.claude/agents/sub" shared
     printf 'OPENAI_API_KEY=sk-TOPSECRET-1234\n' > "$CB/.env"
-    lnk sub/shared.md "$CB/dotclaude/agents/inproject.md"; lnk ../../.env "$CB/dotclaude/agents/dotenv.md"; lnk dotclaude "$CB/.claude"
+    lnk sub/shared.md "$CB/.claude/agents/inproject.md"; lnk ../../.env "$CB/.claude/agents/dotenv.md"
     CC="$TMP/cdp-c"; mkdir -p "$CC/.claude"; outside_tree "$TMP/out-cdp"
     lnk "$TMP/out-cdp/agents" "$CC/.claude/agents"; lnk "$TMP/out-cdp/skills" "$CC/.claude/skills"
     cdrun() { # <side> <project relative to $TMP>
@@ -323,14 +334,14 @@ if [ "$dirs_ok" = 1 ]; then
     }
     for side in $sides; do
         cdrun "$side" cdp-a; oa="$VOUT"; ha=$VHUNG; printf '%s' "$VOUT" > "$TMP/cdp-a-$side.txt"
-        printf '%s' "$oa" | grep -q 'Summary: 0 error(s), 0 warning(s)' && ok "$side: a linked directory inside the project is accepted for a relative path with CDPATH set" || bad "$side: CDPATH broke a linked directory inside the project: $oa"
+        want_err_f "$oa" "<D>/.claude/agents: $DIRLINK" "$side: an agents directory linked into the project is refused for a relative path with CDPATH set"
+        want_err_f "$oa" "<D>/.claude/skills: $DIRLINK" "$side: a skills directory linked into the project is refused for a relative path with CDPATH set"
         cdrun "$side" cdp-b; ob="$VOUT"; hb=$VHUNG; printf '%s' "$VOUT" > "$TMP/cdp-b-$side.txt"
-        want_err_f "$ob" "<D>/.claude/agents/dotenv.md: $OUTSIDE" "$side: a link to .env is refused for a relative path with CDPATH set"
+        want_err_f "$ob" "<D>/.claude/agents/dotenv.md: $OUTSIDE" "$side: a link to .env is refused, for the right reason, for a relative path with CDPATH set"
         printf '%s' "$ob" | grep -q 'Summary: 1 error(s), 0 warning(s)' && ok "$side: a link inside the agent directory is accepted for a relative path with CDPATH set" || bad "$side: CDPATH changed the findings for links inside the agent directory: $ob"
-        # the same for a link that leads outside: it must still be refused, not waved through
         cdrun "$side" cdp-c; oc="$VOUT"; hc=$VHUNG; printf '%s' "$VOUT" > "$TMP/cdp-c-$side.txt"
-        want_err_f "$oc" "<D>/.claude/agents: $DIROUT" "$side: an agents directory linked outside the project is refused for a relative path with CDPATH set"
-        want_err_f "$oc" "<D>/.claude/skills: $DIROUT" "$side: a skills directory linked outside the project is refused for a relative path with CDPATH set"
+        want_err_f "$oc" "<D>/.claude/agents: $DIRLINK" "$side: an agents directory linked outside the project is refused for a relative path with CDPATH set"
+        want_err_f "$oc" "<D>/.claude/skills: $DIRLINK" "$side: a skills directory linked outside the project is refused for a relative path with CDPATH set"
         if [ "$ha$hb$hc" = 000 ]; then ok "$side: the CDPATH fixtures finished"; else bad "$side: a CDPATH fixture did not finish in 30 seconds"; fi
     done
     if [ "$sides" = "bash go" ]; then
@@ -338,25 +349,29 @@ if [ "$dirs_ok" = 1 ]; then
             if diff "$TMP/$d-bash.txt" "$TMP/$d-go.txt" >/dev/null; then ok "bash and Go findings identical for $d"; else bad "bash/go findings differ for $d:"; diff "$TMP/$d-bash.txt" "$TMP/$d-go.txt"; fi
         done
     fi
-    # The framework's own lib/agents is never subject to the rule, even as a link:
-    # framework mode (no project path) does not apply it.
+    # The framework's own directories are never subject to the rule, even as links:
+    # framework mode (no project path) does not apply it to a linked lib/agents or
+    # lib/skills, nor to a root that is reached through a link.
     FW="$TMP/fw"; mkdir -p "$FW/lib/rules" "$TMP/fw-elsewhere/agents"
-    agent_md "$TMP/fw-elsewhere/agents" real
+    agent_md "$TMP/fw-elsewhere/agents" real; skill_md "$TMP/fw-elsewhere/skills" real
     { printf -- '---\nname: r\n---\n# r\n'; awk 'BEGIN { for (i = 0; i < 70; i++) print "filler" }'; } > "$FW/lib/rules/r.md"
-    lnk "$TMP/fw-elsewhere/agents" "$FW/lib/agents"
+    lnk "$TMP/fw-elsewhere/agents" "$FW/lib/agents"; lnk "$TMP/fw-elsewhere/skills" "$FW/lib/skills"
+    lnk "$FW" "$TMP/fw-link"
     for side in $sides; do
-        case "$side" in
-            bash) YAKOS_ROOT="$FW" YAKOS_LIB="$REPO_ROOT/cli/lib" "${BASH:-bash}" "$REPO_ROOT/cli/lib/validate.sh" > "$TMP/fw-$side.out" 2>&1 < /dev/null ;;
-            go)   YAKOS_ROOT="$FW" YAKOS_IMPL=go "$GO_BINARY" validate > "$TMP/fw-$side.out" 2>&1 < /dev/null ;;
-        esac
-        if grep -Eq 'symlink resolves outside the project directory|symlink does not resolve to a directory' "$TMP/fw-$side.out"; then
-            bad "$side: the directory rule was applied in framework mode: $(grep -E 'symlink (resolves|does not)' "$TMP/fw-$side.out" | head -2)"
-        else
-            ok "$side: framework mode does not apply the directory rule to a linked lib/agents"
-        fi
+        for fwroot in "$FW" "$TMP/fw-link"; do
+            case "$side" in
+                bash) YAKOS_ROOT="$fwroot" YAKOS_LIB="$REPO_ROOT/cli/lib" "${BASH:-bash}" "$REPO_ROOT/cli/lib/validate.sh" > "$TMP/fw-$side.out" 2>&1 < /dev/null ;;
+                go)   YAKOS_ROOT="$fwroot" YAKOS_IMPL=go "$GO_BINARY" validate > "$TMP/fw-$side.out" 2>&1 < /dev/null ;;
+            esac
+            if grep -Fq 'a symlinked directory is not followed' "$TMP/fw-$side.out"; then
+                bad "$side: the directory rule was applied in framework mode (root $(basename "$fwroot")): $(grep -F 'not followed' "$TMP/fw-$side.out" | head -2)"
+            else
+                ok "$side: framework mode does not apply the directory rule to a linked lib/agents and lib/skills (root $(basename "$fwroot"))"
+            fi
+        done
     done
     if [ "$sides" = "bash go" ]; then
-        for d in d1 d2 d3 d4 d5 d6; do
+        for d in d1 d2 d3 d4 d5 d6 d7; do
             if diff "$TMP/$d-bash.txt" "$TMP/$d-go.txt" >/dev/null; then ok "bash and Go findings identical for $d"; else bad "bash/go findings differ for $d:"; diff "$TMP/$d-bash.txt" "$TMP/$d-go.txt"; fi
         done
     fi

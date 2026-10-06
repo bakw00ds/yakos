@@ -152,11 +152,12 @@ validate_tree() {
         return 0
     fi
     # The project's agent and skill directories are checked themselves: one that
-    # is a symlink, or has a symlinked .claude above it, must resolve to a
-    # directory inside the project, or the dispatcher skips it whole. A rejected
-    # directory is reported here, once, and read by no pass below: those passes
-    # use $VALIDATE_AGENTS_DIR and $VALIDATE_SKILLS_DIR, which name a path that
-    # never exists for a rejected one. Go twin: validateTree in validate.go.
+    # is a symlink, or has a symlinked .claude above it, is skipped whole by the
+    # dispatcher, wherever it leads. A rejected directory is reported here, once,
+    # and read by no pass below: those passes use $VALIDATE_AGENTS_DIR and
+    # $VALIDATE_SKILLS_DIR, which name a path that never exists for a rejected
+    # one. The framework's own directories are never checked (label is not
+    # "project"). Go twin: validateTree in validate.go.
     local project_dir="" agents_dir="$base/agents" skills_dir="$base/skills" dir_kind dir_reason
     if [ "$label" = "project" ]; then
         project_dir="$(dirname -- "$base")"

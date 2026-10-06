@@ -239,20 +239,25 @@ func TestBashComposerDoesNotOpenALinkToAFIFO(t *testing.T) {
 	}
 }
 
-// The project's agent directory is checked itself, in both twins: a symlinked
-// `.claude/agents`, or a symlinked `.claude` above it, must resolve to a directory
-// inside the project, or the composer skips the whole directory with one warning.
-// Compose and the bash composer run on the same fixtures, under each bash, and the
-// roster and the warning lines must be the same, byte for byte, and as written here.
+// The project's agent directory is refused when it is a link, in both twins: a
+// symlinked `.claude/agents`, or a symlinked `.claude` above it, is skipped whole
+// with one warning, wherever it leads, and the framework's own directories are
+// never checked. Compose and the bash composer run on the same fixtures, under each
+// bash, and the roster and the warning lines must be the same, byte for byte, and
+// as written here.
 func TestBashComposerAppliesTheDirectoryRuleLikeCompose(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
 		t.Skip("jq is not installed; the bash composer needs it")
 	}
 	const dirWarn = "yakos: WARN: ignoring agent directory "
 	const fileWarn = "yakos: WARN: ignoring agent file "
+	agentsDirWarning := func(project string) []string {
+		return []string{dirWarn + filepath.Join(project, ".claude", "agents") + ": " + DirLinkReason}
+	}
 	cases := []struct {
 		name  string
 		setup func(t *testing.T, root, project string)
+		root  func(t *testing.T, root string) string // the root both composers get, the root itself when nil
 		ids   string
 		warns func(project string) []string
 	}{
@@ -261,46 +266,37 @@ func TestBashComposerAppliesTheDirectoryRuleLikeCompose(t *testing.T) {
 			setup: func(t *testing.T, root, project string) {
 				symlinkOrSkip(t, filepath.Join(outsideTree(t), "agents"), filepath.Join(project, ".claude", "agents"))
 			},
-			ids: "backend",
-			warns: func(project string) []string {
-				return []string{dirWarn + filepath.Join(project, ".claude", "agents") + ": " + DirOutsideReason}
+			ids:   "backend",
+			warns: agentsDirWarning,
+		},
+		{
+			name: "agents linked to a directory of the project",
+			setup: func(t *testing.T, root, project string) {
+				writeAgentDir(t, filepath.Join(project, "config", "agents"), map[string]string{"mine": "model: haiku\n"})
+				symlinkOrSkip(t, filepath.Join("..", "config", "agents"), filepath.Join(project, ".claude", "agents"))
 			},
+			ids:   "backend",
+			warns: agentsDirWarning,
 		},
 		{
 			name: "dot-claude linked outside the project",
 			setup: func(t *testing.T, root, project string) {
 				symlinkOrSkip(t, outsideTree(t), filepath.Join(project, ".claude"))
 			},
-			ids: "backend",
-			warns: func(project string) []string {
-				return []string{dirWarn + filepath.Join(project, ".claude", "agents") + ": " + DirOutsideReason}
-			},
+			ids:   "backend",
+			warns: agentsDirWarning,
 		},
 		{
-			name: "agents linked inside the project, with the rule for files inside it",
-			setup: func(t *testing.T, root, project string) {
-				writeAgentDir(t, filepath.Join(project, "config", "agents"), map[string]string{"mine": "model: haiku\n"})
-				writeFileT(t, filepath.Join(project, ".env"), secretText+"\n")
-				symlinkOrSkip(t, filepath.Join("..", "..", ".env"), filepath.Join(project, "config", "agents", "dotenv.md"))
-				symlinkOrSkip(t, filepath.Join(root, "lib", "agents", "backend.md"), filepath.Join(project, "config", "agents", "framework.md"))
-				symlinkOrSkip(t, filepath.Join("..", "config", "agents"), filepath.Join(project, ".claude", "agents"))
-			},
-			ids: "backend,framework,mine",
-			warns: func(project string) []string {
-				return []string{fileWarn + filepath.Join(project, ".claude", "agents", "dotenv.md") + ": " + AgentOutsideReason}
-			},
-		},
-		{
-			name: "dot-claude linked inside the project",
+			name: "dot-claude linked to a directory of the project",
 			setup: func(t *testing.T, root, project string) {
 				writeAgentDir(t, filepath.Join(project, "dotclaude", "agents"), map[string]string{"mine": "model: haiku\n"})
 				symlinkOrSkip(t, "dotclaude", filepath.Join(project, ".claude"))
 			},
-			ids:   "backend,mine",
-			warns: func(string) []string { return nil },
+			ids:   "backend",
+			warns: agentsDirWarning,
 		},
 		{
-			name: "dot-claude linked inside the project, without an agents directory",
+			name: "dot-claude linked, without an agents directory",
 			setup: func(t *testing.T, root, project string) {
 				writeFileT(t, filepath.Join(project, "dotclaude", "rules", "r.md"), "x\n")
 				symlinkOrSkip(t, "dotclaude", filepath.Join(project, ".claude"))
@@ -313,10 +309,8 @@ func TestBashComposerAppliesTheDirectoryRuleLikeCompose(t *testing.T) {
 			setup: func(t *testing.T, root, project string) {
 				symlinkOrSkip(t, filepath.Join(project, "does-not-exist"), filepath.Join(project, ".claude", "agents"))
 			},
-			ids: "backend",
-			warns: func(project string) []string {
-				return []string{dirWarn + filepath.Join(project, ".claude", "agents") + ": " + DirUnresolvedReason}
-			},
+			ids:   "backend",
+			warns: agentsDirWarning,
 		},
 		{
 			name: "agents linked to a file",
@@ -324,15 +318,55 @@ func TestBashComposerAppliesTheDirectoryRuleLikeCompose(t *testing.T) {
 				writeFileT(t, filepath.Join(project, "notes.txt"), "not a directory\n")
 				symlinkOrSkip(t, filepath.Join(project, "notes.txt"), filepath.Join(project, ".claude", "agents"))
 			},
-			ids: "backend",
+			ids:   "backend",
+			warns: agentsDirWarning,
+		},
+		{
+			name: "a plain agents directory, with the rule for files inside it",
+			setup: func(t *testing.T, root, project string) {
+				agents := filepath.Join(project, ".claude", "agents")
+				writeAgentDir(t, agents, map[string]string{"mine": "model: haiku\n"})
+				writeFileT(t, filepath.Join(agents, "sub", "shared.md"), "---\nid: shared\n---\n\n## Purpose\n\nShared.\n")
+				writeFileT(t, filepath.Join(project, ".env"), secretText+"\n")
+				symlinkOrSkip(t, filepath.Join("sub", "shared.md"), filepath.Join(agents, "inproject.md"))
+				symlinkOrSkip(t, filepath.Join("..", "..", ".env"), filepath.Join(agents, "dotenv.md"))
+				symlinkOrSkip(t, filepath.Join(root, "lib", "agents", "backend.md"), filepath.Join(agents, "framework.md"))
+			},
+			ids: "backend,framework,inproject,mine",
 			warns: func(project string) []string {
-				return []string{dirWarn + filepath.Join(project, ".claude", "agents") + ": " + DirUnresolvedReason}
+				return []string{fileWarn + filepath.Join(project, ".claude", "agents", "dotenv.md") + ": " + AgentOutsideReason}
 			},
 		},
 		{
 			name: "a plain agents directory",
 			setup: func(t *testing.T, root, project string) {
 				writeAgentDir(t, filepath.Join(project, ".claude", "agents"), map[string]string{"mine": "model: haiku\n"})
+			},
+			ids:   "backend,mine",
+			warns: func(string) []string { return nil },
+		},
+		{
+			name: "the framework root is a link",
+			setup: func(t *testing.T, root, project string) {
+				writeAgentDir(t, filepath.Join(project, ".claude", "agents"), map[string]string{"mine": "model: haiku\n"})
+			},
+			root: func(t *testing.T, root string) string {
+				linked := filepath.Join(t.TempDir(), "root")
+				symlinkOrSkip(t, root, linked)
+				return linked
+			},
+			ids:   "backend,mine",
+			warns: func(string) []string { return nil },
+		},
+		{
+			name: "the framework's lib/agents is a link",
+			setup: func(t *testing.T, root, project string) {
+				writeAgentDir(t, filepath.Join(project, ".claude", "agents"), map[string]string{"mine": "model: haiku\n"})
+				shared := filepath.Join(t.TempDir(), "agents")
+				if err := os.Rename(filepath.Join(root, "lib", "agents"), shared); err != nil {
+					t.Fatal(err)
+				}
+				symlinkOrSkip(t, shared, filepath.Join(root, "lib", "agents"))
 			},
 			ids:   "backend,mine",
 			warns: func(string) []string { return nil },
@@ -344,6 +378,9 @@ func TestBashComposerAppliesTheDirectoryRuleLikeCompose(t *testing.T) {
 			warnings := captureWarnings(t)
 			root, project := dirsFixture(t)
 			tc.setup(t, root, project)
+			if tc.root != nil {
+				root = tc.root(t, root)
+			}
 
 			roster, err := Compose(root, project)
 			if err != nil {
@@ -387,10 +424,11 @@ func TestBashComposerAppliesTheDirectoryRuleLikeCompose(t *testing.T) {
 }
 
 // A relative project path with CDPATH set. With CDPATH set, bash's cd given a
-// relative path prints the directory it entered, and that second line got into
-// the path the bash composer resolved: a directory linked to somewhere outside the
-// project was then taken for one inside it, and a link inside was refused. Compose
-// never looks at CDPATH, so the twins must still agree. Both run from the project's
+// relative path prints the directory it entered, and that second line got into the
+// path the bash composer resolved for a link inside an agent directory, which was
+// then refused for the wrong reason. A directory that is a link is refused without
+// resolving anything, but it must stay refused for a relative path too. Compose
+// never looks at CDPATH, so the twins must agree. Both run from the project's
 // parent, with the project named relatively.
 func TestBashComposerDirectoryRuleIgnoresCDPATH(t *testing.T) {
 	if _, err := exec.LookPath("jq"); err != nil {
@@ -410,17 +448,26 @@ func TestBashComposerDirectoryRuleIgnoresCDPATH(t *testing.T) {
 				symlinkOrSkip(t, filepath.Join(outsideTree(t), "agents"), filepath.Join(project, ".claude", "agents"))
 			},
 			ids:   "backend",
-			warns: []string{dirWarn + filepath.Join("proj", ".claude", "agents") + ": " + DirOutsideReason},
+			warns: []string{dirWarn + filepath.Join("proj", ".claude", "agents") + ": " + DirLinkReason},
 		},
 		{
-			name: "agents linked inside the project, with links in it",
+			name: "agents linked to a directory of the project",
 			setup: func(t *testing.T, root, project string) {
 				writeAgentDir(t, filepath.Join(project, "config", "agents"), map[string]string{"mine": "model: haiku\n"})
-				writeFileT(t, filepath.Join(project, "config", "agents", "sub", "shared.md"), "---\nid: shared\n---\n\n## Purpose\n\nShared.\n")
-				writeFileT(t, filepath.Join(project, ".env"), secretText+"\n")
-				symlinkOrSkip(t, filepath.Join("sub", "shared.md"), filepath.Join(project, "config", "agents", "inproject.md"))
-				symlinkOrSkip(t, filepath.Join("..", "..", ".env"), filepath.Join(project, "config", "agents", "dotenv.md"))
 				symlinkOrSkip(t, filepath.Join("..", "config", "agents"), filepath.Join(project, ".claude", "agents"))
+			},
+			ids:   "backend",
+			warns: []string{dirWarn + filepath.Join("proj", ".claude", "agents") + ": " + DirLinkReason},
+		},
+		{
+			name: "a plain agents directory, with links in it",
+			setup: func(t *testing.T, root, project string) {
+				agents := filepath.Join(project, ".claude", "agents")
+				writeAgentDir(t, agents, map[string]string{"mine": "model: haiku\n"})
+				writeFileT(t, filepath.Join(agents, "sub", "shared.md"), "---\nid: shared\n---\n\n## Purpose\n\nShared.\n")
+				writeFileT(t, filepath.Join(project, ".env"), secretText+"\n")
+				symlinkOrSkip(t, filepath.Join("sub", "shared.md"), filepath.Join(agents, "inproject.md"))
+				symlinkOrSkip(t, filepath.Join("..", "..", ".env"), filepath.Join(agents, "dotenv.md"))
 			},
 			ids:   "backend,inproject,mine",
 			warns: []string{fileWarn + filepath.Join("proj", ".claude", "agents", "dotenv.md") + ": " + AgentOutsideReason},
