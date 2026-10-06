@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -125,6 +126,10 @@ func TestBudgetOffAndUnderLimitUntouched(t *testing.T) {
 // record, and nothing is printed on stderr. Bash twin:
 // tests/run-supervisor-budget-test.sh (10).
 func TestBudgetUnreadableSpendWarnsAndFailsOpen(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("there is no portable way to make the spend log unreadable on windows: a directory where " +
+			"it belongs opens fine there (CI saw the launch go ahead with no WARN) and a chmod 000 file stays readable")
+	}
 	b, work := budgetHook(t, 100, 0)
 	// A directory where the spend log belongs: the read fails whoever runs the
 	// test (a chmod 000 file would not stop root).
