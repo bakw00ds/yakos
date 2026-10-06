@@ -281,8 +281,8 @@ func SetLimit(stateDir, agent string, usd float64, w Window) error {
 	if err := ValidateAgent(agent); err != nil {
 		return err
 	}
-	if math.IsNaN(usd) || math.IsInf(usd, 0) || usd < 0 || usd > maxLimitUSD {
-		return fmt.Errorf("budget: limit must be a number of dollars from 0 to %v", maxLimitUSD)
+	if !validLimitUSD(usd) {
+		return fmt.Errorf("budget: limit must be 0 (off) or a number of dollars from %v to %v", minLimitUSD, maxLimitUSD)
 	}
 	if w != "" && w != Monthly && w != Lifetime {
 		return fmt.Errorf("budget: window must be %s or %s", Monthly, Lifetime)
@@ -454,6 +454,19 @@ func Resolve(agent string, p Policy, projectUSD *float64) Limit {
 // stop of twice it must stay finite (1e308 doubled is an infinite stop).
 const maxLimitUSD = 1e9
 
+// minLimitUSD is the smallest positive dollar limit, one cent. A smaller positive number
+// is a typo too, and an unsafe one: spend divided by 5e-324, which is a number in range,
+// is an infinite share, which json cannot encode. It is out of range like a negative
+// limit: ignored with a warning in the user-level policy and in a project, refused by
+// SetLimit. 0 is not below it: 0 is how a limit is turned off.
+const minLimitUSD = 0.01
+
+// validLimitUSD reports whether v is a dollar limit that the policy, a project or
+// `budget set` may give: 0 (off), or a finite number from minLimitUSD to maxLimitUSD.
+func validLimitUSD(v float64) bool {
+	return v == 0 || (v >= minLimitUSD && v <= maxLimitUSD)
+}
+
 func resolve(agent string, p Policy, projectUSD *float64) Limit {
 	l := Limit{Window: Monthly, WarnPct: DefaultWarnPct, Source: "none", StopFactor: 1}
 	if f, ok := builtinStopFactor[agent]; ok {
@@ -464,17 +477,18 @@ func resolve(agent string, p Policy, projectUSD *float64) Limit {
 	// (a built-in, or the global default's) stays: a value that cannot be a limit is a
 	// typo or a corrupt edit, not the operator turning the budget off, and turning a
 	// built-in off by accident would silently remove the supervisor's and librarian's
-	// backstop. Out of range is a dollar limit that is negative, NaN, infinite or above
-	// maxLimitUSD, and a token limit that is negative, not a whole number, not a number
-	// at all or above maxTokenLimit. 0 is how a limit is turned off, on purpose.
+	// backstop. Out of range is a dollar limit that is negative, NaN, infinite, above
+	// maxLimitUSD or positive but below minLimitUSD, and a token limit that is negative,
+	// not a whole number, not a number at all or above maxTokenLimit. 0 is how a limit is
+	// turned off, on purpose.
 	apply := func(name string, a AgentLimit, src string) {
 		if a.WarnPct > 0 && a.WarnPct <= 100 {
 			l.WarnPct = a.WarnPct
 		}
 		l.Window = parseWindow(a.Window, l.Window)
 		if a.LimitUSD != nil {
-			if v := *a.LimitUSD; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > maxLimitUSD {
-				l.Warnings = append(l.Warnings, fmt.Sprintf("policy limit_usd for %s ignored: %v is not a finite number of dollars from 0 to %v; the limit it would have replaced stays (0 turns a limit off)", name, v, maxLimitUSD))
+			if v := *a.LimitUSD; !validLimitUSD(v) {
+				l.Warnings = append(l.Warnings, fmt.Sprintf("policy limit_usd for %s ignored: %v is not 0 (off) or a finite number of dollars from %v to %v; the limit it would have replaced stays (0 turns a limit off)", name, v, minLimitUSD, maxLimitUSD))
 			} else {
 				l.USD = v
 				l.Source = src
@@ -513,6 +527,12 @@ func resolve(agent string, p Policy, projectUSD *float64) Limit {
 		switch {
 		case math.IsNaN(pv) || pv <= 0:
 			l.Warnings = append(l.Warnings, fmt.Sprintf("project agent_budgets.%s=%v ignored: a project cannot disable a budget", agent, pv))
+		case !validLimitUSD(pv):
+			// Validated exactly like a policy value: an infinite, huge or absurdly small
+			// number is not applied, not even to an agent the operator left unlimited (then
+			// nothing else bounds it, and it would be a limit or a stop json cannot encode).
+			// Only the number and the validated agent name are echoed, never the project's text.
+			l.Warnings = append(l.Warnings, fmt.Sprintf("project agent_budgets.%s=%v ignored: it is not a finite number of dollars from %v to %v", agent, pv, minLimitUSD, maxLimitUSD))
 		case l.USD == 0:
 			l.USD, l.Source = pv, "project" // off -> limited is a tightening
 		case pv < l.USD:
