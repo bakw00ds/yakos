@@ -236,6 +236,36 @@ func TestDefaultRuntimeIn_ReadsSetDefaultOutput(t *testing.T) {
 
 // ---- the default-runtime state file is only trusted when no one else wrote it ----
 
+// What the warning names, by role: it never prints a path (rev-323 and sec-323
+// follow-up). `yakos doctor --policy` words the same refusal the same way.
+const (
+	warnSubjectFile = "the default-runtime file in the yakOS state directory"
+	warnSubjectDir  = "the yakOS state directory"
+)
+
+// requireRefusalWarning checks the one-line warning for a refused default-runtime
+// file: the default is ignored, the warning names what was refused by role and
+// says why, it is one line, and it carries none of the paths it was given. A
+// warning reaches stderr and API responses, and the doctor report keeps paths
+// out as well.
+func requireRefusalWarning(t *testing.T, name, warn, subject, reason string, paths ...string) {
+	t.Helper()
+	if name != "" {
+		t.Errorf("a refused file must not supply a default, got %q", name)
+	}
+	if want := "ignoring the default runtime: " + subject + " " + reason; !strings.Contains(warn, want) {
+		t.Errorf("warning = %q, want it to contain %q", warn, want)
+	}
+	if strings.ContainsAny(warn, "\r\n") {
+		t.Errorf("the warning must be one line: %q", warn)
+	}
+	for _, p := range paths {
+		if p != "" && strings.Contains(warn, p) {
+			t.Errorf("the warning must not carry a path, but it has %q: %q", p, warn)
+		}
+	}
+}
+
 // sec-324 F2: the file steers every unpinned dispatch to a vendor, so a planted
 // one (a symlink, a world-writable file, a link or world-writable directory)
 // must not be honoured, and the operator is told why.
@@ -253,9 +283,7 @@ func TestReadDefaultRuntime_RefusesPlantedFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		name, warn := ReadDefaultRuntime(state)
-		if name != "" || !strings.Contains(warn, ": is a symlink") {
-			t.Errorf("= %q, %q; want it ignored with a symlink warning", name, warn)
-		}
+		requireRefusalWarning(t, name, warn, warnSubjectFile, "is a symlink", state, elsewhere)
 	})
 	t.Run("world-writable file", func(t *testing.T) {
 		state := t.TempDir()
@@ -267,9 +295,7 @@ func TestReadDefaultRuntime_RefusesPlantedFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 		name, warn := ReadDefaultRuntime(state)
-		if name != "" || !strings.Contains(warn, ": is group or world writable") {
-			t.Errorf("= %q, %q; want it ignored with a writable warning", name, warn)
-		}
+		requireRefusalWarning(t, name, warn, warnSubjectFile, "is group or world writable", state)
 	})
 	t.Run("world-writable directory", func(t *testing.T) {
 		state := t.TempDir()
@@ -279,9 +305,8 @@ func TestReadDefaultRuntime_RefusesPlantedFiles(t *testing.T) {
 		if err := os.Chmod(state, 0o777); err != nil {
 			t.Fatal(err)
 		}
-		if name, warn := ReadDefaultRuntime(state); name != "" || !strings.Contains(warn, ": is group or world writable") {
-			t.Errorf("= %q, %q; want it ignored with a writable-directory warning", name, warn)
-		}
+		name, warn := ReadDefaultRuntime(state)
+		requireRefusalWarning(t, name, warn, warnSubjectDir, "is group or world writable", state)
 	})
 	t.Run("symlinked state directory", func(t *testing.T) {
 		real := t.TempDir()
@@ -292,9 +317,8 @@ func TestReadDefaultRuntime_RefusesPlantedFiles(t *testing.T) {
 		if err := os.Symlink(real, link); err != nil {
 			t.Fatal(err)
 		}
-		if name, warn := ReadDefaultRuntime(link); name != "" || !strings.Contains(warn, ": is a symlink") {
-			t.Errorf("= %q, %q; want it ignored with a symlink warning", name, warn)
-		}
+		name, warn := ReadDefaultRuntime(link)
+		requireRefusalWarning(t, name, warn, warnSubjectDir, "is a symlink", real, link)
 	})
 	t.Run("an absent file is not a warning", func(t *testing.T) {
 		if name, warn := ReadDefaultRuntime(t.TempDir()); name != "" || warn != "" {

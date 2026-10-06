@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -106,6 +107,15 @@ func probeWith(id string, cfg Config) ProbeResult {
 	return r
 }
 
+// untrustedSubject names what the trust check refused, by role and without its
+// path: the default-runtime file itself, or the state directory holding it.
+func untrustedSubject(u *statepath.UntrustedError, file string) string {
+	if u.Path == file {
+		return "the default-runtime file in the yakOS state directory"
+	}
+	return "the yakOS state directory"
+}
+
 // defaultRuntimeRe is the shape of a runtime id in the default-runtime file.
 var defaultRuntimeRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 
@@ -118,7 +128,10 @@ func DefaultRuntimeIn(stateDir string) string {
 }
 
 // ReadDefaultRuntime is DefaultRuntimeIn plus a one-line warning for a file
-// that exists but was refused. The default steers every unpinned dispatch to a
+// that exists but was refused. The warning names what was refused by role (the
+// default-runtime file, or the state directory) and says why, and carries no
+// path: it reaches stderr and API responses, and `yakos doctor --policy` words
+// the same refusal the same way. The default steers every unpinned dispatch to a
 // vendor, so the file is trusted only when no one else could have written it
 // (statepath.ReadTrusted: not a symlink, owned by this user, not group- or
 // world-writable, in a directory with the same properties). statepath.Dir()
@@ -132,8 +145,9 @@ func ReadDefaultRuntime(stateDir string) (name, warning string) {
 	path := filepath.Join(stateDir, "default-runtime")
 	data, err := statepath.ReadTrusted(path, 256)
 	if err != nil {
-		if statepath.IsUntrusted(err) {
-			return "", "ignoring the default runtime in " + err.Error()
+		var untrusted *statepath.UntrustedError
+		if errors.As(err, &untrusted) {
+			return "", "ignoring the default runtime: " + untrustedSubject(untrusted, path) + " " + untrusted.Reason
 		}
 		return "", "" // absent or unreadable: no default, nothing to report
 	}

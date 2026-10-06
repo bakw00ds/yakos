@@ -449,7 +449,10 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   every unpinned dispatch to a vendor. It is now read only as a regular file
   owned by you, not group or world writable, in a directory with the same
   properties and not a symlink; otherwise it is reported and ignored. Matters
-  where the state directory falls back to the shared temp directory. Both
+  where the state directory falls back to the shared temp directory. The warning
+  names the file or the directory by role and carries no path, and `yakos doctor
+  --policy` reports that same warning word for word, looking in the directory
+  dispatch looks in, the temp-directory fallback included. Both
   writers of the file (`yakos auth set-default` in bash and in Go) now create
   it 0600 whatever the umask and repair a group-writable one, so a umask of 002
   no longer produces a file the dispatcher refuses.
@@ -643,8 +646,11 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   agents or starts python, runs python under `env -u` for the same OAuth
   variables (names matched in any letter case), and `claude-sdk-dispatch.py`
   repeats the check (exit 78). The claude
-  CLI adapters, `launch` and `yakos start --runtime claude-sdk` are unchanged and
-  still forward `CLAUDE_CODE_OAUTH_TOKEN`, because they run Claude Code.
+  CLI adapters, `launch` and `yakos start --runtime claude-sdk` still forward
+  `CLAUDE_CODE_OAUTH_TOKEN`, because they run Claude Code. The one change to
+  `yakos start --runtime claude-sdk` is its auth hint: the warning and the banner
+  in both CLIs now say `yakos auth login claude`, because start launches Claude
+  Code and `yakos auth login claude-sdk` no longer logs anything in.
   `yakos auth` no longer says the claude login covers claude-sdk: `status`
   reports whether `ANTHROPIC_API_KEY` is set (never its value) and that the SDK
   engine does not use the claude login, `login` says how to set the key and
