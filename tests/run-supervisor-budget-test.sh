@@ -91,6 +91,11 @@ fakecli() {
     printf '#!/bin/sh\nif [ "$1" = budget ]; then\n%s\nfi\nprintf "run\\n" >> "%s/runs"\n' "$2" "$1" > "$1/bin/fakeyakos"
     chmod +x "$1/bin/fakeyakos"
 }
+# oldcli <sandbox>: make the sandbox's CLI one built before the read_failed field existed: the real CLI, with that field
+# (and nothing else) removed from its JSON, and its exit status kept.
+oldcli() {
+    fakecli "$1" "o=\"\$(\"$GO_BINARY\" \"\$@\")\"; rc=\$?; printf '%s\\n' \"\$o\" | jq -c 'del(.read_failed)'; exit \$rc"
+}
 # settle: wait for the wrapper of the last fired hook to finish (its in-flight marker clears; the
 # wrapper's own log records are written before that), instead of a blind 0.4 s that a slow runner
 # outran: the twin-log comparison below then saw the wrapper's records on one side only (K-128).
@@ -233,7 +238,7 @@ done
 jqshim="$TMP/jqshim"; mkdir -p "$jqshim"
 printf '#!/bin/sh\nfor a in "$@"; do case "$a" in *limit_usd*) exit 1 ;; esac; done\nexec "%s" "$@"\n' "$(command -v jq)" > "$jqshim/jq"
 chmod +x "$jqshim/jq"
-for spec in 'silent|exit 1|no_output' 'garbage|echo not-json; exit 4|parse' 'notbudget|echo "{}"; exit 0|parse' \
+for spec in 'silent|exit 1|no_output' 'crashed|kill -KILL $$|no_output' 'garbage|echo not-json; exit 4|parse' 'notbudget|echo "{}"; exit 0|parse' \
             'readfailed|echo "{\"state\":\"ok\",\"spent_usd\":0,\"limit_usd\":100,\"stop_usd\":200,\"read_failed\":true}"; exit 0|read_error' \
             'panicjson|echo "{\"agent\":\"supervisor\",\"read_failed\":true}"; exit 0|read_error'; do
     name="${spec%%|*}"; rest="${spec#*|}"; body="${rest%%|*}"; cause="${rest#*|}"
@@ -251,6 +256,42 @@ fakecli "$sb" 'echo "{\"state\":\"hard_stop\",\"spent_usd\":100,\"limit_usd\":10
 fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
 if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && logs "$sb" | grep -q 'budget exhausted; skipping this routine' && [ -z "$(unavail "$sb")" ]; then ok "(10) bash the notice on stderr is not a read failure: a hard stop in the JSON is refused, nothing logged as unavailable"
 else bad "(10) bash stderr notice: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")] (a launch here means stderr text was taken for a failed read)"; fi
+# A hard stop in the JSON refuses whatever the exit status: the real CLI exits 4 there, and any other non-zero status (a
+# wrapper, a shell that reports its own) must not turn a printed answer into "the read failed".
+HSJSON='echo "{\"state\":\"hard_stop\",\"spent_usd\":100,\"limit_usd\":100,\"stop_usd\":200}"'
+for spec in "hs-exit4|$HSJSON; exit 4" "hs-exit1|$HSJSON; exit 1"; do
+    name="${spec%%|*}"; body="${spec#*|}"
+    sb="$(mksb "refuse-$name-bash" 100 0)"; fakecli "$sb" "$body"
+    fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && logs "$sb" | grep -q 'budget exhausted; skipping this routine' && [ -z "$(unavail "$sb")" ]; then ok "(10) bash a hard stop in the JSON refuses ($name): the printed answer decides, whatever the exit status"
+    else bad "(10) bash $name: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")] (a launch here means the exit status overrode the JSON)"; fi
+done
+# "read_failed": false is an ordinary read (only true is the CLI's word that it could not read): it launches, silently.
+sb="$(mksb "readfalse-bash" 100 0)"
+fakecli "$sb" 'echo "{\"state\":\"ok\",\"spent_usd\":0,\"limit_usd\":100,\"stop_usd\":200,\"read_failed\":false}"; exit 0'
+fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
+if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ] && ! logs "$sb" | grep -qi budget; then ok "(10) bash read_failed false is an ordinary read: launched, nothing logged as unavailable"
+else bad "(10) bash read_failed false: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
+# An older CLI, built before the read_failed field existed, is a normal CLI: the absence of the signal is a normal read, so the
+# new hook still works with it (oldcli: the real CLI minus that field). Healthy launches, the hard stop refuses, and so
+# does sec-327's probe; an unreadable spend log is simply not reported by bash then (it cannot be: the old CLI says nothing
+# structured), so it launches without a WARN, which is the documented trade-off. The Go twin does not use the CLI.
+sb="$(mksb "oldcli-ok-bash" 100 0)"; oldcli "$sb"
+fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
+if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ] && ! logs "$sb" | grep -qi budget; then ok "(10) bash with an older CLI a healthy budget launches, silently"
+else bad "(10) bash older CLI, healthy: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
+sb="$(mksb "oldcli-hard-bash" 100 100)"; oldcli "$sb"
+fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
+if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && logs "$sb" | grep -q 'budget exhausted; skipping this routine' && [ -z "$(unavail "$sb")" ]; then ok "(10) bash with an older CLI the hard stop still refuses"
+else bad "(10) bash older CLI, hard stop: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
+sb="$(mksb "oldcli-spoof-bash" 100 100 $'agent_budgets:\n  "(failing open)": 1\n  "(failing open)": 2\n')"; oldcli "$sb"
+fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
+if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && logs "$sb" | grep -q 'budget exhausted; skipping this routine' && [ -z "$(unavail "$sb")" ]; then ok "(10) bash with an older CLI the project probe still refuses"
+else bad "(10) bash older CLI, spoof: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
+sb="$(mksb "oldcli-unread-bash" 100 0)"; mkdir "$sb/state/dispatch-log.ndjson"; oldcli "$sb"
+fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
+if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ] && ! logs "$sb" | grep -qi budget; then ok "(10) bash with an older CLI an unreadable spend log is not reported (no signal, an ordinary read): launched, no WARN"
+else bad "(10) bash older CLI, unreadable log: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
 # a failing jq (the CLI is healthy, its answer cannot be read)
 sb="$(mksb "unavail-jqfail-bash" 100 0)"
 env PATH="$jqshim:$PATH" YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/bin/fakeyakos" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" \
@@ -279,6 +320,25 @@ for side in bash go; do
     fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
     if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && logs "$sb" | grep -q 'budget exhausted; skipping this routine' && [ -z "$(unavail "$sb")" ]; then ok "(10) $side project text that spells the CLI's notice is not a read failure: refused at the hard stop, nothing logged as unavailable"
     else bad "(10) $side spoof: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")] refusals=$(logs "$sb" | grep -c 'budget exhausted; skipping this routine')"; fi
+    # The same probe with the repeated key being the agent's own name, `supervisor`, and the notice only in a comment (the YAML
+    # error echoes the key, not the comment): refused again. And the control with no trick at all: refused too. All three
+    # variants are in the twin comparison (9): bash and Go write identical records for each.
+    sb="$(mksb "spoofsup-$side" 100 100 $'agent_budgets:\n  supervisor: 1\n  supervisor: 2   # yakos budget check: x (failing open)\n')"
+    if [ "$side" = bash ]; then
+        _pre="$(YAKOS_DISPATCH_LOG="$sb/state" "$GO_BINARY" budget check supervisor --project "$sb" --json 2>&1 >/dev/null)"
+        case "$_pre" in
+            *'(failing open)'*) bad "(10) the repeated-supervisor sandbox echoes the comment on stderr: it is not a comment-only probe: $_pre" ;;
+            *'already defined'*) ok "(10) the repeated-supervisor sandbox makes the real CLI warn on stderr, without the comment's words" ;;
+            *) bad "(10) the repeated-supervisor sandbox makes the real CLI print no warning: the probe would be vacuous: $_pre" ;;
+        esac
+    fi
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && logs "$sb" | grep -q 'budget exhausted; skipping this routine' && [ -z "$(unavail "$sb")" ]; then ok "(10) $side a repeated supervisor budget key with the notice only in a comment: refused at the hard stop, nothing logged as unavailable"
+    else bad "(10) $side repeated supervisor key: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")] refusals=$(logs "$sb" | grep -c 'budget exhausted; skipping this routine')"; fi
+    sb="$(mksb "spoofctl-$side" 100 100)"
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && logs "$sb" | grep -q 'budget exhausted; skipping this routine' && [ -z "$(unavail "$sb")" ]; then ok "(10) $side the control, a plain project config at the hard stop: refused, nothing logged as unavailable"
+    else bad "(10) $side control: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
     # a CLI that prints nothing and exits 0 has no budget to report (the stub the other suites use): not a failure
     sb="$(mksb "stub-$side" 100 0)"; fakecli "$sb" "exit 0"
     fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
@@ -303,7 +363,7 @@ cmp_norm() { # cmp_norm <sandbox>
     echo '-- the wrapper records, as a set --'
     logs "$1" | jq -c 'select(has("session_id") | not) | del(.ts, .duration_s)' 2>&1 | sort
 }
-for scen in routine high ceil warn proj quiet flags unread off stub spoof; do
+for scen in routine high ceil warn proj quiet flags unread off stub spoof spoofsup spoofctl; do
     b="$(cmp_norm "$TMP/$scen-bash")"
     g="$(cmp_norm "$TMP/$scen-go")"
     if [ -n "$b" ] && [ "$b" = "$g" ]; then ok "(9) $scen hook-log records are byte-identical across twins"; else
