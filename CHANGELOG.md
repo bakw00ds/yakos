@@ -485,7 +485,24 @@ subscription harness or a local model; see UPGRADING.md.
   YAML and the bash one with a line scan, and every name either arrives at counts.
   `yakos budget status` and `doctor` list the renamed agent when run in the
   project, and `yakos budget reset` takes `--project`. The model ceiling is keyed
-  on the agent name alone and does not follow a rename.
+  on the agent name alone and does not follow a rename (K-139), and the renamed
+  agent has its own spend counter (K-160).
+
+- **A malformed limit in the budget policy no longer switches a built-in budget
+  off (K-136).** A negative, NaN or infinite `limit_usd`, or a `limit_tokens` that
+  was negative or above 2^50, resolved to 0, which is "off", so a typo or a corrupt
+  edit removed the supervisor's or the librarian's built-in limit, the one a
+  subscription operator relies on. Such a value is now ignored with a warning and
+  the limit it would have replaced, the built-in or the global default's, stays.
+  `0` still turns a limit off on purpose.
+
+- **A summary that arrives as an interactive session closes no longer races the
+  dispatch (K-136).** The chunk callback of an interactive chat dispatch runs on
+  the engine's read loop, and neither engine waits for that loop before it signals
+  the close, so a late summary could write the dispatch's exit code while the
+  dispatch goroutine read it to publish `fleet.finished`; `go test -race` reported
+  it in CI. The outcome now has a lock of its own, for the CLI and the Agent SDK
+  engine alike (their callback is the same closure).
 
 - **`yakos doctor` reports token budgets in tokens (K-136).** At a token stop it
   printed `$0.00 of $100.00` and recommended the dollar form of the budget

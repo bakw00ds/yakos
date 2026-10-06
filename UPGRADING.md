@@ -141,6 +141,11 @@ What changes for you:
   `yakos` binary and refresh the hooks (`yakos refresh`) together: the bash hook
   reads the token fields from the binary, and an older binary that prints none
   leaves the gate dollar-only.
+- **A malformed limit in the policy file is now ignored, not read as "off".** A
+  negative, NaN or infinite `limit_usd`, or a `limit_tokens` that is negative or
+  above 2^50, used to resolve to 0 and so switch the limit off, including a
+  built-in one. It is now ignored with a warning and the limit it would have
+  replaced stays. To turn a limit off, set it to `0`.
 - **A project can rename its supervisor and keep its budget.** The agent a
   project names as its supervisor (`supervisor: agent:` in `.yakos.yml`) now has
   the supervisor's budget under that name, including whatever you set for

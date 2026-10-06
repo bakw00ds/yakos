@@ -219,6 +219,13 @@ default, then `default:`, otherwise off. The two limits resolve independently, s
 an entry may set one and inherit the other. A project cannot set a token limit
 (`agent_budgets:` is dollars only), so only this file can.
 
+A value in the file that is out of range is ignored with a warning, and the limit
+it would have replaced stays, so a typo or a corrupt edit cannot switch a built-in
+budget off. Out of range is a dollar limit that is negative, NaN or infinite, and a
+token limit that is negative or above 2^50 (about 10^15). `0` is how you turn a
+limit off, on purpose. The warning is printed by `yakos budget check` and on stderr
+before a dispatch, and `status --json` carries it in `warnings`.
+
 ## Projects may only lower a limit
 
 A project `.yakos.yml` can carry:
@@ -250,9 +257,11 @@ its supervisor and cannot escape those limits, which would otherwise let a
 committed file lift them. An entry in the user-level file under the new name still
 wins for the limit it sets. Both hooks read the name (the Go hook as YAML, the bash
 hook with a line scan), and every name either of them arrives at is treated as the
-supervisor. The renamed agent has its own spend counter, and `status` and `doctor`
-list it when run in the project. The model ceiling below is keyed on the agent name
-alone, so a renamed supervisor does not get the supervisor's `sonnet` ceiling.
+supervisor. The renamed agent has its own spend counter (K-160 tracks counting spend
+against the supervisor role instead of the name), and `status` and `doctor` list it
+when run in the project. The model ceiling below is keyed on the agent name alone, so
+a renamed supervisor does not get the supervisor's `sonnet` ceiling (K-139 passes the
+project to the ceiling).
 
 ## Model ceiling
 
