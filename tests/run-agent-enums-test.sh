@@ -9,9 +9,10 @@
 #   model-policy                must be a model tier (haiku|sonnet|opus|fable)
 #   agent file                  must be one the Go dispatcher reads: no line of 1 MiB or
 #                               more, at most 4 MiB, a symlink that resolves to a
-#                               regular file inside the framework lib/ or the project,
-#                               and an extends: that is a bare agent id (sec-324; the
-#                               second fixture project below)
+#                               regular file inside the framework lib/agents or the
+#                               project's .claude/agents (not the project's .env or
+#                               .git/config), and an extends: that is a bare agent id
+#                               (sec-324; the second fixture project below)
 #
 # Asserts on both implementations (Go half only when bin/yakos exists), that
 # their findings are byte-identical, and that the shipped framework agents pass
@@ -74,11 +75,11 @@ fi
 # Compose leaves out a file with a line of 1048576 bytes or more (a carriage return
 # before the newline counts), a file over 4194304 bytes, anything that is not a
 # regular file, and a symlink that does not end at a regular file inside the
-# framework lib/ or the project. validate reports each as an error, and both twins
+# framework lib/agents or the project's .claude/agents. validate reports each as an error, and both twins
 # print the same text. The bash twin measures lines with awk and cannot call the Go
 # code, so the edges of the line bound are in the fixture: a line of the bound is
 # refused, one byte less is not, with LF and CRLF and as the last line of a file.
-Q="$TMP/proj2"; A="$Q/.claude/agents"; mkdir -p "$A" "$Q/shared" "$TMP/outside"
+Q="$TMP/proj2"; A="$Q/.claude/agents"; mkdir -p "$A/sub" "$Q/shared" "$Q/.git" "$TMP/outside"
 head5()    { printf -- '---\nid: %s\nrole: specialist\n---\n# %s\n' "$1" "$1"; }
 longline() { head -c "$1" /dev/zero | tr '\0' 'a'; }
 { head5 good;       printf '%s\n' "$filler"; } > "$A/good.md"
@@ -90,7 +91,10 @@ longline() { head -c "$1" /dev/zero | tr '\0' 'a'; }
 { head5 tail-bound; printf '%s\n' "$filler"; longline 1048576; } > "$A/tail-bound.md"
 # 5 MiB in lines each one byte under the bound, so only the size cap can refuse it.
 { head5 big; printf '%s\n' "$filler"; for _i in 1 2 3 4 5; do longline 1048575; printf '\n'; done; } > "$A/big.md"
-{ head5 shared; printf '%s\n' "$filler"; } > "$Q/shared/shared.md"
+{ head5 shared; printf '%s\n' "$filler"; } > "$Q/shared/shared.md"      # in the project, not in .claude/agents
+{ head5 inner;  printf '%s\n' "$filler"; } > "$A/sub/shared.md"          # inside the agent directory
+printf 'OPENAI_API_KEY=sk-TOPSECRET-1234\n' > "$Q/.env"
+printf '[remote "origin"]\n\turl = https://user:TOKEN-9999@example.com/x.git\n' > "$Q/.git/config"
 # extends: is a bare agent id. The value is shown as the dispatcher's warning shows
 # it, so non-ASCII bytes and a long value are in the fixture on purpose. (A tab is
 # not: PyYAML rejects one in a plain scalar and Go's parser does not, which is a
@@ -102,7 +106,11 @@ for ext in 'ext-up|../outside' 'ext-abs|/etc/passwd' 'ext-sub|sub/dir' 'ext-dot|
 done
 { head5 outside; printf '%s\n' "$filler"; } > "$TMP/outside/outside.md"
 links=1
-ln -s ../../shared/shared.md "$A/inproject.md"            2>/dev/null || links=0   # inside the project: accepted
+ln -s sub/shared.md "$A/inproject.md"                     2>/dev/null || links=0   # inside .claude/agents: accepted
+ln -s ../../shared/shared.md "$A/otherfile.md"            2>/dev/null || links=0   # a project file that is not an agent
+ln -s ../../.env "$A/dotenv.md"                           2>/dev/null || links=0   # the project's .env
+ln -s ../../.git/config "$A/gitcfg.md"                    2>/dev/null || links=0   # the project's .git/config
+ln -s "$REPO_ROOT/lib/rules/INDEX.md" "$A/libother.md"    2>/dev/null || links=0   # in the framework's lib/, not in lib/agents
 ln -s "$REPO_ROOT/lib/agents/architect.md" "$A/inlib.md" 2>/dev/null || links=0    # the installed layout: accepted
 ln -s ../../nowhere.md "$A/ghost.md"                      2>/dev/null || links=0   # dangling
 ln -s "$Q/shared" "$A/dirlink.md"                         2>/dev/null || links=0   # a directory
@@ -123,8 +131,13 @@ for side in $sides; do
         want_err "$out" "agents/ghost.md: symlink does not resolve to a regular file; $SKIP"    "$side: a dangling symlink is rejected"
         want_err "$out" "agents/dirlink.md: symlink does not resolve to a regular file; $SKIP"  "$side: a symlink to a directory is rejected"
         want_err "$out" "agents/pipelink.md: symlink does not resolve to a regular file; $SKIP" "$side: a symlink to a FIFO is rejected"
-        want_err "$out" "agents/leak.md: symlink resolves outside the framework lib/ and the project directory; $SKIP" "$side: a symlink outside the roots is rejected"
-        want_n=14
+        OUTSIDE="symlink resolves outside the framework lib/agents and the project's .claude/agents; $SKIP"
+        want_err "$out" "agents/leak.md: $OUTSIDE"      "$side: a symlink outside the roots is rejected"
+        want_err "$out" "agents/otherfile.md: $OUTSIDE" "$side: a link to another file of the project is rejected"
+        want_err "$out" "agents/dotenv.md: $OUTSIDE"    "$side: a link to the project's .env is rejected"
+        want_err "$out" "agents/gitcfg.md: $OUTSIDE"    "$side: a link to the project's .git/config is rejected"
+        want_err "$out" "agents/libother.md: $OUTSIDE"  "$side: a link to a framework file outside lib/agents is rejected"
+        want_n=18
     else
         want_n=10   # no symlinks or FIFOs here (the file system refused them)
     fi
@@ -138,8 +151,9 @@ for side in $sides; do
     if printf '%s' "$out" | grep -Eq "agents/(good|under|crlf-under|tail-under|inproject|inlib|ext-ok|ext-ok2)\.md"; then
         bad "$side: an agent file the dispatcher reads was flagged"; printf '%s\n' "$out" | grep -E 'agents/(good|under|crlf-under|tail-under|inproject|inlib|ext-ok|ext-ok2)\.md' | head -3
     else
-        ok "$side: lines under the bound, links inside the project and the framework lib, and a good file are clean"
+        ok "$side: lines under the bound, links inside the agent directories, and a good file are clean"
     fi
+    if printf '%s' "$out" | grep -q 'TOPSECRET\|TOKEN-9999'; then bad "$side: text of the project's own files was printed"; else ok "$side: nothing from the project's .env or .git/config is printed"; fi
     printf '%s' "$out" | grep -q "Summary: $want_n error(s), 0 warning(s)" && ok "$side: exactly $want_n errors for the agent-file fixture" \
         || bad "$side: wrong error count for the agent-file fixture: $(printf '%s' "$out" | grep Summary)"
     printf '%s' "$out" > "$TMP/out2-$side.txt"

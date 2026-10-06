@@ -156,8 +156,9 @@ type ComposedAgent struct {
 // body alone.
 //
 // Files are read by readAgentFile (see agentfile.go): a symlink is followed only
-// to a regular file inside the framework's lib/ or the project directory,
-// anything that is not a regular file is skipped unopened, and a file over
+// to a regular file inside the framework's lib/agents or the project's
+// .claude/agents, anything that is not a regular file is skipped unopened, and a
+// file over
 // MaxAgentFileBytes is skipped. Each is a skip with the same once-per-file
 // warning, and so is any failure to read a file in the project directory. Only
 // a failure to read a framework file is an error.
@@ -175,7 +176,7 @@ func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 	index := make(map[string]ComposedAgent)
 	var order []string // tracks insertion order for stable output
 
-	roots := AgentFileRoots(yakosRoot, project)
+	rules := agentRules(yakosRoot, project)
 
 	addDir := func(dir string, fromProject bool) error {
 		entries, err := os.ReadDir(dir)
@@ -207,7 +208,7 @@ func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 				continue
 			}
 
-			data, skip, readErr := readAgentFile(path, roots)
+			data, skip, readErr := readAgentFile(path, rules)
 			switch {
 			case skip != "":
 				warnSkippedAgentFile(path, skip)
@@ -221,7 +222,7 @@ func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 				return fmt.Errorf("agentscompose: parse %s: read: %w", path, readErr)
 			}
 
-			agent, err := parseAgentContent(yakosRoot, id, string(data), roots)
+			agent, err := parseAgentContent(yakosRoot, id, string(data), rules)
 			var tooLong *lineTooLongError
 			var skipped *skipAgentError
 			switch {
@@ -284,7 +285,7 @@ func warnSkippedFile(kind, path, reason string) {
 
 // parseAgentContent parses and resolves the content of a single agent .md file.
 // The file is read by readAgentFile, which is where what may be read is decided.
-func parseAgentContent(yakosRoot, id, content string, roots []string) (ComposedAgent, error) {
+func parseAgentContent(yakosRoot, id, content string, rules fileRules) (ComposedAgent, error) {
 	fm, body, err := splitFrontmatter(content)
 	if err != nil {
 		return ComposedAgent{}, err
@@ -302,7 +303,7 @@ func parseAgentContent(yakosRoot, id, content string, roots []string) (ComposedA
 			return ComposedAgent{}, &skipAgentError{reason: fmt.Sprintf("extends value %s is not a bare agent id (%s)", DisplayValue(extendsName), BareIDRule)}
 		}
 		fwFile := filepath.Join(yakosRoot, "lib", "agents", extendsName+".md")
-		template, skip, readErr := readAgentFile(fwFile, roots)
+		template, skip, readErr := readAgentFile(fwFile, rules)
 		switch {
 		case errors.Is(readErr, fs.ErrNotExist):
 			// If the framework file doesn't exist, use the project body alone
@@ -616,8 +617,9 @@ type ComposedSkill struct {
 // one that may not be read is skipped with the same once-per-file warning, so a
 // bad entry, and a cloned repository controls the project's, does not take the
 // whole listing with it. That covers a symlink that does not end at a regular
-// file inside the framework's lib/ or the project directory, an entry that is not
-// a regular file, a file over MaxAgentFileBytes, a line over the bound, and a
+// file inside the framework's lib/skills or the project's .claude/skills, an
+// entry that is not a regular file, a file over MaxAgentFileBytes, a line over the
+// bound, and a
 // failure to read a file in the project directory. Only a failure to read a
 // framework file is an error. A skill directory without a SKILL.md is skipped
 // silently, as before.
@@ -631,7 +633,7 @@ func ComposeSkills(yakosRoot, project string) ([]ComposedSkill, error) {
 		}
 	}
 
-	roots := AgentFileRoots(yakosRoot, project)
+	rules := skillRules(yakosRoot, project)
 
 	// index by slug; source tracks whether it came from framework or project.
 	type entry struct {
@@ -654,7 +656,7 @@ func ComposeSkills(yakosRoot, project string) ([]ComposedSkill, error) {
 			}
 			slug := e.Name()
 			skillPath := filepath.Join(dir, slug, "SKILL.md")
-			data, skip, readErr := readAgentFile(skillPath, roots)
+			data, skip, readErr := readAgentFile(skillPath, rules)
 			switch {
 			case errors.Is(readErr, fs.ErrNotExist):
 				continue // dir exists but no SKILL.md — skip silently

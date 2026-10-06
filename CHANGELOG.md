@@ -450,8 +450,12 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   dangling link or a link to a directory emptied the roster, a link to a FIFO
   blocked it for good, and a link to `/dev/zero` would have used up the daemon's
   memory. A symlinked agent file is now followed only to a regular file inside
-  the framework's `lib/` or the project directory, so the per-file links an
-  install makes into `lib/agents` keep working. Anything else that is not a
+  the framework's `lib/agents` or the project's `.claude/agents`, so the per-file
+  links an install makes into `lib/agents` keep working. The roots are those
+  directories and not the project or `lib/` around them, because the project
+  holds files that are not agents: a link to the project's own `.env` or
+  `.git/config` would otherwise have become the persona and gone to the vendor
+  (rev-324). Anything else that is not a
   regular file is skipped without being opened, a file over 4 MiB is skipped,
   and the read itself is bounded. Each is skipped with the same once-per-file
   warning that names the file, and so is any failure to read a file in the
@@ -463,7 +467,7 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   symlinked `SKILL.md` wherever it led, and one that pointed at a directory failed
   the whole listing, which the console served as an empty one. A `SKILL.md` is now
   read under the rules for an agent file: a symlink only to a regular file inside
-  the framework's `lib/` or the project directory, nothing that is not a regular
+  the framework's `lib/skills` or the project's `.claude/skills`, nothing that is not a regular
   file, nothing over 4 MiB, no line of 1 MiB or more, and a failure to read a file
   in the project directory is a skip. Each is skipped with a once-per-file
   warning that names the file, and the rest of the listing is served. A framework
@@ -478,7 +482,7 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   value must now be a bare agent id: 1 to 128 of letters, digits, `.`, `_` and
   `-`, starting with a letter or digit, with no `..`. The template is read from
   `lib/agents` under the same rules as an agent file, so one that is a symlink
-  out of the framework's `lib/` and the project directory, or not a regular
+  out of `lib/agents` and the project's `.claude/agents`, or not a regular
   file, is refused. A bad value or an unsafe template skips that agent with a
   once-per-file warning that names the file and the value, and does not fail the
   roster. A missing template still means the agent's own body alone, and a
@@ -495,8 +499,8 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   could not see it. The bash and the Go validator now both report, with the same
   text, an agent file with a line of 1 MiB or more, a file over 4 MiB, an entry
   that is not a regular file, a symlink that does not end at a regular file
-  inside the framework's `lib/` or the project directory, and an `extends:` that
-  is not a bare agent id. The bash validator also
+  inside the framework's `lib/agents` or the project's `.claude/agents`, and an
+  `extends:` that is not a bare agent id. The bash validator also
   checks the `runtime` and `model-policy` of an agent reached through a symlink
   it accepts, as the Go one always did. The Go validator no longer reads a symlink
   to a FIFO or a device in any pass over agent files, where it would have blocked

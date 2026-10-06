@@ -6,13 +6,16 @@ package agentscompose
 // composes the roster from it on every request, so the roster reader does not
 // read a directory entry blindly:
 //
-//   - A symlink is followed only to a regular file inside the framework's lib/
-//     or the project directory. A link to ~/.aws/credentials would otherwise
-//     become an agent's persona, its first line the description /api/skills
-//     hands to every reader, and the whole file text what the model vendor is
-//     sent as the system prompt. Installed layouts keep working: the per-file
-//     links in a project's .claude/agents that point into lib/agents resolve
-//     inside lib/.
+//   - A symlink is followed only to a regular file inside the framework's
+//     lib/agents or the project's .claude/agents (lib/skills and .claude/skills
+//     for a SKILL.md). A link to ~/.aws/credentials, or to the project's own
+//     .env or .git/config, would otherwise become an agent's persona, its first
+//     line the description /api/skills hands to every reader, and the whole file
+//     text what the model vendor is sent as the system prompt. The roots are
+//     those directories, not the project or lib/ around them, because the
+//     project holds files that are not agents. Installed layouts keep working:
+//     the per-file links in a project's .claude/agents that point into
+//     lib/agents resolve inside it.
 //   - An entry that is not a regular file is skipped without being opened. A
 //     FIFO blocks open(2) for good, and a device such as /dev/zero never ends.
 //   - A file over MaxAgentFileBytes is skipped, and the read itself is bounded,
@@ -49,8 +52,8 @@ const (
 	// ProblemUnresolved: a symlink that does not end at a regular file. It is
 	// dangling, loops, or points at a directory or a special file.
 	ProblemUnresolved
-	// ProblemOutside: a symlink to a regular file outside the framework's lib/
-	// and the project directory.
+	// ProblemOutside: a symlink to a regular file outside the agent directories
+	// (AgentFileRoots), or outside the skill directories for a SKILL.md.
 	ProblemOutside
 	// ProblemNotRegular: the entry is neither a regular file nor a symlink, for
 	// example a FIFO, a socket or a device.
@@ -59,13 +62,37 @@ const (
 	ProblemTooLarge
 )
 
+// AgentOutsideReason and SkillOutsideReason are what is said of a symlink that
+// leaves the directories it may lead into. The bash twin prints the agent one,
+// byte for byte, and the tests compare them.
+const (
+	AgentOutsideReason = "symlink resolves outside the framework lib/agents and the project's .claude/agents"
+	SkillOutsideReason = "symlink resolves outside the framework lib/skills and the project's .claude/skills"
+)
+
+// fileRules say where a symlink may lead, and what is said when it leads
+// elsewhere. There is one set for agent files and extends templates and one for
+// SKILL.md.
+type fileRules struct {
+	roots   []string
+	outside string
+}
+
+func agentRules(yakosRoot, project string) fileRules {
+	return fileRules{roots: AgentFileRoots(yakosRoot, project), outside: AgentOutsideReason}
+}
+
+func skillRules(yakosRoot, project string) fileRules {
+	return fileRules{roots: SkillFileRoots(yakosRoot, project), outside: SkillOutsideReason}
+}
+
 // warning is the reason Compose gives when it skips the file.
-func (p Problem) warning() string {
+func (p Problem) warning(outside string) string {
 	switch p {
 	case ProblemUnresolved:
 		return "symlink does not resolve to a regular file"
 	case ProblemOutside:
-		return "symlink resolves outside the framework lib/ and the project directory"
+		return outside
 	case ProblemNotRegular:
 		return "not a regular file"
 	case ProblemTooLarge:
@@ -74,15 +101,30 @@ func (p Problem) warning() string {
 	return ""
 }
 
-// AgentFileRoots returns the directories a symlinked agent file may resolve into:
-// the framework's lib/ and, when there is one, the project directory.
+// AgentFileRoots returns the directories a symlinked agent file, or an extends
+// template, may resolve into: the framework's lib/agents and, when there is a
+// project, its .claude/agents. A file anywhere else in either tree is not an agent
+// file, so a link to it is not followed.
 func AgentFileRoots(yakosRoot, project string) []string {
 	var roots []string
 	if yakosRoot != "" {
-		roots = append(roots, filepath.Join(yakosRoot, "lib"))
+		roots = append(roots, filepath.Join(yakosRoot, "lib", "agents"))
 	}
 	if project != "" {
-		roots = append(roots, project)
+		roots = append(roots, filepath.Join(project, ".claude", "agents"))
+	}
+	return roots
+}
+
+// SkillFileRoots is AgentFileRoots for a SKILL.md: lib/skills and the project's
+// .claude/skills.
+func SkillFileRoots(yakosRoot, project string) []string {
+	var roots []string
+	if yakosRoot != "" {
+		roots = append(roots, filepath.Join(yakosRoot, "lib", "skills"))
+	}
+	if project != "" {
+		roots = append(roots, filepath.Join(project, ".claude", "skills"))
 	}
 	return roots
 }
@@ -151,13 +193,13 @@ func insideRoots(resolved string, roots []string) bool {
 // readAgentFile reads the agent file at path when InspectAgentFile allows it. A
 // non-empty skip is the reason to leave the file out, and err is an I/O failure
 // on a file that was allowed.
-func readAgentFile(path string, roots []string) (data []byte, skip string, err error) {
-	problem, err := InspectAgentFile(path, roots)
+func readAgentFile(path string, rules fileRules) (data []byte, skip string, err error) {
+	problem, err := InspectAgentFile(path, rules.roots)
 	if err != nil {
 		return nil, "", err
 	}
 	if problem != ProblemNone {
-		return nil, problem.warning(), nil
+		return nil, problem.warning(rules.outside), nil
 	}
 	f, err := os.Open(path) //nolint:gosec // inspected just above
 	if err != nil {
@@ -167,7 +209,7 @@ func readAgentFile(path string, roots []string) (data []byte, skip string, err e
 	if fi, err := f.Stat(); err != nil {
 		return nil, "", err
 	} else if !fi.Mode().IsRegular() {
-		return nil, ProblemNotRegular.warning(), nil // swapped between the two looks
+		return nil, ProblemNotRegular.warning(""), nil // swapped between the two looks
 	}
 	// One byte past the cap, to tell "exactly the cap" from "more".
 	data, err = io.ReadAll(io.LimitReader(f, MaxAgentFileBytes+1))
@@ -175,7 +217,7 @@ func readAgentFile(path string, roots []string) (data []byte, skip string, err e
 		return nil, "", err
 	}
 	if len(data) > MaxAgentFileBytes {
-		return nil, ProblemTooLarge.warning(), nil
+		return nil, ProblemTooLarge.warning(""), nil
 	}
 	return data, "", nil
 }

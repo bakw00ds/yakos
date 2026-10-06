@@ -180,9 +180,14 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 		return
 	}
 
+	// A symlinked agent file may resolve into lib/agents, and in project mode into
+	// the project's .claude/agents: Compose's roots. Every pass over agent files
+	// skips a link outside them, and checkAgentEnums reports it.
+	roots := agentRootsFor(cfg, base)
+
 	// ADR-0009 guards. Silent when clean so validate's output stays
 	// line-identical to the bash implementation on a healthy tree.
-	checkDecisionGuards(r, w, base)
+	checkDecisionGuards(r, w, base, roots)
 
 	nAgents := countDirFiles(filepath.Join(base, "agents"), "*.md")
 	nSkills := countDirFiles(filepath.Join(base, "skills"), "SKILL.md")
@@ -195,7 +200,7 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 	}
 
 	// Validate frontmatter for agents, skills, and rules (excluding README/INDEX).
-	files := collectMDFiles(base)
+	files := collectMDFiles(base, roots)
 	for _, f := range files {
 		if _, err := parseFrontmatter(f); err != nil {
 			r.addErr(w, fmt.Sprintf("%s: bad YAML frontmatter", f))
@@ -224,12 +229,7 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 	}
 
 	// Agent frontmatter enums: runtime / runtime-fallback / model-policy, and the
-	// agent files the Go dispatcher would skip. A symlink may resolve into the
-	// framework's lib/, and into the project directory in project mode.
-	roots := agentscompose.AgentFileRoots(cfg.YakosRoot, "")
-	if label == "project" {
-		roots = agentscompose.AgentFileRoots(cfg.YakosRoot, filepath.Dir(base))
-	}
+	// agent files the Go dispatcher would skip.
 	checkAgentEnums(cfg, r, w, base, roots)
 
 	// Line budget warnings
@@ -244,7 +244,7 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 
 // collectMDFiles returns agent .md, skills SKILL.md, and rules .md files under
 // base, excluding README.md and INDEX.md.  Files are sorted for stable output.
-func collectMDFiles(base string) []string {
+func collectMDFiles(base string, roots []string) []string {
 	var files []string
 
 	// agents/*.md (not README.md)
@@ -255,7 +255,7 @@ func collectMDFiles(base string) []string {
 				return nil
 			}
 			name := de.Name()
-			if strings.HasSuffix(name, ".md") && name != "README.md" && readableAgentFile(p) {
+			if strings.HasSuffix(name, ".md") && name != "README.md" && readableAgentEntry(p, roots) {
 				files = append(files, p)
 			}
 			return nil
@@ -335,12 +335,13 @@ func isValidJSON(path string) bool {
 // ---- line budget checks -----------------------------------------------------
 
 func checkLineBudgets(cfg Config, r *Result, w io.Writer, base string) {
+	agentRoots := agentRootsFor(cfg, base)
 	agentsDir := filepath.Join(base, "agents")
 	_ = filepath.WalkDir(agentsDir, func(p string, de fs.DirEntry, err error) error {
 		if err != nil || de.IsDir() {
 			return nil
 		}
-		if !strings.HasSuffix(de.Name(), ".md") || de.Name() == "README.md" || !readableAgentFile(p) {
+		if !strings.HasSuffix(de.Name(), ".md") || de.Name() == "README.md" || !readableAgentEntry(p, agentRoots) {
 			return nil
 		}
 		n := countLines(p)
@@ -408,12 +409,18 @@ func checkPlaybookReferences(cfg Config, r *Result, w io.Writer, base string) {
 		filepath.Join(base, "rules"),
 		filepath.Join(base, "skills"),
 	}
+	agentRoots := agentRootsFor(cfg, base)
 	for _, root := range roots {
+		isAgents := root == filepath.Join(base, "agents")
 		_ = filepath.WalkDir(root, func(p string, de fs.DirEntry, err error) error {
 			if err != nil || de.IsDir() {
 				return nil
 			}
-			if !strings.HasSuffix(de.Name(), ".md") || !readableAgentFile(p) {
+			readable := readableAgentFile(p)
+			if isAgents {
+				readable = readableAgentEntry(p, agentRoots)
+			}
+			if !strings.HasSuffix(de.Name(), ".md") || !readable {
 				return nil
 			}
 			data, readErr := os.ReadFile(p)
@@ -781,6 +788,7 @@ func checkSkillMDSections(cfg Config, r *Result, w io.Writer) {
 // checkAgentMDSections warns on agent .md files missing required sections.
 func checkAgentMDSections(cfg Config, r *Result, w io.Writer) {
 	required := []string{"Purpose", "Execution", "Special rules", "Handling peer messages", "Personality"}
+	agentRoots := agentscompose.AgentFileRoots(cfg.YakosRoot, "")
 	agentsDir := filepath.Join(cfg.YakosRoot, "lib", "agents")
 	_ = filepath.WalkDir(agentsDir, func(p string, de fs.DirEntry, err error) error {
 		if err != nil || de.IsDir() {
@@ -791,7 +799,7 @@ func checkAgentMDSections(cfg Config, r *Result, w io.Writer) {
 			return nil
 		}
 		// Skip lead-template until Batch 3 ships content.
-		if name == "lead-template.md" || !readableAgentFile(p) {
+		if name == "lead-template.md" || !readableAgentEntry(p, agentRoots) {
 			return nil
 		}
 		data, readErr := os.ReadFile(p)
@@ -996,14 +1004,14 @@ func min(a, b int) int {
 // lib/decisions/*.yaml. Jev is a decision provider, not a runtime: no agent
 // may name it as one, and no agent that can write may reference a provider.
 // It reports errors only; a clean tree adds no output lines.
-func checkDecisionGuards(r *Result, w io.Writer, base string) {
+func checkDecisionGuards(r *Result, w io.Writer, base string, roots []string) {
 	agentsDir := filepath.Join(base, "agents")
 	var agentFiles []string
 	_ = filepath.WalkDir(agentsDir, func(p string, de fs.DirEntry, err error) error {
 		if err != nil || de.IsDir() {
 			return nil
 		}
-		if strings.HasSuffix(de.Name(), ".md") && de.Name() != "README.md" && readableAgentFile(p) {
+		if strings.HasSuffix(de.Name(), ".md") && de.Name() != "README.md" && readableAgentEntry(p, roots) {
 			agentFiles = append(agentFiles, p)
 		}
 		return nil

@@ -3,8 +3,8 @@ package validate
 // agentfiles.go — the agent-file findings of `yakos validate` that mirror what
 // the Go dispatcher does (sec-324). Compose leaves an agent file out, with a
 // warning, when it has a line over the cap, is a symlink that resolves outside
-// the framework's lib/ and the project directory or to anything but a regular
-// file, is not a regular file, is over the size cap, or has an extends: that is
+// the framework's lib/agents and the project's .claude/agents or to anything but
+// a regular file, is not a regular file, is over the size cap, or has an extends: that is
 // not a bare agent id. The persona that file
 // would have supplied is then silently the framework agent's, or nothing, so
 // validate turns each of those into an error, and CI sees it.
@@ -16,6 +16,7 @@ package validate
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/bakw00ds/yakos/internal/agentscompose"
 )
@@ -33,7 +34,7 @@ func agentFileFinding(path string, roots []string) string {
 	case agentscompose.ProblemUnresolved:
 		return "symlink does not resolve to a regular file; the Go dispatcher skips it"
 	case agentscompose.ProblemOutside:
-		return "symlink resolves outside the framework lib/ and the project directory; the Go dispatcher skips it"
+		return agentscompose.AgentOutsideReason + "; the Go dispatcher skips it"
 	case agentscompose.ProblemNotRegular:
 		return "not a regular file; the Go dispatcher skips it"
 	case agentscompose.ProblemTooLarge:
@@ -53,6 +54,32 @@ func agentFileFinding(path string, roots []string) string {
 		return fmt.Sprintf("extends value %s is not a bare agent id (%s); the Go dispatcher skips it", agentscompose.DisplayValue(v), agentscompose.BareIDRule)
 	}
 	return ""
+}
+
+// agentRootsFor returns the directories a symlinked agent file under base/agents
+// may resolve into: lib/agents, and in project mode (base is a project's .claude)
+// the project's .claude/agents too. It is what Compose uses for the same tree.
+func agentRootsFor(cfg Config, base string) []string {
+	if filepath.Base(filepath.Clean(base)) == ".claude" {
+		return agentscompose.AgentFileRoots(cfg.YakosRoot, filepath.Dir(filepath.Clean(base)))
+	}
+	return agentscompose.AgentFileRoots(cfg.YakosRoot, "")
+}
+
+// readableAgentEntry is readableAgentFile for an entry of an agents directory: a
+// symlink must also be one Compose would follow. A link it refuses is not read
+// through, so a pass over agent files does not print about, or look inside, a
+// file the dispatcher never sees (the project's .env, say). The link is reported
+// once, by checkAgentEnums.
+func readableAgentEntry(path string, roots []string) bool {
+	if !readableAgentFile(path) {
+		return false
+	}
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		problem, err := agentscompose.InspectAgentFile(path, roots)
+		return err == nil && problem == agentscompose.ProblemNone
+	}
+	return true
 }
 
 // readableAgentFile reports whether a validate pass can read the markdown file

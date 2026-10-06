@@ -265,7 +265,7 @@ _validate_fm_values() {
     '
 }
 
-# _validate_agent_file_problem <file> <lib-root> <project-root or empty>
+# _validate_agent_file_problem <file> <framework-agents-dir> <project-agents-dir or empty>
 #   Prints why the Go dispatcher would skip the agent file, or nothing when it
 #   would read it. Go twin: agentFileFinding in
 #   cli-go/internal/validate/agentfiles.go, which calls agentscompose; the rules
@@ -274,9 +274,9 @@ _validate_fm_values() {
 #   refused when it is 1048576 bytes or longer, a carriage return before the
 #   newline counted, which is what awk's length() sees with LC_ALL=C.
 _validate_agent_file_problem() {
-    local f="$1" lib_root="$2" project_root="${3:-}" reason size n
+    local f="$1" fw_dir="$2" project_dir="${3:-}" reason size n
     if [ -L "$f" ]; then
-        reason="$(yk_agents_symlink_problem "$f" "$lib_root" "$project_root")"
+        reason="$(yk_agents_symlink_problem "$f" "$fw_dir" "$project_dir")"
         if [ -n "$reason" ]; then
             echo "$reason; the Go dispatcher skips it"
             return 0
@@ -311,7 +311,7 @@ check_agent_enums() {
         esac
         # A file the dispatcher would skip is an error, and nothing else is read
         # from it: its frontmatter says nothing about what runs.
-        problem="$(_validate_agent_file_problem "$agent_file" "$YAKOS_ROOT/lib" "$project_dir")"
+        problem="$(_validate_agent_file_problem "$agent_file" "$YAKOS_ROOT/lib/agents" "${project_dir:+$project_dir/.claude/agents}")"
         if [ -n "$problem" ]; then
             err "$agent_file: $problem"
             continue

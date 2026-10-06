@@ -74,7 +74,45 @@ func TestComposeSkills_SkipsASymlinkedSkillOutsideTheRoots(t *testing.T) {
 	if strings.Contains(string(encoded), "TOPSECRET") || strings.Contains(string(encoded), "SECRET-NAME") {
 		t.Errorf("the outside file's content reached the listing: %s", encoded)
 	}
-	requireSkillWarning(t, warnings.String(), link, "symlink resolves outside the framework lib/ and the project directory")
+	requireSkillWarning(t, warnings.String(), link, SkillOutsideReason)
+}
+
+// The project holds files that are not skills, and so does the framework. A link
+// to the project's .env or .git/config, to another file of the project, or to an
+// agent file is refused: the roots are the skill directories themselves.
+func TestComposeSkills_SkipsALinkToAFileOutsideTheSkillDirectories(t *testing.T) {
+	warnings := captureWarnings(t)
+	root, project, skills := skillsFixture(t)
+	writeFileT(t, filepath.Join(project, ".env"), "---\nname: ENV-NAME\ndescription: "+secretText+"\n---\n")
+	writeFileT(t, filepath.Join(project, ".git", "config"), "---\nname: GIT-NAME\ndescription: TOKEN-9999\n---\n")
+	writeFileT(t, filepath.Join(project, "docs", "SKILL.md"), skillBody("DOCS-NAME", "DOCS-MARKER"))
+	writeFileT(t, filepath.Join(root, "lib", "agents", "agent.md"), "---\nname: AGENT-NAME\ndescription: AGENT-MARKER\n---\n")
+	links := map[string]string{
+		"env":   filepath.Join(project, ".env"),
+		"git":   filepath.Join(project, ".git", "config"),
+		"docs":  filepath.Join(project, "docs", "SKILL.md"),
+		"agent": filepath.Join(root, "lib", "agents", "agent.md"),
+	}
+	for slug, target := range links {
+		symlinkOrSkip(t, target, filepath.Join(skills, slug, "SKILL.md"))
+	}
+
+	got := composeSkillsOK(t, root, project)
+	if skillSlugs(got) != "fw,mine" {
+		t.Errorf("skills = %q, want fw,mine", skillSlugs(got))
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, marker := range []string{"TOPSECRET", "ENV-NAME", "GIT-NAME", "TOKEN-9999", "DOCS-NAME", "DOCS-MARKER", "AGENT-NAME", "AGENT-MARKER"} {
+		if strings.Contains(string(encoded), marker) {
+			t.Errorf("%s reached the listing: %s", marker, encoded)
+		}
+	}
+	for slug := range links {
+		requireSkillWarning(t, warnings.String(), filepath.Join(skills, slug, "SKILL.md"), SkillOutsideReason)
+	}
 }
 
 // A SKILL.md that is a link to a directory, or to nothing, used to fail the whole
@@ -96,17 +134,18 @@ func TestComposeSkills_ASymlinkThatDoesNotResolveToAFileKeepsTheListing(t *testi
 	requireSkillWarning(t, warnings.String(), ghostLink, "symlink does not resolve to a regular file")
 }
 
-// Links inside the roots are the installed layout and work.
-func TestComposeSkills_FollowsSymlinksInsideTheRoots(t *testing.T) {
+// Links inside the skill directories are the installed layout and work: one to
+// another skill in the project's .claude/skills, and one into lib/skills.
+func TestComposeSkills_FollowsSymlinksInsideTheSkillDirectories(t *testing.T) {
 	warnings := captureWarnings(t)
 	root, project, skills := skillsFixture(t)
-	writeFileT(t, filepath.Join(project, "shared", "SKILL.md"), skillBody("shared", "shared skill"))
-	symlinkOrSkip(t, filepath.Join("..", "..", "..", "shared", "SKILL.md"), filepath.Join(skills, "inproject", "SKILL.md"))
+	writeFileT(t, filepath.Join(skills, "shared", "SKILL.md"), skillBody("shared", "shared skill"))
+	symlinkOrSkip(t, filepath.Join("..", "shared", "SKILL.md"), filepath.Join(skills, "inproject", "SKILL.md"))
 	symlinkOrSkip(t, filepath.Join(root, "lib", "skills", "fw", "SKILL.md"), filepath.Join(skills, "inlib", "SKILL.md"))
 
 	got := composeSkillsOK(t, root, project)
-	if skillSlugs(got) != "fw,inlib,inproject,mine" {
-		t.Fatalf("skills = %q, want fw,inlib,inproject,mine", skillSlugs(got))
+	if skillSlugs(got) != "fw,inlib,inproject,mine,shared" {
+		t.Fatalf("skills = %q, want fw,inlib,inproject,mine,shared", skillSlugs(got))
 	}
 	for _, s := range got {
 		switch s.Slug {

@@ -105,9 +105,9 @@ func TestBashComposerAppliesTheAgentFileRulesLikeCompose(t *testing.T) {
 
 	writeAgentDir(t, fw, map[string]string{"backend": "model: sonnet\n"})
 	writeFileT(t, filepath.Join(fw, "tmpl.md"), templateText)
-	writeFileT(t, filepath.Join(root, "lib", "agents-extra", "real.md"), templateText)
-	symlinkOrSkip(t, filepath.Join("..", "agents-extra", "real.md"), filepath.Join(fw, "linked-tmpl.md")) // inside lib/: fine
-	symlinkOrSkip(t, secret, filepath.Join(fw, "escape-tmpl.md"))                                         // outside: refused
+	writeFileT(t, filepath.Join(fw, "shared", "real.md"), templateText)
+	symlinkOrSkip(t, filepath.Join("shared", "real.md"), filepath.Join(fw, "linked-tmpl.md")) // inside lib/agents: fine
+	symlinkOrSkip(t, secret, filepath.Join(fw, "escape-tmpl.md"))                             // outside: refused
 
 	child := func(id, extends string) {
 		writeFileT(t, filepath.Join(agents, id+".md"), "---\nid: "+id+"\nextends: "+extends+"\n---\n\n## Purpose\n\nChild "+id+".\n")
@@ -117,6 +117,7 @@ func TestBashComposerAppliesTheAgentFileRulesLikeCompose(t *testing.T) {
 	child("uses-linked", "linked-tmpl")
 	child("uses-missing", "nosuch")
 	child("uses-escape", "escape-tmpl")
+	child("uses-rule-tmpl", "rule-tmpl")
 	badValues := []string{
 		"../outside", "../../outside", filepath.Join(outsideDir, "abs"), "sub/dir", `back\slash`,
 		".hidden", "..", "x..y", `"quoted"`, "tmpl # note", "café", "a\tb", strings.Repeat("a", 70) + "/x",
@@ -130,20 +131,35 @@ func TestBashComposerAppliesTheAgentFileRulesLikeCompose(t *testing.T) {
 		child(id, v)
 		warn(filepath.Join(agents, id+".md"), "extends value "+DisplayValue(v)+" is not a bare agent id ("+BareIDRule+")")
 	}
-	const outside = "symlink resolves outside the framework lib/ and the project directory"
+	const outside = AgentOutsideReason
 	const unresolved = "symlink does not resolve to a regular file"
 	warn(filepath.Join(fw, "escape-tmpl.md"), outside) // the framework walk meets the link too
 	warn(filepath.Join(agents, "uses-escape.md"), `extends "escape-tmpl": `+outside)
+	// A template link that stays in lib/ but leaves lib/agents: the framework has
+	// files that are not agents.
+	writeFileT(t, filepath.Join(root, "lib", "rules", "rule.md"), "RULE-MARKER\n")
+	symlinkOrSkip(t, filepath.Join("..", "rules", "rule.md"), filepath.Join(fw, "rule-tmpl.md"))
+	warn(filepath.Join(fw, "rule-tmpl.md"), outside)
+	warn(filepath.Join(agents, "uses-rule-tmpl.md"), `extends "rule-tmpl": `+outside)
 
-	writeFileT(t, filepath.Join(project, "shared", "shared.md"), "---\nid: shared\nrole: specialist\n---\n\n## Purpose\n\nShared.\n")
-	symlinkOrSkip(t, filepath.Join("..", "..", "shared", "shared.md"), filepath.Join(agents, "inproject.md")) // fine
-	symlinkOrSkip(t, filepath.Join(fw, "backend.md"), filepath.Join(agents, "inlib.md"))                      // the installed layout: fine
+	writeFileT(t, filepath.Join(agents, "shared", "shared.md"), "---\nid: shared\nrole: specialist\n---\n\n## Purpose\n\nShared.\n")
+	symlinkOrSkip(t, filepath.Join("shared", "shared.md"), filepath.Join(agents, "inproject.md")) // inside the project's agent directory: fine
+	symlinkOrSkip(t, filepath.Join(fw, "backend.md"), filepath.Join(agents, "inlib.md"))          // the installed layout: fine
 	symlinkOrSkip(t, secret, filepath.Join(agents, "leak.md"))
 	symlinkOrSkip(t, filepath.Join(project, "nothing"), filepath.Join(agents, "ghost.md"))
 	if err := os.MkdirAll(filepath.Join(project, "somedir"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	symlinkOrSkip(t, filepath.Join(project, "somedir"), filepath.Join(agents, "dirlink.md"))
+	// The project's own files and the framework's other files are not agents.
+	writeFileT(t, filepath.Join(project, ".env"), secretText+"\n")
+	writeFileT(t, filepath.Join(project, ".git", "config"), "TOKEN-9999\n")
+	symlinkOrSkip(t, filepath.Join("..", "..", ".env"), filepath.Join(agents, "dotenv.md"))
+	symlinkOrSkip(t, filepath.Join("..", "..", ".git", "config"), filepath.Join(agents, "gitcfg.md"))
+	symlinkOrSkip(t, filepath.Join(root, "lib", "rules", "rule.md"), filepath.Join(agents, "rule.md"))
+	warn(filepath.Join(agents, "dotenv.md"), outside)
+	warn(filepath.Join(agents, "gitcfg.md"), outside)
+	warn(filepath.Join(agents, "rule.md"), outside)
 	warn(filepath.Join(agents, "leak.md"), outside)
 	warn(filepath.Join(agents, "ghost.md"), unresolved)
 	warn(filepath.Join(agents, "dirlink.md"), unresolved)

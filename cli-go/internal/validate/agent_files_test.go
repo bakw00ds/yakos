@@ -81,10 +81,9 @@ func wantOneError(t *testing.T, out string, errs []string, file, text string) {
 	}
 }
 
-const (
-	msgUnresolved = "symlink does not resolve to a regular file; the Go dispatcher skips it"
-	msgOutside    = "symlink resolves outside the framework lib/ and the project directory; the Go dispatcher skips it"
-)
+const msgUnresolved = "symlink does not resolve to a regular file; the Go dispatcher skips it"
+
+var msgOutside = agentscompose.AgentOutsideReason + "; the Go dispatcher skips it"
 
 func TestAgentFiles_ALongLineIsRejected(t *testing.T) {
 	root, proj, agents := agentFilesProject(t)
@@ -150,13 +149,13 @@ func TestAgentFiles_ASymlinkOutsideTheRootsIsRejected(t *testing.T) {
 	wantOneError(t, out, errs, link, msgOutside)
 }
 
-// Links the dispatcher follows are not findings: into the project directory, and
-// into the framework's lib/ (the layout an install makes).
+// Links the dispatcher follows are not findings: into the project's agent
+// directory, and into the framework's lib/agents (the layout an install makes).
 func TestAgentFiles_SymlinksInsideTheRootsAreAccepted(t *testing.T) {
 	root, proj, agents := agentFilesProject(t)
-	writeFile(t, filepath.Join(proj, "shared", "shared.md"), agentBody("shared"))
-	symlinkOrSkip(t, filepath.Join(proj, "shared", "shared.md"), filepath.Join(agents, "abs.md"))
-	symlinkOrSkip(t, filepath.Join("..", "..", "shared", "shared.md"), filepath.Join(agents, "rel.md"))
+	writeFile(t, filepath.Join(agents, "shared", "shared.md"), agentBody("shared"))
+	symlinkOrSkip(t, filepath.Join(agents, "shared", "shared.md"), filepath.Join(agents, "abs.md"))
+	symlinkOrSkip(t, filepath.Join("shared", "shared.md"), filepath.Join(agents, "rel.md"))
 	symlinkOrSkip(t, filepath.Join(root, "lib", "agents", "framework.md"), filepath.Join(agents, "framework.md"))
 	out, errs := validateProject(t, root, proj)
 	if len(errs) != 0 || strings.Contains(out, "[warn]") {
@@ -164,13 +163,17 @@ func TestAgentFiles_SymlinksInsideTheRootsAreAccepted(t *testing.T) {
 	}
 }
 
-// In framework mode only lib/ is a root: the project directory is not.
-func TestAgentFiles_FrameworkModeAcceptsOnlyLibAsARoot(t *testing.T) {
+// In framework mode only lib/agents is a root: not lib/ around it, and not the
+// project.
+func TestAgentFiles_FrameworkModeAcceptsOnlyLibAgentsAsARoot(t *testing.T) {
 	root := t.TempDir()
 	agents := filepath.Join(root, "lib", "agents")
 	writeFile(t, filepath.Join(agents, "real.md"), agentBody("real"))
+	writeFile(t, filepath.Join(agents, "sub", "inner.md"), agentBody("inner"))
+	symlinkOrSkip(t, filepath.Join("sub", "inner.md"), filepath.Join(agents, "inlib.md")) // inside lib/agents: fine
 	writeFile(t, filepath.Join(root, "lib", "agents-extra", "extra.md"), agentBody("extra"))
-	symlinkOrSkip(t, filepath.Join(root, "lib", "agents-extra", "extra.md"), filepath.Join(agents, "inlib.md"))
+	notAgents := filepath.Join(agents, "notagents.md")
+	symlinkOrSkip(t, filepath.Join("..", "agents-extra", "extra.md"), notAgents) // in lib/, not in lib/agents
 	elsewhere := filepath.Join(root, "docs", "notes.md")
 	writeFile(t, elsewhere, agentBody("notes"))
 	notLib := filepath.Join(agents, "notlib.md")
@@ -185,8 +188,38 @@ func TestAgentFiles_FrameworkModeAcceptsOnlyLibAsARoot(t *testing.T) {
 			got = append(got, f.Message)
 		}
 	}
-	if len(got) != 1 || got[0] != notLib+": "+msgOutside {
-		t.Errorf("symlink errors = %q, want only %q", got, notLib+": "+msgOutside)
+	want := []string{notAgents + ": " + msgOutside, notLib + ": " + msgOutside}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("symlink errors =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+// The project holds files that are not agents (rev-324): a link to its .env or
+// .git/config, or to any other file of the project or of the framework, is
+// rejected. Only the agent directories are roots.
+func TestAgentFiles_ALinkToAFileOutsideTheAgentDirectoriesIsRejected(t *testing.T) {
+	root, proj, agents := agentFilesProject(t)
+	writeFile(t, filepath.Join(proj, ".env"), "OPENAI_API_KEY=sk-TOPSECRET-1234\n")
+	writeFile(t, filepath.Join(proj, ".git", "config"), "[remote \"origin\"]\n")
+	writeFile(t, filepath.Join(proj, "docs", "notes.md"), agentBody("notes"))
+	writeFile(t, filepath.Join(root, "lib", "rules", "rule.md"), "rule\n")
+	files := map[string]string{
+		"dotenv.md": filepath.Join(proj, ".env"),
+		"gitcfg.md": filepath.Join(proj, ".git", "config"),
+		"notes.md":  filepath.Join(proj, "docs", "notes.md"),
+		"rule.md":   filepath.Join(root, "lib", "rules", "rule.md"),
+	}
+	var want []string
+	for _, name := range []string{"dotenv.md", "gitcfg.md", "notes.md", "rule.md"} {
+		symlinkOrSkip(t, files[name], filepath.Join(agents, name))
+		want = append(want, filepath.Join(agents, name)+": "+msgOutside)
+	}
+	out, errs := validateProject(t, root, proj)
+	if strings.Join(errs, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("errors =\n%s\nwant\n%s\nfull output:\n%s", strings.Join(errs, "\n"), strings.Join(want, "\n"), out)
+	}
+	if strings.Contains(out, "[warn]") {
+		t.Errorf("unexpected warning:\n%s", out)
 	}
 }
 

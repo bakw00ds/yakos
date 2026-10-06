@@ -8,7 +8,8 @@ package agentscompose
 //
 //   - the value must be a bare agent id;
 //   - the template is lib/agents/<id>.md, read under the rules for an agent file:
-//     a symlink only to a regular file inside the framework's lib/ or the project;
+//     a symlink only to a regular file inside lib/agents or the project's
+//     .claude/agents;
 //   - a bad value or a template that may not be read skips that agent, with the
 //     once-per-file warning naming the file and the value, and never fails the
 //     roster. A missing template still means "the project body alone".
@@ -170,13 +171,12 @@ func TestCompose_AMissingTemplateMeansTheProjectBodyAlone(t *testing.T) {
 	}
 }
 
-// A template that is a symlink to a file inside lib/ is the installed layout and
-// works.
-func TestCompose_ExtendsFollowsATemplateSymlinkedInsideLib(t *testing.T) {
+// A template that is a symlink to a file inside lib/agents works.
+func TestCompose_ExtendsFollowsATemplateSymlinkedInsideLibAgents(t *testing.T) {
 	warnings := captureWarnings(t)
 	root, project, agents := filesFixture(t)
-	writeFileT(t, filepath.Join(root, "lib", "agents-extra", "real.md"), templateText)
-	symlinkOrSkip(t, filepath.Join(root, "lib", "agents-extra", "real.md"), filepath.Join(root, "lib", "agents", "tmpl.md"))
+	writeFileT(t, filepath.Join(root, "lib", "agents", "shared", "real.md"), templateText)
+	symlinkOrSkip(t, filepath.Join("shared", "real.md"), filepath.Join(root, "lib", "agents", "tmpl.md"))
 	writeFileT(t, filepath.Join(agents, "child.md"), "---\nid: child\nextends: tmpl\n---\n\n## Purpose\n\nChild.\n")
 
 	_, roster := composeIDs(t, root, project)
@@ -214,7 +214,28 @@ func TestCompose_SkipsAnAgentWhoseTemplateIsASymlinkOutOfTheRoots(t *testing.T) 
 	if strings.Contains(string(encoded), "TOPSECRET") {
 		t.Errorf("the outside file reached the roster: %s", encoded)
 	}
-	requireLine(t, warnings, child, `extends "tmpl": symlink resolves outside the framework lib/ and the project directory`)
+	requireLine(t, warnings, child, `extends "tmpl": `+AgentOutsideReason)
+}
+
+// A template link that stays in lib/ but leaves lib/agents is refused too: the
+// framework has files that are not agents, and a template is read as one.
+func TestCompose_SkipsAnAgentWhoseTemplateIsLinkedToAFileInLibButNotInLibAgents(t *testing.T) {
+	warnings := captureWarnings(t)
+	root, project, agents := filesFixture(t)
+	writeFileT(t, filepath.Join(root, "lib", "rules", "rule.md"), "RULE-MARKER\n")
+	symlinkOrSkip(t, filepath.Join("..", "rules", "rule.md"), filepath.Join(root, "lib", "agents", "tmpl.md"))
+	child := filepath.Join(agents, "child.md")
+	writeFileT(t, child, "---\nid: child\nextends: tmpl\n---\n\n## Purpose\n\nChild.\n")
+
+	got, roster := composeIDs(t, root, project)
+	if got != "backend,helper" {
+		t.Errorf("roster = %q, want backend,helper", got)
+	}
+	encoded, _ := json.Marshal(roster)
+	if strings.Contains(string(encoded), "RULE-MARKER") {
+		t.Errorf("a framework file that is not an agent reached the roster: %s", encoded)
+	}
+	requireLine(t, warnings, child, `extends "tmpl": `+AgentOutsideReason)
 }
 
 func TestCompose_SkipsAnAgentWhoseTemplateDoesNotResolveToAFile(t *testing.T) {
