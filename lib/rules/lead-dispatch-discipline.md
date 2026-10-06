@@ -142,3 +142,4 @@ kanban reconciled against actual PR/branch state.
   dispatch.
 - `lib/agents/lead-template.md` — codifies this in agent body form.
 - `incident:v2.62.4-worktree-collision` — what happens without it.
+- `rule:sprint-cost-discipline` — bounds PR size, review fan-out, and agent lifetime per round.
