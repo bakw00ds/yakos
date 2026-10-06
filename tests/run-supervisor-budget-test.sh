@@ -36,6 +36,13 @@
 #               through the old limit_usd filter, read_failed is tested before any limit,
 #               tokens read as 0 when an older CLI prints none, and the unit rules hold at
 #               their thresholds.
+# 13. renamed   a project that names its supervisor (supervisor: agent: watchdog) makes the hook
+#               launch, and budget, THAT agent: at the stricter of its own limit and the
+#               supervisor's, unit by unit. An agent with no limit of its own gains the
+#               supervisor's, an own limit looser than the supervisor's does not loosen it, a
+#               stricter one holds, the stop is the smaller absolute stop (not the stop of the
+#               side with the smaller amount), and the window is lifetime if either side is.
+#               Each twin reads the name its own way (Go as YAML, bash with a line scan).
 # Run under both `bash` and `/bin/bash` (3.2 on macOS).
 set -u
 
@@ -88,6 +95,24 @@ mksbt() {
     if [ "$4" != 0 ] || [ "${5:-0}" != 0 ]; then
         printf '{"type":"dispatch_finished","ts":"%s","agent":"supervisor","usage":{"input_tokens":%s,"output_tokens":0,"total_cost_usd":%s}}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$4" "${5:-0}" > "$sb/state/dispatch-log.ndjson"
     fi
+    printf '#!/bin/sh\nif [ "$1" = budget ]; then exec "%s" "$@"; fi\nprintf "run\\n" >> "%s/runs"\n' "$GO_BINARY" "$sb" > "$sb/bin/fakeyakos"
+    chmod +x "$sb/bin/fakeyakos"
+    printf '%s' "$sb"
+}
+# mksbr <name> <agent> <own-token-limit|-> <spent-tokens> [<window> [<timestamp of the run>]] (K-136): a sandbox whose
+# project names <agent> as its supervisor (supervisor: agent: <agent>). The supervisor keeps its built-in budget ($100 and
+# 33,000,000 tokens, a stop of twice each). Unless the limit is "-", <agent> has an operator entry with that token limit (no
+# dollar limit) counting in <window> (monthly by default), and there is one run of <agent> that spent the given tokens at the
+# given time (now by default). The row has no billing field, so it counts like a legacy row: both units.
+mksbr() {
+    local sb="$TMP/$1" agent="$2" lim="$3" spent="$4" win="${5:-monthly}" ts="${6:-}"
+    mkdir -p "$sb/.claude" "$sb/work/current/logs" "$sb/bin" "$sb/state"
+    chmod 700 "$sb/state"
+    printf 'supervisor:\n  score_every_n_calls: 1\n  agent: %s\n' "$agent" > "$sb/.yakos.yml"
+    printf 'min_launch_interval_s: 0\n' > "$sb/state/supervisor-policy.yml"; chmod 600 "$sb/state/supervisor-policy.yml"
+    if [ "$lim" != - ]; then YAKOS_DISPATCH_LOG="$sb/state" "$GO_BINARY" budget set "$agent" --tokens "$lim" --window "$win" >/dev/null; fi
+    [ -n "$ts" ] || ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf '{"type":"dispatch_finished","ts":"%s","agent":"%s","usage":{"input_tokens":%s,"output_tokens":0,"total_cost_usd":0}}\n' "$ts" "$agent" "$spent" > "$sb/state/dispatch-log.ndjson"
     printf '#!/bin/sh\nif [ "$1" = budget ]; then exec "%s" "$@"; fi\nprintf "run\\n" >> "%s/runs"\n' "$GO_BINARY" "$sb" > "$sb/bin/fakeyakos"
     chmod +x "$sb/bin/fakeyakos"
     printf '%s' "$sb"
@@ -589,6 +614,71 @@ sb="$(stubsb stub-ceilunit-tok-bash '{"state":"hard_stop","spent_usd":199.99,"li
 fire bash "$sb" "$TMP/high.json"; settle
 logs "$sb" | grep 'supervisor budget ceiling reached' | grep -q '"spent_tokens":2000,"ceiling_tokens":2000' && findings "$sb" | grep -q 'token-budget ceiling (2000 tokens)' && ok "(12) bash tokens at their stop (dollars just short of theirs): the token ceiling" || bad "(12) bash ceiling unit, tokens"
 
+# 13. K-136: a project that names its supervisor (supervisor: agent: watchdog) makes the hook launch, and budget, THAT
+# agent. The Go twin reads the name as YAML, the bash twin with a line scan; both then ask the budget for the agent's
+# limit, which is the stricter of the agent's own and the supervisor's, unit by unit (budget.tighter): the smaller
+# amount, the smaller ABSOLUTE stop, and a lifetime window if either side is lifetime. The supervisor itself keeps its
+# built-in 33,000,000 tokens (stop 66,000,000). The sandboxes feed (9): bash and Go write the same records.
+for side in bash go; do
+    # no limit of its own: it gains the supervisor's, and a routine launch past 33M tokens is refused, under its own name
+    sb="$(mksbr "rengain-$side" watchdog - 40000000)"
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    r="$(logs "$sb" | grep 'skipping this routine')"
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && printf '%s' "$r" | grep -q '"agent":"watchdog"' \
+        && printf '%s' "$r" | grep -q '"spent_tokens":40000000,"limit_tokens":33000000,"budget_reason":"budget_exhausted","kind":"routine"' && ! printf '%s' "$r" | grep -q '_usd'; then
+        ok "(13) $side a renamed supervisor with no limit of its own is refused at the supervisor's 33M tokens, under its own name"
+    else bad "(13) $side renamed, no own limit: rc=$rc runs=$(runs "$sb") $r"; fi
+    # ... and a high-risk launch under the supervisor's stop runs, with that stop (66M) as the ceiling it is noted under
+    sb="$(mksbr "renhigh-$side" watchdog - 40000000)"
+    fire "$side" "$sb" "$TMP/high.json"; rc=$?; settle
+    r="$(logs "$sb" | grep 'allowed under the ceiling')"
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ] && printf '%s' "$r" | grep -q '"agent":"watchdog"' \
+        && printf '%s' "$r" | grep -q '"spent_tokens":40000000,"limit_tokens":33000000,"ceiling_tokens":66000000,"budget_reason":"budget_exhausted"'; then
+        ok "(13) $side a high-risk launch of the renamed supervisor runs under the supervisor's stop of 66M tokens"
+    else bad "(13) $side renamed, high-risk under the stop: rc=$rc runs=$(runs "$sb") $r"; fi
+    # an own limit LOOSER than the supervisor's (500M) does not loosen it
+    sb="$(mksbr "renloose-$side" watchdog 500000000 40000000)"
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    r="$(logs "$sb" | grep 'skipping this routine')"
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && printf '%s' "$r" | grep -q '"agent":"watchdog"' && printf '%s' "$r" | grep -q '"spent_tokens":40000000,"limit_tokens":33000000,'; then
+        ok "(13) $side an own limit of 500M tokens does not loosen the supervisor's 33M: refused at 40M"
+    else bad "(13) $side renamed, looser own limit: rc=$rc runs=$(runs "$sb") $r"; fi
+    # an own limit STRICTER than the supervisor's holds
+    sb="$(mksbr "rentight-$side" watchdog 1000 1500)"
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    r="$(logs "$sb" | grep 'skipping this routine')"
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && printf '%s' "$r" | grep -q '"agent":"watchdog"' \
+        && printf '%s' "$r" | grep -q '"spent_tokens":1500,"limit_tokens":1000,"budget_reason":"budget_exhausted","kind":"routine"'; then
+        ok "(13) $side an own limit of 1000 tokens holds beside the supervisor's 33M: refused at 1500"
+    else bad "(13) $side renamed, stricter own limit: rc=$rc runs=$(runs "$sb") $r"; fi
+    # the stop is the smaller ABSOLUTE stop: own 50M (stop 50M) beside the supervisor's 33M (stop 66M) is 33M with a 50M stop
+    sb="$(mksbr "renstopok-$side" watchdog 50000000 45000000)"
+    fire "$side" "$sb" "$TMP/high.json"; rc=$?; settle
+    r="$(logs "$sb" | grep 'allowed under the ceiling')"
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ] && printf '%s' "$r" | grep -q '"agent":"watchdog"' \
+        && printf '%s' "$r" | grep -q '"spent_tokens":45000000,"limit_tokens":33000000,"ceiling_tokens":50000000,"budget_reason":"budget_exhausted"'; then
+        ok "(13) $side own 50M beside the supervisor's 33M: a high-risk launch at 45M runs under a 50M stop, not the supervisor's 66M"
+    else bad "(13) $side renamed, stop not yet reached: rc=$rc runs=$(runs "$sb") $r"; fi
+    sb="$(mksbr "renstopceil-$side" watchdog 50000000 55000000)"
+    fire "$side" "$sb" "$TMP/high.json"; rc=$?; settle
+    f="$(findings "$sb")"
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && printf '%s' "$f" | grep -q 'Supervisor token-budget ceiling (50000000 tokens) reached' && [ "$(printf '%s\n' "$f" | grep -c CRITICAL)" = 1 ]; then
+        ok "(13) $side own 50M beside the supervisor's 33M: nothing launches at 55M, past the 50M stop, and one CRITICAL names it"
+    else bad "(13) $side renamed, stop reached: rc=$rc runs=$(runs "$sb") $f"; fi
+    # the window is lifetime if either side is: a run from 2025 counts beside an own lifetime limit, and not beside a monthly one
+    sb="$(mksbr "renlife-$side" watchdog 500000000 40000000 lifetime 2025-01-15T12:00:00Z)"
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    r="$(logs "$sb" | grep 'skipping this routine')"
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && printf '%s' "$r" | grep -q '"agent":"watchdog"' && printf '%s' "$r" | grep -q '"spent_tokens":40000000,"limit_tokens":33000000,'; then
+        ok "(13) $side an own lifetime window makes the combined window lifetime: a run from 2025 counts and refuses"
+    else bad "(13) $side renamed, lifetime window: rc=$rc runs=$(runs "$sb") $r"; fi
+    sb="$(mksbr "renmonth-$side" watchdog 500000000 40000000 monthly 2025-01-15T12:00:00Z)"
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ] && ! logs "$sb" | grep -qi budget && ! grep -qi budget "$sb/hook.stderr"; then
+        ok "(13) $side both sides monthly: a run from 2025 is outside the month, so the launch happens and nothing budget-related is logged"
+    else bad "(13) $side renamed, monthly window: rc=$rc runs=$(runs "$sb") $(logs "$sb" | grep -i budget)"; fi
+done
+
 # 9. K-122: the two twins write the same hook-log records, field for field AND in
 # the same order (jq keeps an object literal's insertion order, so `jq -c` of each
 # record is a byte comparison with only the timestamp removed). That holds for the HOOK's
@@ -602,7 +692,8 @@ cmp_norm() { # cmp_norm <sandbox>
     logs "$1" | jq -c 'select(has("session_id") | not) | del(.ts, .duration_s)' 2>&1 | sort
 }
 for scen in routine high ceil warn proj quiet flags unread off stub spoof spoofsup spoofctl \
-            tokhard tokhigh tokceil tokwarn bothtok bothusd bothboth bothceil usdexempt usdwarn offboth dolloff flagstok; do
+            tokhard tokhigh tokceil tokwarn bothtok bothusd bothboth bothceil usdexempt usdwarn offboth dolloff flagstok \
+            rengain renhigh renloose rentight renstopok renstopceil renlife renmonth; do
     b="$(cmp_norm "$TMP/$scen-bash")"
     g="$(cmp_norm "$TMP/$scen-go")"
     if [ -n "$b" ] && [ "$b" = "$g" ]; then ok "(9) $scen hook-log records are byte-identical across twins"; else
