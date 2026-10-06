@@ -417,6 +417,18 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   agent's text is invalid TOML (and invalid in a YAML double-quoted scalar), so
   both emitters now write it as `\u00XX`, as the chat path already did.
 
+- **Bash `yakos validate` checks the frontmatter of rules and skills when the
+  project has no agents directory (K-132 follow-up, rev-324b).** The
+  frontmatter pass ran its three `find` calls, for agents, skills and rules, in
+  one process substitution under `set -e`, and `find` exits 1 for a directory
+  that is not there. A project with no agents directory, no skills directory,
+  or an agents directory the dispatcher refuses ended the group at the first
+  `find` that failed, so the files after it, rules included, were never
+  validated and a file with no frontmatter passed. The Go validator always
+  checked them, so the two reported different findings. The pass now runs
+  whatever is missing, and `tests/run-agent-enums-test.sh` compares both
+  validators on four such projects.
+
 ### Security
 
 - **A conversation, and the claude session its follow-ups resume, belong to

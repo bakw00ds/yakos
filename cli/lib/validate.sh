@@ -186,7 +186,13 @@ validate_tree() {
         return 0
     fi
 
-    # When populated (Batch 3+), run full frontmatter checks
+    # When populated (Batch 3+), run full frontmatter checks. The three finds at the
+    # end share one process substitution, and `find` exits 1 for a directory that is
+    # not there. A project with no agents directory, one whose agents directory was
+    # refused above, or one with no skills directory would end the group at the
+    # first of them under `set -e`, and the files after it, rules included, would
+    # never be validated, which the Go twin does. `set +e` keeps the group going.
+    # Go twin: collectMDFiles in validate.go.
     while IFS= read -r f; do
         [ -n "$f" ] || continue
         if [ "$PYTHON_OK" = "1" ]; then
@@ -201,7 +207,8 @@ validate_tree() {
             fi
         fi
         ok "$f"
-    done < <(find "$agents_dir" -type f -name '*.md' ! -name 'README.md' 2>/dev/null
+    done < <(set +e
+             find "$agents_dir" -type f -name '*.md' ! -name 'README.md' 2>/dev/null
              find "$skills_dir" -type f -name 'SKILL.md' 2>/dev/null
              find "$base/rules"  -type f -name '*.md' ! -name 'README.md' ! -name 'INDEX.md' 2>/dev/null)
 

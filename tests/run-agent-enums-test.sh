@@ -395,6 +395,55 @@ else
     printf '  SKIP the directory fixtures: this file system refused symlinks\n'
 fi
 
+# ---- the frontmatter pass runs whatever the agents directory is (rev-324b) ----
+# The bash frontmatter pass ran three finds in one process substitution, under
+# set -e, and find exits 1 for a directory that is not there. With no agents
+# directory, one that was refused above, or no skills directory, the group ended at
+# the first find that failed and the files after it, rules included, were never
+# validated, while the Go validator checked them. Each fixture below has a file the
+# pass must reject. It has no frontmatter block, which python3 and Go reject alike
+# whether or not PyYAML is installed: a malformed block is rejected by PyYAML and
+# passed by the fallback that runs without it, so the runners could disagree.
+bad_md() { # <file> <lines of filler>: a file with no frontmatter block
+    mkdir -p "$(dirname -- "$1")"
+    { printf 'no frontmatter block here\n'; awk -v n="$2" 'BEGIN { for (i = 0; i < n; i++) print "filler" }' ; } > "$1"
+}
+E1="$TMP/e1"; mkdir -p "$E1/.claude"; bad_md "$E1/.claude/rules/bad.md" 70            # no agents directory
+E2="$TMP/e2"; mkdir -p "$E2/.claude" "$TMP/out-e2/agents"; bad_md "$E2/.claude/rules/bad.md" 70
+e2_ok=0; ln -s "$TMP/out-e2/agents" "$E2/.claude/agents" 2>/dev/null && e2_ok=1      # an agents directory that is refused
+E3="$TMP/e3"; mkdir -p "$E3/.claude/agents"; agent_md "$E3/.claude/agents" good; bad_md "$E3/.claude/rules/bad.md" 70   # agents, no skills
+E4="$TMP/e4"; mkdir -p "$E4/.claude"; bad_md "$E4/.claude/skills/x/SKILL.md" 90        # a skill, no agents, no rules
+if command -v python3 >/dev/null 2>&1; then
+    for side in $sides; do
+        vrun "$side" "$E1"; printf '%s' "$VOUT" > "$TMP/e1-$side.txt"; he1=$VHUNG
+        want_err_f "$VOUT" "<D>/.claude/rules/bad.md: bad YAML frontmatter" "$side: a rule is validated when there is no agents directory"
+        printf '%s' "$VOUT" | grep -q 'Summary: 1 error(s), 0 warning(s)' && ok "$side: that rule is the only finding" || bad "$side: wrong findings with no agents directory: $VOUT"
+        if [ "$e2_ok" = 1 ]; then
+            vrun "$side" "$E2"; printf '%s' "$VOUT" > "$TMP/e2-$side.txt"; he2=$VHUNG
+            want_err_f "$VOUT" "<D>/.claude/agents: $DIRLINK" "$side: the refused agents directory is reported"
+            want_err_f "$VOUT" "<D>/.claude/rules/bad.md: bad YAML frontmatter" "$side: a rule is validated when the agents directory is refused"
+            printf '%s' "$VOUT" | grep -q 'Summary: 2 error(s), 0 warning(s)' && ok "$side: the directory and the rule are the only findings" || bad "$side: wrong findings with a refused agents directory: $VOUT"
+        else
+            he2=0
+        fi
+        vrun "$side" "$E3"; printf '%s' "$VOUT" > "$TMP/e3-$side.txt"; he3=$VHUNG
+        want_err_f "$VOUT" "<D>/.claude/rules/bad.md: bad YAML frontmatter" "$side: a rule is validated when there is no skills directory"
+        printf '%s' "$VOUT" | grep -q 'Summary: 1 error(s), 0 warning(s)' && ok "$side: that rule is the only finding without a skills directory" || bad "$side: wrong findings with no skills directory: $VOUT"
+        vrun "$side" "$E4"; printf '%s' "$VOUT" > "$TMP/e4-$side.txt"; he4=$VHUNG
+        want_err_f "$VOUT" "<D>/.claude/skills/x/SKILL.md: bad YAML frontmatter" "$side: a skill is validated when there is no agents directory"
+        printf '%s' "$VOUT" | grep -q 'Summary: 1 error(s), 0 warning(s)' && ok "$side: that skill is the only finding" || bad "$side: wrong findings with a skill and no agents directory: $VOUT"
+        if [ "$he1$he2$he3$he4" = 0000 ]; then ok "$side: every frontmatter fixture finished"; else bad "$side: a frontmatter fixture did not finish in 30 seconds"; fi
+    done
+    if [ "$sides" = "bash go" ]; then
+        for d in e1 e2 e3 e4; do
+            [ "$d" = e2 ] && [ "$e2_ok" != 1 ] && continue
+            if diff "$TMP/$d-bash.txt" "$TMP/$d-go.txt" >/dev/null; then ok "bash and Go findings identical for $d"; else bad "bash/go findings differ for $d:"; diff "$TMP/$d-bash.txt" "$TMP/$d-go.txt"; fi
+        done
+    fi
+else
+    printf '  SKIP the frontmatter fixtures: no python3 here\n'
+fi
+
 # ---- a FIFO among the files must not hang validate (rev-324) -------------------
 # bash's playbook-reference pass read every file under agents, rules and skills with
 # `grep -r`, which opens a FIFO and waits for a writer that never comes. The Go
