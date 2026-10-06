@@ -608,11 +608,17 @@ _ssw_log() {
 # done by the shell (noclobber, no fork), a builtin [ -e ] probe while it is held,
 # exponential backoff with jitter (5..160 ms), age check on the fifth miss and
 # every 8th after. Each wait step is one sleep fork.
+# The file is created owner-only (0600) whatever the caller's umask, the way the hook does it
+# (K-128, S5): the mask is read once, by the first create, then set and put back with builtins.
+_ssw_um=""
 _ssw_try_lock() {
     local rc=0
+    if [ -z "$_ssw_um" ]; then _ssw_um="$(umask 2>/dev/null)" || _ssw_um=""; fi
+    if [ -n "$_ssw_um" ]; then umask 077; fi
     set -C
     { true > "$_SSW_LOCK"; } 2>/dev/null || rc=1
     set +C
+    if [ -n "$_ssw_um" ]; then umask "$_ssw_um"; fi
     return "$rc"
 }
 _ssw_nap() {
@@ -984,11 +990,19 @@ _ss_lock_step() { # one wait step; n and bo are _ss_lock_take's locals
 # failed redirection on a POSIX SPECIAL builtin ends a non-interactive shell in
 # POSIX mode (bash --posix, POSIXLY_CORRECT, run as sh), and losing the create
 # race is exactly when this fails; `true` is a regular builtin, so it just returns 1.
+# The file is created owner-only (0600, as the Go twin's is) whatever the caller's umask
+# (K-128, S5): the mask is read once, by the first create (one fork, before the lock is
+# held), and then set and put back with builtins, so taking the lock still forks nothing.
+# If the mask cannot be read the create keeps the caller's, as it always did.
+_ss_um=""
 _ss_try_lock() {
     local rc=0
+    if [ -z "$_ss_um" ]; then _ss_um="$(umask 2>/dev/null)" || _ss_um=""; fi
+    if [ -n "$_ss_um" ]; then umask 077; fi
     set -C
     { true > "$_ss_lock"; } 2>/dev/null || rc=1
     set +C
+    if [ -n "$_ss_um" ]; then umask "$_ss_um"; fi
     return "$rc"
 }
 _ss_lock_loop() { # 0 when the lock is taken, 1 when the ceiling expired
@@ -1133,6 +1147,15 @@ _ss_gfold_done() { # after the run state has been written
 # (no CLI, an old CLI without `budget`, bad JSON) leaves everything off: fail
 # open. The project's agent_budgets can only lower the limit; the CLI applies
 # that rule. Go twin: budgetGate / evalBudget.
+# K-128 (S3): a failed read still fails open, but no longer silently. _ss_bud_cause says
+# why: timeout (the CLI outlived its wall-clock bound), no_output (it printed nothing and
+# exited non-zero: too old to have `budget`, crashed, or could not be run), parse (what it
+# printed is not a budget) or read_error (it answered, but said on stderr that it could not
+# read the spend log and failed open, so its "ok, nothing spent" is not a measurement).
+# _ss_gate_report writes one WARN record naming the cause, after the lock is dropped. Not
+# failures, so silent: a budget that is merely off (a limit of 0), and a CLI that prints
+# nothing and exits 0 (it has no budget to report, as the test stubs do). Go twin: the cause
+# of evalBudget.
 # _ss_budget_raw: run the CLI in the background and give it _ss_budget_wait
 # seconds of WALL-CLOCK time, so a hung or slow CLI can never stall the hook (no
 # GNU `timeout`: see the K-117 rule). A watchdog subshell (the wrapper's pattern)
@@ -1141,12 +1164,18 @@ _ss_gfold_done() { # after the run state has been written
 # cost its 50 ms plus a fork and the "2 s" read took 4 s or more (K-128). The CLI
 # exits non-zero at the hard stop AFTER printing its JSON, so the exit status is
 # never used: only the watchdog's flag file marks a timeout.
-# Prints the CLI's stdout, or nothing on timeout (fail open).
+# Sets _ss_bud_raw (the CLI's stdout; empty on a timeout), _ss_bud_rc (its exit status,
+# used only when it printed nothing), _ss_bud_cause=timeout when the watchdog fired and
+# _ss_bud_failopen=1 when the CLI's stderr (kept in a private temp
+# file) carries the "(failing open)" notice it prints when it could not read the spend
+# log: it still prints a budget then ("ok, nothing spent"), so only that notice tells
+# the two apart. The CLI is exec'd in a subshell so the stderr file is created 0600.
 _ss_budget_raw() {
-    local tmp pid wd flag
-    tmp="$(mktemp 2>/dev/null)" || return 0
-    flag="$tmp.timeout"
-    "$yakos_cli" budget check "$sup_agent" --project "$project_dir" --json >"$tmp" 2>/dev/null &
+    local tmp pid wd flag err line n=0 rc=0
+    _ss_bud_raw=""; _ss_bud_cause=""; _ss_bud_failopen=0; _ss_bud_rc=0
+    tmp="$(mktemp 2>/dev/null)" || { _ss_bud_cause=no_output; return 0; }
+    flag="$tmp.timeout"; err="$tmp.err"
+    ( umask 077; exec "$yakos_cli" budget check "$sup_agent" --project "$project_dir" --json >"$tmp" 2>"$err" ) 2>/dev/null &
     pid=$!
     (
         sp=""
@@ -1160,26 +1189,54 @@ _ss_budget_raw() {
         kill -KILL "$pid" 2>/dev/null
     ) >/dev/null 2>&1 &
     wd=$!
-    { wait "$pid"; } 2>/dev/null || true
+    { wait "$pid"; } 2>/dev/null || rc=$?
+    _ss_bud_rc=$rc
     kill -TERM "$wd" 2>/dev/null || true
     { wait "$wd"; } 2>/dev/null || true
-    if [ ! -e "$flag" ]; then cat "$tmp" 2>/dev/null; fi
-    rm -f "$tmp" "$flag"
+    if [ -e "$flag" ]; then
+        _ss_bud_cause=timeout
+    else
+        _ss_bud_raw="$(cat "$tmp" 2>/dev/null)" || true
+        # A few lines at most: the notice is the first one the CLI writes.
+        { while [ "$n" -lt 8 ] && IFS= read -r line; do
+            case "$line" in *"(failing open)"*) _ss_bud_failopen=1; break ;; esac
+            n=$((n + 1))
+        done < "$err"; } 2>/dev/null || true
+    fi
+    rm -f "$tmp" "$flag" "$err"
     return 0
 }
 _ss_budget() {
     _ss_bud_state=off; _ss_bud_hard=0; _ss_bud_over=0
     _ss_bud_spent=0; _ss_bud_limit=0; _ss_bud_stop=0
+    _ss_bud_cause=""
     local out
     [ -n "${yakos_cli:-}" ] || return 0
-    out="$(_ss_budget_raw)" || true
-    [ -n "$out" ] || return 0
-    out="$(printf '%s' "$out" | jq -r 'select(.limit_usd > 0) | [.state, .spent_usd, .limit_usd, .stop_usd, (if .state == "hard_stop" then 1 else 0 end), (if .state == "hard_stop" and (.spent_usd + 0.000000001) >= .stop_usd then 1 else 0 end)] | @tsv' 2>/dev/null)" || return 0
+    _ss_budget_raw
+    [ -z "$_ss_bud_cause" ] || return 0
+    if [ -z "$_ss_bud_raw" ]; then
+        # Nothing printed. A CLI that exits 0 has nothing to report (a stub without a budget): not a
+        # failure. One that failed (too old to have `budget`, crashed, could not be run) is.
+        if [ "$_ss_bud_rc" != 0 ]; then _ss_bud_cause=no_output; fi
+        return 0
+    fi
+    # Not a budget at all (no numeric limit_usd, or not JSON) is a parse failure; a limit of
+    # 0 is the budget switched off, which is not.
+    out="$(printf '%s' "$_ss_bud_raw" | jq -r 'if (.limit_usd | type) != "number" then error("no limit_usd") else select(.limit_usd > 0) | [.state, .spent_usd, .limit_usd, .stop_usd, (if .state == "hard_stop" then 1 else 0 end), (if .state == "hard_stop" and (.spent_usd + 0.000000001) >= .stop_usd then 1 else 0 end)] | @tsv end' 2>/dev/null)" || { _ss_bud_cause=parse; return 0; }
     [ -n "$out" ] || return 0
     IFS="$(printf '\t')" read -r _ss_bud_state _ss_bud_spent _ss_bud_limit _ss_bud_stop _ss_bud_hard _ss_bud_over <<EOF_BUD
 $out
 EOF_BUD
-    case "$_ss_bud_hard$_ss_bud_over" in [01][01]) : ;; *) _ss_bud_state=off; _ss_bud_hard=0; _ss_bud_over=0 ;; esac
+    case "$_ss_bud_hard$_ss_bud_over" in
+        [01][01]) : ;;
+        *) _ss_bud_state=off; _ss_bud_hard=0; _ss_bud_over=0; _ss_bud_cause=parse; return 0 ;;
+    esac
+    # It said it failed open: what it printed is the "ok, nothing spent" of an unreadable log.
+    if [ "$_ss_bud_failopen" = 1 ]; then
+        _ss_bud_state=off; _ss_bud_hard=0; _ss_bud_over=0
+        _ss_bud_spent=0; _ss_bud_limit=0; _ss_bud_stop=0
+        _ss_bud_cause=read_error
+    fi
     return 0
 }
 # _ss_ledger_stamp: a freshness token for the spend ledger, the dispatch log the budget is
@@ -1309,7 +1366,7 @@ _ss_gate() {
     stale=$((sup_deadline + sup_interval + 60))
     _ss_bud_state=off; _ss_bud_hard=0; _ss_bud_over=0
     _ss_bud_spent=0; _ss_bud_limit=0; _ss_bud_stop=0
-    _ss_bud_ready=0; _ss_bud_stamp=""
+    _ss_bud_ready=0; _ss_bud_stamp=""; _ss_bud_cause=""
     while :; do
         # The budget read forks the CLI (up to ~2 s) and only a launch decision
         # needs it: a crossing with no live run in flight. Peek at the state
@@ -1436,6 +1493,14 @@ _ss_gate_report() { # <kind> <delay>
                 "$(jq -nc --argjson p "$st_pending" '{high_risk: true, pending: $p}')"
             return 0 ;;
     esac
+    # K-128 (S3): a budget that could not be read was treated as off (fail open, as
+    # documented). Say so, with the cause, ahead of the decision's own records. A read
+    # that did not fail leaves the cause empty. Go twin: reportGate.
+    if [ -n "$_ss_bud_cause" ]; then
+        ho_log "supervisor-stream" "WARN" "pass" \
+            "supervisor budget unavailable (cause: $_ss_bud_cause); failing open: this launch decision is not checked against the dollar budget" \
+            "$(jq -nc --arg a "$sup_agent" --arg c "$_ss_bud_cause" '{agent: $a, budget_reason: "budget_unavailable", cause: $c}')"
+    fi
     # Budget warning: every launch decision at warning level says so. At
     # hard_stop the deny cases below say it (or, for a high-risk launch under
     # the ceiling, the exempt note here). Go twin: launchGate.
