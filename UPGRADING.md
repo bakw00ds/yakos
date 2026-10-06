@@ -6,10 +6,31 @@ current release, what survives, and how to fully uninstall when needed.
 This doc is the **upgrade authority** — `yakos --help`, README, and
 CHANGELOG point here. Last updated for v0.39.
 
-## Upgrading to the next release (unreleased)
+## Upgrading to v0.62.0.0
 
-Changes since v0.61.0.0 that may need action. The first two, and the seventh
-(dollar budgets and subscription runs), are behavior changes.
+v0.62.0.0 is a minor release. A v0.61.0.0 binary upgrades in place with
+`yakos upgrade`. Then refresh every project once, so the supervisor hook picks up
+the token-aware launch gate (item 7):
+
+```sh
+yakos refresh --project <path>      # or: yakos refresh --all
+```
+
+Rolling back a binary install to v0.61.0.0:
+
+- Run the installer pinned to the old version. It also re-points the framework
+  links:
+  `curl -fsSL https://raw.githubusercontent.com/bakw00ds/yakos/main/scripts/install.sh | sh -s -- --version 0.61.0.0`
+- If a release has to be withdrawn, mark its GitHub release as a pre-release. The
+  `latest` release, which `yakos upgrade` and the installer follow, is then v0.61.0.0
+  again.
+- A v0.61.0.0 binary sums only `usage.total_cost_usd`, which is 0 for subscription
+  runs, so its dollar budgets read those runs as free (item 7). The refreshed
+  supervisor hook then gates on dollars only.
+
+Changes since v0.61.0.0 that may need action. Items 1 and 2, item 7 (dollar
+budgets and subscription runs), and the two sections after item 8 (the codex and
+agy sandbox, the SDK sidecar API key) are behavior changes.
 
 ### 1. Agents with `runtime:` now run on that runtime
 
@@ -230,7 +251,7 @@ carries the same semantic alias table (`cheap`, `balanced`, `best`, `reasoning`,
 - `yakos models list`, `show <id>` and `probe` are new; see
   [docs/routing.md](docs/routing.md#model-registry).
 
-## Unreleased: codex runs in an OS sandbox, agy gets `--sandbox` but is not contained (K-133)
+## v0.62.0.0: codex runs in an OS sandbox, agy gets `--sandbox` but is not contained (K-133)
 
 The Go dispatcher (the console, MCP, Flows, JSON-RPC, and `yakos dispatch` with
 `YAKOS_IMPL=go`) now runs codex with `--sandbox workspace-write` and an approval
@@ -318,7 +339,7 @@ Other changes in this release for codex and agy:
   persona is escaped for the command line, which grows quotes, backslashes,
   newlines and control characters).
 
-## Unreleased: the SDK sidecar needs `ANTHROPIC_API_KEY` (K-137)
+## v0.62.0.0: the SDK sidecar needs `ANTHROPIC_API_KEY` (K-137)
 
 `yakos serve --console-structured-questions` runs a Node sidecar built on the
 Anthropic Agent SDK so the console can show `AskUserQuestion` as an answerable
