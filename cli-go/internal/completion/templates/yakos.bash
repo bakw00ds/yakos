@@ -30,7 +30,7 @@ _yakos() {
 archive status team start auth dispatch memory agent agents cost session \
 migrate plugin teach soul retro skill compact checkpoint kanban env standards \
 peer mcp hooks version-bump git-hooks completion supervise \
-refresh upgrade serve console events mtls metrics telemetry model-routing decide budget plan work workflow --help --version -h -v help"
+refresh upgrade serve console events mtls metrics telemetry model-routing decide budget models plan work workflow --help --version -h -v help"
 
     # Known runtimes — used for --runtime, auth, etc.
     local runtimes="claude claude-sdk codex agy antigravity-sdk gemini"

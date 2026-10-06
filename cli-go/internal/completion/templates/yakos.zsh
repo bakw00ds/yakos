@@ -64,6 +64,7 @@ _yakos() {
         'model-routing:evaluate and promote per-task model assignments'
         'decide:ask a typed decision provider (Jev or mock)'
         'budget:per-agent dollar budgets with a hard stop'
+        'models:provider-aware model registry (list, show, probe)'
         'plan:score and correlate plan quality'
         'work:record plan outcome and close work session'
         'workflow:run a named multi-step workflow'

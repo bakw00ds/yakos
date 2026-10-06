@@ -336,6 +336,11 @@ var commandRegistry = []commandEntry{
 		HelpFn: routing.PrintHelp,
 	},
 	{
+		Name:   "models",
+		Specs:  specSet("models", "--json", "--harness", "--project", "--timeout"),
+		HelpFn: printModelsHelp,
+	},
+	{
 		Name:   "mtls",
 		Specs:  specSet("mtls"),
 		HelpFn: helpMTLS,

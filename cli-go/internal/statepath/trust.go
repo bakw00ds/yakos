@@ -9,6 +9,16 @@ import (
 	"runtime"
 )
 
+// ownedBy is the ownership test the trust checks apply to a file and to the
+// directory holding it. It is a variable only so a test can model an entry that
+// another user owns, which a test cannot create without a second account.
+var ownedBy = ownedByCurrentUser
+
+// afterCheck runs in ReadTrusted between the Lstat checks that vet a file and the
+// Open that reads it. It does nothing in production; a test swaps the file there,
+// the way a racing process would, to prove the descriptor comparison refuses it.
+var afterCheck = func(path string) {}
+
 // UntrustedError is returned by ReadTrusted for a state file (or the directory
 // holding it) that this user cannot be sure only they wrote.
 type UntrustedError struct {
@@ -46,12 +56,13 @@ func ReadTrusted(path string, max int64) ([]byte, error) {
 	if !fi.Mode().IsRegular() {
 		return nil, &UntrustedError{path, "is not a regular file"}
 	}
-	if !ownedByCurrentUser(fi) {
+	if !ownedBy(fi) {
 		return nil, &UntrustedError{path, "is owned by another user"}
 	}
 	if runtime.GOOS != "windows" && fi.Mode().Perm()&0o022 != 0 {
 		return nil, &UntrustedError{path, "is group or world writable (chmod go-w)"}
 	}
+	afterCheck(path)
 	f, err := os.Open(path) //nolint:gosec // checked above
 	if err != nil {
 		return nil, err
@@ -84,7 +95,7 @@ func checkTrustedDir(dir string) error {
 	if !fi.IsDir() {
 		return &UntrustedError{dir, "is not a directory"}
 	}
-	if !ownedByCurrentUser(fi) {
+	if !ownedBy(fi) {
 		return &UntrustedError{dir, "is owned by another user"}
 	}
 	if runtime.GOOS != "windows" && fi.Mode().Perm()&0o022 != 0 {
