@@ -177,6 +177,31 @@ func TestBudgetOffIsNotUnavailable(t *testing.T) {
 	}
 }
 
+// K-128 review S12: a project's own words never make the budget read look failed. A
+// repeated agent_budgets key spelled like the CLI's notice is echoed back in the YAML
+// error (the bash twin once took that for an unreadable spend log and launched at the
+// hard stop): the hook refuses at the hard stop and logs no budget_unavailable record.
+// Bash twin: tests/run-supervisor-budget-test.sh (10), "spoof".
+func TestBudgetProjectConfigTextCannotFakeAReadFailure(t *testing.T) {
+	h, rec, work, env := gateHook(t, "min_launch_interval_s: 0\n", "")
+	budgetState(t, 100, 100)
+	yml := "supervisor:\n  score_every_n_calls: 1\nagent_budgets:\n  \"(failing open)\": 1\n  \"(failing open)\": 2\n"
+	if err := os.WriteFile(filepath.Join(h.ProjectDir, ".yakos.yml"), []byte(yml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bigEdit(t, h, env, 1)
+	if len(rec.specs) != 0 {
+		t.Fatalf("launched at the hard stop; launches=%d\n%s", len(rec.specs), allLogs(t, work))
+	}
+	logs := allLogs(t, work)
+	if !strings.Contains(logs, "supervisor budget exhausted; skipping this routine") {
+		t.Errorf("no budget refusal:\n%s", logs)
+	}
+	if strings.Contains(logs, "budget_unavailable") {
+		t.Errorf("the project's text made the read look failed:\n%s", logs)
+	}
+}
+
 func TestBudgetProjectCannotLoosen(t *testing.T) {
 	// The user limit is 100 and spend 150. A project asking for 1000 is
 	// ignored, so routine launches are still refused.

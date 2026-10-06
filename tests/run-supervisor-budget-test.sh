@@ -21,7 +21,9 @@
 # 10. unavailable  a budget that cannot be read (a hung, silent or garbled CLI, a
 #                 failing jq, an unreadable spend log) still fails open and the
 #                 launch still happens, but ONE WARN names the cause (K-128, S3);
-#                 a budget that is switched off is not such a failure.
+#                 a budget that is switched off is not such a failure, and text
+#                 a project controls (a repeated agent_budgets key spelled like
+#                 the CLI's notice) is never mistaken for one (S12).
 # Run under both `bash` and `/bin/bash` (3.2 on macOS).
 set -u
 
@@ -222,20 +224,33 @@ done
 # twin comparison covers the "unread", "off" and "stub" sandboxes. The bash twin forks the CLI, so it has four causes: a
 # hung CLI (timeout, checked after (7) above), one that prints nothing and fails (no_output; one that exits 0 has
 # no budget to report and is not a failure, checked in the loop below), one whose output is not a
-# budget (parse: not JSON, JSON without a limit, or a failing jq) and one that says on stderr it could not read
-# the spend log and failed open (read_error: its JSON then reads "ok, nothing spent"). The Go twin evaluates
-# in-process, so only read_error exists there. A budget switched off (limit 0) is not a failure and stays silent,
-# and neither is a CLI that prints nothing and exits 0.
+# budget (parse: not JSON, JSON without a limit, or a failing jq) and one whose JSON says read_failed: it could not
+# read the spend log, so its numbers read "ok, nothing spent" (read_error; the CLI sets the field from the error
+# itself, also on its internal-error path). The bash hook NEVER reads the CLI's stderr: it carries text a project
+# controls (S12), which the "spoof" sandboxes below prove. The Go twin evaluates in-process, so only read_error
+# exists there. A budget switched off (limit 0) is not a failure and stays silent, and neither is a CLI that
+# prints nothing and exits 0.
 jqshim="$TMP/jqshim"; mkdir -p "$jqshim"
 printf '#!/bin/sh\nfor a in "$@"; do case "$a" in *limit_usd*) exit 1 ;; esac; done\nexec "%s" "$@"\n' "$(command -v jq)" > "$jqshim/jq"
 chmod +x "$jqshim/jq"
-for spec in 'silent|exit 1|no_output' 'garbage|echo not-json; exit 4|parse' 'notbudget|echo "{}"; exit 0|parse'; do
+for spec in 'silent|exit 1|no_output' 'garbage|echo not-json; exit 4|parse' 'notbudget|echo "{}"; exit 0|parse' \
+            'readfailed|echo "{\"state\":\"ok\",\"spent_usd\":0,\"limit_usd\":100,\"stop_usd\":200,\"read_failed\":true}"; exit 0|read_error' \
+            'panicjson|echo "{\"agent\":\"supervisor\",\"read_failed\":true}"; exit 0|read_error'; do
     name="${spec%%|*}"; rest="${spec#*|}"; body="${rest%%|*}"; cause="${rest#*|}"
     sb="$(mksb "unavail-$name-bash" 100 0)"; fakecli "$sb" "$body"
     fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
     if unavail_is "$sb" "$cause" && [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ]; then ok "(10) bash a CLI that gives '$name' output: one WARN, cause $cause, the launch still happens"
     else bad "(10) bash '$name' CLI: wanted cause $cause: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
 done
+# K-128 S12: what the CLI writes on stderr is never evidence of a failed read. It carries text a project controls (a
+# repeated agent_budgets key in .yakos.yml is echoed back in the YAML error), so a CLI that prints the notice and a hard
+# stop in the same breath has a hard stop: the launch is refused and nothing is logged as unavailable. (The real-CLI
+# version of this, sec-327's probe, is the "spoof" sandbox below.)
+sb="$(mksb "stderr-notice-bash" 100 0)"
+fakecli "$sb" 'echo "{\"state\":\"hard_stop\",\"spent_usd\":100,\"limit_usd\":100,\"stop_usd\":200}"; echo "yakos budget check: budget: reading spend: x (failing open)" >&2; exit 4'
+fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
+if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && logs "$sb" | grep -q 'budget exhausted; skipping this routine' && [ -z "$(unavail "$sb")" ]; then ok "(10) bash the notice on stderr is not a read failure: a hard stop in the JSON is refused, nothing logged as unavailable"
+else bad "(10) bash stderr notice: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")] (a launch here means stderr text was taken for a failed read)"; fi
 # a failing jq (the CLI is healthy, its answer cannot be read)
 sb="$(mksb "unavail-jqfail-bash" 100 0)"
 env PATH="$jqshim:$PATH" YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/bin/fakeyakos" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" \
@@ -252,6 +267,18 @@ for side in bash go; do
     w="$(logs "$sb" | grep -n 'budget_unavailable' | head -n 1 | cut -d: -f1)"; l="$(logs "$sb" | grep -n 'forked async' | head -n 1 | cut -d: -f1)"
     if [ -n "$w" ] && [ -n "$l" ] && [ "$w" -lt "$l" ]; then ok "(10) $side the WARN comes ahead of the launch record"; else bad "(10) $side WARN at record ${w:-none}, launch at ${l:-none}"; fi
     if grep -qi budget "$sb/hook.stderr"; then bad "(10) $side the WARN must stay in the hook log, stderr: $(cat "$sb/hook.stderr")"; else ok "(10) $side nothing on stderr"; fi
+    # S12 (sec-327's probe, with the real CLI): a project's .yakos.yml whose agent_budgets repeats a key spelled like the
+    # CLI's notice. The YAML error echoes it on stderr, the spend is at the limit: the launch is refused and nothing is
+    # logged as unavailable (the bash hook once took the words for an unreadable spend log and launched at the hard stop).
+    sb="$(mksb "spoof-$side" 100 100 $'agent_budgets:\n  "(failing open)": 1\n  "(failing open)": 2\n')"
+    if [ "$side" = bash ]; then
+        # the precondition: the project's words really reach the real CLI's stderr, or the test below proves nothing
+        if YAKOS_DISPATCH_LOG="$sb/state" "$GO_BINARY" budget check supervisor --project "$sb" --json 2>&1 >/dev/null | grep -q '(failing open)'; then ok "(10) the spoof sandbox puts the project's words on the real CLI's stderr"
+        else bad "(10) the spoof sandbox does not reach the CLI's stderr: the spoof test would be vacuous"; fi
+    fi
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && logs "$sb" | grep -q 'budget exhausted; skipping this routine' && [ -z "$(unavail "$sb")" ]; then ok "(10) $side project text that spells the CLI's notice is not a read failure: refused at the hard stop, nothing logged as unavailable"
+    else bad "(10) $side spoof: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")] refusals=$(logs "$sb" | grep -c 'budget exhausted; skipping this routine')"; fi
     # a CLI that prints nothing and exits 0 has no budget to report (the stub the other suites use): not a failure
     sb="$(mksb "stub-$side" 100 0)"; fakecli "$sb" "exit 0"
     fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
@@ -276,7 +303,7 @@ cmp_norm() { # cmp_norm <sandbox>
     echo '-- the wrapper records, as a set --'
     logs "$1" | jq -c 'select(has("session_id") | not) | del(.ts, .duration_s)' 2>&1 | sort
 }
-for scen in routine high ceil warn proj quiet flags unread off stub; do
+for scen in routine high ceil warn proj quiet flags unread off stub spoof; do
     b="$(cmp_norm "$TMP/$scen-bash")"
     g="$(cmp_norm "$TMP/$scen-go")"
     if [ -n "$b" ] && [ "$b" = "$g" ]; then ok "(9) $scen hook-log records are byte-identical across twins"; else
