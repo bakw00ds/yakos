@@ -536,7 +536,7 @@ func TestDefaultRuntimeProbe_TTLZeroNeverCaches(t *testing.T) {
 func TestRoute_UntrustedStateDefaultIsReportedAndIgnored(t *testing.T) {
 	root := routingRoot(t)
 	logbuf := captureRouteLog(t)
-	withStateDefaultWarn(t, "", "ignoring the default runtime in /x/default-runtime: is a symlink")
+	withStateDefaultWarn(t, "", "ignoring the default runtime: the default-runtime file in the yakOS state directory is a symlink")
 	got, err := route(t, root, projectWithYML(t, ""), "plain", nil)
 	if err != nil || got.Runtime != "claude" || got.RuntimeChosenBy != RuntimeByDefault {
 		t.Fatalf("got %+v %v, want claude by default", got, err)

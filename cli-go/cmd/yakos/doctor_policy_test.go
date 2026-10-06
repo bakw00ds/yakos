@@ -92,7 +92,9 @@ func TestDoctor_GoNative_PolicyReportsARefusedDefaultRuntime(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("--policy must exit 0 whatever it finds; got %d\n%s", code, out)
 	}
-	for _, want := range []string{"[medium]", "default runtime file", "is group or world writable", "yakos auth set-default"} {
+	// The doctor's line is dispatch's own warning behind "dispatch is".
+	const refused = "dispatch is ignoring the default runtime: the default-runtime file in the yakOS state directory is group or world writable"
+	for _, want := range []string{"[medium]", refused, "yakos auth set-default"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("output is missing %q:\n%s", want, out)
 		}
@@ -105,8 +107,35 @@ func TestDoctor_GoNative_PolicyReportsARefusedDefaultRuntime(t *testing.T) {
 	clean := t.TempDir()
 	writeStateFile(t, clean, "default-runtime", "codex\n", 0o600)
 	out, code = runGoDoctor(t, goBin, []string{"doctor", "--policy"}, policyEnv(clean))
-	if code != 0 || strings.Contains(out, "default runtime file") {
+	if code != 0 || strings.Contains(out, "ignoring the default runtime") {
 		t.Errorf("a trusted default-runtime file must not be reported (exit %d):\n%s", code, out)
+	}
+}
+
+// With no home the doctor must look where dispatch looks: a .yakos-state under the temp
+// directory (statepath.Dir). rev-323 reproduced it on the built binary: HOME unset, TMPDIR
+// holding a world-writable default-runtime, dispatch refuses it and the doctor used to say
+// nothing, because it read /tmp/.yakos-state.
+func TestDoctor_GoNative_PolicyWithoutAHomeReadsTheTempStateDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	goBin := policyBinary(t)
+	tmp := t.TempDir()
+	writeStateFile(t, tmp, "default-runtime", "codex\n", 0o666) // <tmp>/.yakos-state/default-runtime
+	env := policyEnv("")
+	env["HOME"], env["USERPROFILE"], env["TMPDIR"] = "", "", tmp
+
+	out, code := runGoDoctor(t, goBin, []string{"doctor", "--policy"}, env)
+	if code != 0 {
+		t.Fatalf("--policy must exit 0 whatever it finds; got %d\n%s", code, out)
+	}
+	const refused = "dispatch is ignoring the default runtime: the default-runtime file in the yakOS state directory is group or world writable"
+	if !strings.Contains(out, refused) {
+		t.Errorf("with no home the doctor must report the refusal dispatch makes in $TMPDIR/.yakos-state:\n%s", out)
+	}
+	if strings.Contains(out, tmp) {
+		t.Errorf("the report printed the temp path:\n%s", out)
 	}
 }
 

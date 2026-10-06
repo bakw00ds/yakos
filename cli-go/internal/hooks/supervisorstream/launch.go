@@ -30,7 +30,7 @@ type LaunchSpec struct {
 	// `hook supervisor-wrap`: a Go process (no bash, so it also works on
 	// Windows) that runs Args under a wall-clock deadline, clears the
 	// in-flight state and starts the follow-up for coalesced triggers. State
-	// and Lock are the shared state file and mkdir lock, Pending the
+	// and Lock are the shared state file and lock path, Pending the
 	// per-session pending-events file and Log the hook ndjson log.
 	Self                  string
 	State, Lock, Log      string

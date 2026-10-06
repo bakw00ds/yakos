@@ -235,6 +235,12 @@ func budgetCheck(stdout, stderr io.Writer, agent string, opts budget.Options, as
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Fprintf(stderr, "yakos budget check: internal error: %v (failing open)\n", r)
+			// Say so in the structured status too: a hook must not read "nothing on
+			// stdout, exit 0" as "nothing to report" (it never reads stderr).
+			if asJSON {
+				b, _ := json.Marshal(map[string]any{"agent": agent, "read_failed": true})
+				fmt.Fprintln(stdout, string(b))
+			}
 			code = 0
 		}
 	}()

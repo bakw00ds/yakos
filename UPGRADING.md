@@ -288,7 +288,8 @@ line (`claude-sdk: refusing to run: ANTHROPIC_API_KEY is not set; ...`) unless
 `ANTHROPIC_API_KEY` holds an API key, and the python it starts gets no
 `CLAUDE_CODE_OAUTH*` or OAuth-token variables. Export a key, or use
 `--runtime claude`, which is Claude Code itself. `yakos start --runtime
-claude-sdk` is unchanged: it launches Claude Code.
+claude-sdk` still launches Claude Code; only its auth hint changed, and both
+CLIs now say `yakos auth login claude`.
 
 **Known limit on Linux:** the bash `claude-sdk` runtime cannot yet dispatch the
 full framework roster there. It hands the roster to python in one environment

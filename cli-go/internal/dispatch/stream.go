@@ -433,7 +433,7 @@ func execWithStreaming(
 		parsed         *runtime.ParseResult // buffered runtimes: the LineParser's outcome
 		textBlocks     = make(map[int]struct{})
 		toolUseBlocks  = make(map[int]*runtime.ToolEvent)          // index → in-progress tool_use
-		toolIDToName   = make(map[string]string)                    // tool-use id → name for tool_result correlation
+		toolIDToName   = make(map[string]string)                   // tool-use id → name for tool_result correlation
 		thinkingBlocks = make(map[int]*runtime.ThinkingBlockEntry) // index → in-progress thinking block
 	)
 

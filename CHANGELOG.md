@@ -549,6 +549,92 @@ subscription harness or a local model; see UPGRADING.md.
   agent's text is invalid TOML (and invalid in a YAML double-quoted scalar), so
   both emitters now write it as `\u00XX`, as the chat path already did.
 
+- **Bash `yakos validate` checks the frontmatter of rules and skills when the
+  project has no agents directory (K-132 follow-up, rev-324b).** The
+  frontmatter pass ran its three `find` calls, for agents, skills and rules, in
+  one process substitution under `set -e`, and `find` exits 1 for a directory
+  that is not there. A project with no agents directory, no skills directory,
+  or an agents directory the dispatcher refuses ended the group at the first
+  `find` that failed, so the files after it, rules included, were never
+  validated and a file with no frontmatter passed. The Go validator always
+  checked them, so the two reported different findings. The pass now runs
+  whatever is missing, and `tests/run-agent-enums-test.sh` compares both
+  validators on four such projects.
+- **supervisor-stream: ten concurrent hooks no longer exhaust the lock budget
+  (K-128).** Under load (a 3-core macOS runner, or a team of agents sharing one
+  `work/current/`) the bash hook's lock was held across the budget CLI, several
+  `jq` forks and the log writes, so a hold took 100-300 ms and the tenth hook
+  gave up after its 3 s wait: the coalesce suite counted 7-8 of 9 coalesced
+  hooks, the stream suite lost increments (counter 11 of 12), and a launch was
+  skipped. Both twins now hold the lock only for the counter / run-state
+  read-modify-write (a temp file and a rename) and the wrapper spawn, and do
+  everything else outside it: the budget read, every log record and the
+  synthetic findings. The lock is an `O_EXCL` file create instead of `mkdir`
+  (no fork to take it; the path is unchanged, so old and new hooks still
+  exclude each other), and waiters back off from 5 ms to 160 ms with jitter
+  instead of polling every 20 ms. A hook whose 3 s wait still expires journals
+  its increment (and, for a high-risk trigger, its run-state record) for the
+  next lock holder instead of dropping it; the folder covers any score-every
+  crossing the records skipped, and the session's wrapper folds trigger records
+  too, so a trigger journaled while a run is in flight still gets its follow-up.
+  Taking the lock also survives POSIX-mode bash, and the clock is read after the
+  lock is held (to the second, in bash). The budget is still read before the
+  lock, and read again under it when the dispatch log grew in between (a run of
+  this or another session started, spent and ended while the hook waited), so a
+  launch decision never rests on a read older than the lock; in bash that costs
+  one `wc -c` under the lock on the launch-decision path. A counter that cannot
+  be written now logs a WARN and still records a high-risk trigger instead of
+  dropping the tick silently. Projects pick up the bash hook with `yakos
+  refresh --project <path>`; the Go twin ships in the binary. See
+  `docs/supervisor-mode.md` "Lock protocol".
+- **`yakos supervise clear` removes journaled counter increments** with the
+  counter, so the next hook cannot fold them into a counter that was just cleared.
+- **The bounded budget read is bounded in time.** `yakos budget check` was
+  waited on for 40 polls of `sleep 0.05`, which counts iterations: on a loaded
+  runner each poll cost a fork on top of its 50 ms and the "2 s" read took 4 s
+  or more (the budget suite's "hook took 7s"). A watchdog now enforces 2 s of
+  wall-clock time.
+- **Timing-dependent supervisor tests.** The strict-config twin-log comparison
+  decided launch-or-defer by how long each twin took, the in-flight windows
+  were barely wider than a slow bash hook, and the budget suite compared the
+  detached wrapper's records by position and duration. Each is now independent
+  of speed.
+- **supervisor-stream says when it could not read the dollar budget (K-128).** A
+  launch decision whose budget read failed (the bash hook's `yakos budget check`
+  hung past its 2 s bound, printed nothing and failed, or printed something that
+  is not a budget, or `jq` failed on it; or, in either twin, the spend log could
+  not be read) already failed open, as documented, but left only the ordinary
+  "forked async" record, so nothing told the operator the dollar budget had gone
+  unenforced. Both twins now write one WARN to the hook log, ahead of the
+  launch's own record: `supervisor budget unavailable (cause:
+  timeout|no_output|parse|read_error)`, with `budget_reason: budget_unavailable`
+  and a `cause` field. The decision is unchanged and nothing goes to stderr. A
+  budget that is switched off (a limit of 0) and a CLI that prints nothing and
+  exits 0 are not failures and stay silent. `yakos budget check --json` now
+  carries `"read_failed": true` when the spend could not be read (its numbers
+  then read "ok, nothing spent"), set from the error itself, and the bash hook
+  uses that field. It never reads the CLI's stderr, which carries text a project
+  controls: a repeated `agent_budgets` key in `.yakos.yml` is echoed back there
+  by the YAML error. A CLI built before the field existed is read as an ordinary
+  one (the bash hook then cannot report an unreadable spend log). See `docs/budgets.md`, "Failure posture".
+- **supervisor-stream lock files are owner-only in both twins (K-128).** The bash
+  hook and its wrapper created the lock with the caller's umask (0644, or 0666
+  under umask 0) where the Go twin's is 0600; both now create it 0600 whatever
+  the umask, setting the mask with builtins around the create so taking the lock
+  still forks nothing. The pending-preview file was already created 0600 under
+  any umask by every writer; a test now pins that under umask 0. The Go twin also
+  opens its test-only lock-stats file with `O_NOFOLLOW`, closing the gap between
+  its symlink check and the open.
+- **A cleanup race in the supervisor shell suites (closes K-130).** The prefilter
+  suite passed every check and still exited 1 about once in 20 runs (3 of 60 local
+  runs on the base commit, and one CI rerun of the K-128 PR): the detached wrapper
+  of its test (h) writes its end-of-run state, log and lock a few milliseconds
+  after its dispatch returns, and the bare removal of the sandbox in the EXIT trap
+  ran into it ("Directory not empty"). The prefilter suite now waits for that
+  wrapper to go idle and retries the removal. The stream and coalesce suites, which
+  also leave detached wrappers behind, wait (10 s at most) for the wrappers of their
+  own run and retry the removal too. All three keep the suite's own exit status.
+
 ### Security
 
 - **A conversation, and the claude session its follow-ups resume, belong to
@@ -569,7 +655,10 @@ subscription harness or a local model; see UPGRADING.md.
   every unpinned dispatch to a vendor. It is now read only as a regular file
   owned by you, not group or world writable, in a directory with the same
   properties and not a symlink; otherwise it is reported and ignored. Matters
-  where the state directory falls back to the shared temp directory. Both
+  where the state directory falls back to the shared temp directory. The warning
+  names the file or the directory by role and carries no path, and `yakos doctor
+  --policy` reports that same warning word for word, looking in the directory
+  dispatch looks in, the temp-directory fallback included. Both
   writers of the file (`yakos auth set-default` in bash and in Go) now create
   it 0600 whatever the umask and repair a group-writable one, so a umask of 002
   no longer produces a file the dispatcher refuses.
@@ -622,16 +711,23 @@ subscription harness or a local model; see UPGRADING.md.
   without blocking, and the open file must be a regular file and the same file
   that was checked. In Go, a link retargeted to an outside file, a directory
   swapped for a link, or a file swapped for a FIFO between the check and the
-  read is a skip, not a leak or a hang (rev-324). The bash composer still
-  checks and then reads: the open by descriptor that closes the race has no
-  bash equivalent, so a link retargeted between the check and the read can
-  still be followed there (rev-324 saw the retargeting link win in 3 of 17 runs
-  of a tight loop). The bash composer is the parity oracle that K-143 retires,
-  and the race is not closed in it. If you linked an agent or skill file to
-  another file of the project, move that file into `.claude/agents` or
-  `.claude/skills` (a subdirectory is fine). If you linked `.claude/agents`,
-  `.claude/skills` or `.claude` itself, make it a real directory. Links into
-  `lib/agents` and `lib/skills` keep working.
+  read is a skip, not a leak or a hang (rev-324). What is left in Go is the
+  path down to a file. The project's `.claude`, its agents and skills
+  directories, and a skill's own directory are checked or listed by path, so
+  one swapped for a link before a file in it is inspected is not caught. A swap
+  after the inspection is caught, as above, and only `*.md` and `SKILL.md`
+  files can be read through one. An `os.OpenRoot` design that opens the
+  project's directory once and reads through it is tracked on K-143, skill
+  directories included. The bash composer still checks and then reads: the open
+  by descriptor that closes the race has no bash equivalent, so a link
+  retargeted between the check and the read can still be followed there
+  (rev-324 saw the retargeting link win in 3 of 17 runs of a tight loop). The
+  bash composer is the parity oracle that K-143 retires, and the race is not
+  closed in it. If you linked an agent or skill file to another file of the
+  project, move that file into `.claude/agents` or `.claude/skills` (a
+  subdirectory is fine). If you linked `.claude/agents`, `.claude/skills` or
+  `.claude` itself, make it a real directory. Links into `lib/agents` and
+  `lib/skills` keep working.
 
 - **The skills listing skips a `SKILL.md` it may not read instead of failing
   (K-132 follow-up, sec-324).** `ComposeSkills`, behind `GET /api/skills`, read
@@ -756,8 +852,11 @@ subscription harness or a local model; see UPGRADING.md.
   agents or starts python, runs python under `env -u` for the same OAuth
   variables (names matched in any letter case), and `claude-sdk-dispatch.py`
   repeats the check (exit 78). The claude
-  CLI adapters, `launch` and `yakos start --runtime claude-sdk` are unchanged and
-  still forward `CLAUDE_CODE_OAUTH_TOKEN`, because they run Claude Code.
+  CLI adapters, `launch` and `yakos start --runtime claude-sdk` still forward
+  `CLAUDE_CODE_OAUTH_TOKEN`, because they run Claude Code. The one change to
+  `yakos start --runtime claude-sdk` is its auth hint: the warning and the banner
+  in both CLIs now say `yakos auth login claude`, because start launches Claude
+  Code and `yakos auth login claude-sdk` no longer logs anything in.
   `yakos auth` no longer says the claude login covers claude-sdk: `status`
   reports whether `ANTHROPIC_API_KEY` is set (never its value) and that the SDK
   engine does not use the claude login, `login` says how to set the key and

@@ -124,6 +124,13 @@ yakos budget check <agent> [--project <path>] [--json]
   has a token limit, the supervisor and librarian always, the line ends with
   ` spent_tokens=<n> limit_tokens=<n>`; for every other agent it is unchanged. The
   state is `hard_stop`, and the exit code 4, when either limit is reached.
+  `--json` also carries `"read_failed": true`, and only then, when the spend could
+  not be read (an unreadable dispatch log, or an internal error): the other
+  numbers then describe an empty ledger, not a measurement, and the exit stays 0
+  (it fails open). The field is set from the error itself. A hook relies on it and
+  never on the words on stderr or in `warnings`, which carry text a project
+  controls (a repeated `agent_budgets` key in `.yakos.yml` is echoed back in the
+  YAML error).
 - `yakos doctor` lists agents in `warning` or `hard_stop`, and prints nothing
   about budgets when every agent is healthy. The supervisor is special: at
   `hard_stop` doctor reports an **error**, "LLM supervision disabled: supervisor
@@ -307,6 +314,30 @@ The budget is a cost guard, not a security control, so it fails open: an
 unreadable log, an untrusted policy file or a failed cache write prints a notice
 and the dispatch proceeds. Only a computed `hard_stop` refuses.
 
+The supervisor hook (bash and Go twin) fails open the same way when it cannot
+read the budget at a launch decision, and says so: one WARN record in the hook
+log, `supervisor budget unavailable (cause: <cause>)`, with `budget_reason:
+budget_unavailable` and a `cause` that names what failed. It comes ahead of the
+launch's own record, goes to the hook log only (nothing on stderr), and does not
+change the decision.
+
+| `cause` | Meaning | Twin |
+|---|---|---|
+| `timeout` | the `yakos budget check` child outlived its 2 s wall-clock bound and was killed | bash |
+| `no_output` | it printed nothing and exited non-zero, or could not run (a CLI too old to have `budget`, one that crashed, a missing binary) | bash |
+| `parse` | what it printed is not a budget: not JSON, JSON without a numeric `limit_usd`, or a failing `jq` | bash |
+| `read_error` | the spend could not be read: the CLI's JSON says `read_failed: true` (its numbers then read "ok, nothing spent"), also when it failed inside; the Go twin sees the same error in-process | both |
+
+The bash hook never reads the CLI's stderr: it carries text a project controls,
+and a hook that took it for evidence could be made to fail open by a project's own
+config. A CLI built before the `read_failed` field existed is a normal CLI to the
+hook: the absence of the field is an ordinary read, so everything still works, and
+the bash hook simply cannot report an unreadable spend log then (the Go twin still
+does, in-process). The Go twin evaluates in-process, so only `read_error` exists
+there. A budget that is switched off (a limit of 0) is not a failure and logs
+nothing, and neither is a CLI that prints nothing and exits 0: it has no budget to
+report.
+
 ## Where it is enforced
 
 - `dispatch.Run` (the Go dispatch, also used by the daemon and MCP paths).
@@ -350,7 +381,8 @@ evaluates the budget in-process. The bash twin cannot, so at each launch
 decision (never per event) it runs `yakos budget check supervisor --json`, and
 fails open if the CLI is missing or too old to have `budget`. A project's
 `agent_budgets:` can only lower the limit, never loosen it. Log records carry a
-stable `budget_reason` (`budget_warning` or `budget_exhausted`).
+stable `budget_reason` (`budget_warning`, `budget_exhausted` or, when the
+budget could not be read, `budget_unavailable`).
 
 Because `yakos dispatch` refuses the supervisor only at 2x, any same-user caller
 can run `yakos dispatch supervisor` between 1x and 2x, so routine supervisor

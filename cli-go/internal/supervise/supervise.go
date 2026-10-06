@@ -698,6 +698,18 @@ func runClear(cfg Config, home, acRoot string) (*Result, error) {
 			}
 		}
 	}
+	// Increments a hook journaled when it could not take the lock (K-128): left
+	// behind, the next hook would fold them into the counter that was just cleared.
+	if entries, err := os.ReadDir(paths.workCurrent); err == nil {
+		prefix := filepath.Base(paths.counter) + ".add."
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), prefix) && e.Type().IsRegular() {
+				if os.Remove(filepath.Join(paths.workCurrent, e.Name())) == nil {
+					removed++
+				}
+			}
+		}
+	}
 
 	_, _ = fmt.Fprintf(cfg.Writer, "supervise clear: removed %d file(s) for %s (config in .yakos.yml preserved)\n",
 		removed, proj)

@@ -78,6 +78,13 @@ type Status struct {
 	Source    string   `json:"source"`
 	RollsOver string   `json:"rolls_over,omitempty"`
 	Warnings  []string `json:"warnings,omitempty"`
+	// ReadFailed is true when the spend could not be read (an unreadable dispatch
+	// log). The state, spend and percentage then describe an empty ledger, "ok,
+	// nothing spent", which is not a measurement, and callers fail open. It is set
+	// from the error itself and never from text: stderr and Warnings carry strings a
+	// project controls (a repeated agent_budgets key is echoed back in the YAML
+	// error), so a hook must rely on this field and not on the words it finds there.
+	ReadFailed bool `json:"read_failed,omitempty"`
 	// Reason is a stable machine-readable code: budget_off, budget_ok,
 	// budget_warning or budget_exhausted. Hooks and scripts match on it.
 	Reason string `json:"reason"`
@@ -241,6 +248,7 @@ func Evaluate(agent string, o Options) (Status, error) {
 	st.Reason = ReasonOK
 	agg, err := refresh(dir)
 	if err != nil {
+		st.ReadFailed = true
 		return st, fmt.Errorf("budget: reading spend: %w", err)
 	}
 	spent := agg.spend(agent, lim.Window, st.WindowKey)

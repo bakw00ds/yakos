@@ -1,5 +1,7 @@
 package supervisorstream
 
+import "time"
+
 // GlobMatchForTest exposes globMatch to the external test package.
 func GlobMatchForTest(g, p string) bool { return globMatch(g, p) }
 
@@ -19,3 +21,10 @@ func RiskLabelsForTest() ([]string, int) {
 
 // WrapLogOrderForTest exposes the wrapper's extras order.
 func WrapLogOrderForTest() []string { return append([]string(nil), wrapLogOrder...) }
+
+// SetLockBudgetForTest shortens the lock wait ceiling; the returned func restores it.
+func SetLockBudgetForTest(d time.Duration) func() {
+	old := lockBudget
+	lockBudget = d
+	return func() { lockBudget = old }
+}
