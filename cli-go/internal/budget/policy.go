@@ -410,7 +410,8 @@ func ValidateAgent(agent string) error {
 	return nil
 }
 
-// Limit is the effective limit for one agent.
+// Limit is the effective limit for one agent: one tuple on the agent's one spend
+// counter.
 type Limit struct {
 	USD      float64 // 0 = off
 	Tokens   int64   // 0 = off
@@ -418,10 +419,17 @@ type Limit struct {
 	WarnPct  int
 	Source   string // builtin | policy | policy-default | project | none
 	Warnings []string
-	// StopFactor scales the dispatch-level stop: dispatch refuses at
-	// StopFactor x USD (1 for every agent but the supervisor). It scales Tokens
-	// the same way.
+	// StopFactor is the factor the dispatch-level stop is derived from: dispatch
+	// refuses at StopFactor x the limit (1 for every agent but the supervisor).
 	StopFactor float64
+	// StopUSD and StopTokens are where dispatch refuses, in absolute terms, one per
+	// unit (0 when the unit has no limit). For an agent resolved on its own they are
+	// the limit times StopFactor. They are stored, not derived from StopFactor, because
+	// the agent a project names as its supervisor combines two tuples (see tighter),
+	// and each unit's stop is the smaller of the two sides' absolute stops: a single
+	// factor cannot express "this side's amount with that side's stop".
+	StopUSD    float64
+	StopTokens int64
 }
 
 func parseWindow(s string, fallback Window) Window {
@@ -439,28 +447,17 @@ func parseWindow(s string, fallback Window) Window {
 // default, else off. projectUSD is the project's requested limit (nil when
 // the project sets none) and can only lower the result.
 func Resolve(agent string, p Policy, projectUSD *float64) Limit {
-	return resolve(agent, "", p, projectUSD)
+	return resolve(agent, p, projectUSD)
 }
 
 // maxLimitUSD bounds a configured dollar limit. A larger number is a typo, and a
 // stop of twice it must stay finite (1e308 doubled is an infinite stop).
 const maxLimitUSD = 1e9
 
-// resolve is Resolve for an agent that is also known by another agent's budget.
-// When alias is not empty, the alias's built-in limits and stop factor and its
-// own entry in the policy apply to agent too, before agent's own, which are more
-// specific and win. It is how the agent a project names as its supervisor keeps
-// the supervisor's budget, whatever it is called (see projectConfig).
-func resolve(agent, alias string, p Policy, projectUSD *float64) Limit {
-	names := []string{agent}
-	if alias != "" && alias != agent {
-		names = []string{alias, agent}
-	}
+func resolve(agent string, p Policy, projectUSD *float64) Limit {
 	l := Limit{Window: Monthly, WarnPct: DefaultWarnPct, Source: "none", StopFactor: 1}
-	for _, n := range names {
-		if f, ok := builtinStopFactor[n]; ok {
-			l.StopFactor = f
-		}
+	if f, ok := builtinStopFactor[agent]; ok {
+		l.StopFactor = f
 	}
 	// apply layers one policy entry (name is "default" or an agent) on l. A limit that
 	// is out of range is IGNORED with a warning, and the limit it would have replaced
@@ -499,21 +496,17 @@ func resolve(agent, alias string, p Policy, projectUSD *float64) Limit {
 	}
 	// Global default first so agent-level values override it field by field.
 	apply("default", p.Default, "policy-default")
-	for _, n := range names {
-		if v, ok := builtinLimits[n]; ok {
-			// A built-in is more specific than the global default.
-			l.USD, l.Source = v, "builtin"
-		}
-		if v, ok := builtinTokenLimits[n]; ok {
-			// So is a built-in token limit (K-136); it keeps the budget tripping for
-			// a subscription operator, whose runs never move the dollar limit.
-			l.Tokens, l.Source = v, "builtin"
-		}
+	if v, ok := builtinLimits[agent]; ok {
+		// A built-in is more specific than the global default.
+		l.USD, l.Source = v, "builtin"
 	}
-	for _, n := range names {
-		if a, ok := p.Agents[n]; ok {
-			apply(n, a, "policy")
-		}
+	if v, ok := builtinTokenLimits[agent]; ok {
+		// So is a built-in token limit (K-136); it keeps the budget tripping for
+		// a subscription operator, whose runs never move the dollar limit.
+		l.Tokens, l.Source = v, "builtin"
+	}
+	if a, ok := p.Agents[agent]; ok {
+		apply(agent, a, "policy")
 	}
 	if projectUSD != nil {
 		pv := *projectUSD
@@ -528,7 +521,93 @@ func resolve(agent, alias string, p Policy, projectUSD *float64) Limit {
 			l.Warnings = append(l.Warnings, fmt.Sprintf("project agent_budgets.%s=$%.2f ignored: a project cannot raise the user-level limit of $%.2f", agent, pv, l.USD))
 		}
 	}
+	l.StopUSD = l.USD * l.StopFactor
+	l.StopTokens = int64(float64(l.Tokens) * l.StopFactor)
 	return l
+}
+
+// effective is the limit Evaluate and Reset use for agent: resolve, and, when the
+// project names agent as its supervisor, combined with the supervisor's own limit
+// (see tighter). A project's agent_budgets: lowers either side's dollar limit.
+func effective(agent string, p Policy, cfg projectConfig) Limit {
+	own := resolve(agent, p, cfg.projectUSD(agent))
+	if cfg.aliasFor(agent) == "" {
+		return own
+	}
+	return tighter(own, resolve(supervisorAgent, p, cfg.projectUSD(supervisorAgent)))
+}
+
+// tighter combines the limit of an agent a project names as its supervisor (own: its
+// operator entry, else the policy default, else its own built-in, with its own window
+// and stop) with the supervisor's limit (sup: the operator's supervisor entry, else the
+// built-in, with its window and stop) into ONE limit on the agent's one spend counter.
+// The project file is the attacker in this model, so the result is never looser than
+// either side, and so never looser than checking both separately:
+//
+//   - per unit (dollars, tokens) the smaller amount;
+//   - per unit the smaller ABSOLUTE stop, min(own amount x own factor, sup amount x sup
+//     factor), not the stop of whichever side has the smaller amount (an own 50M limit
+//     with a 50M stop beside the supervisor's 33M with a 66M stop is 33M with a 50M
+//     stop, not 33M with 66M);
+//   - the window is lifetime if either side is lifetime, monthly only when both are;
+//   - a unit that is off or unlimited on one side counts as infinite there, so only an
+//     agent that would otherwise be unlimited in a unit gains the supervisor's limit.
+//
+// It can be stricter than checking both separately: an own $200 lifetime limit beside
+// the supervisor's $100 monthly one becomes $100 lifetime.
+func tighter(own, sup Limit) Limit {
+	out := own
+	out.USD = tighterF(own.USD, sup.USD)
+	out.StopUSD = tighterF(own.StopUSD, sup.StopUSD)
+	out.Tokens = tighterI(own.Tokens, sup.Tokens)
+	out.StopTokens = tighterI(own.StopTokens, sup.StopTokens)
+	if own.Window == Lifetime || sup.Window == Lifetime {
+		out.Window = Lifetime
+	} else {
+		out.Window = Monthly
+	}
+	if sup.WarnPct < out.WarnPct {
+		out.WarnPct = sup.WarnPct // warn at the earlier of the two
+	}
+	if sup.StopFactor < out.StopFactor {
+		out.StopFactor = sup.StopFactor
+	}
+	if own.Source == "none" {
+		out.Source = sup.Source
+	}
+	out.Warnings = append([]string(nil), own.Warnings...)
+	for _, w := range sup.Warnings {
+		dup := false
+		for _, o := range out.Warnings {
+			dup = dup || o == w
+		}
+		if !dup {
+			out.Warnings = append(out.Warnings, w)
+		}
+	}
+	return out
+}
+
+// tighterF and tighterI are the smaller of two amounts where 0 means off (unlimited,
+// infinite): 0 only when both are.
+func tighterF(a, b float64) float64 {
+	switch {
+	case a <= 0:
+		return b
+	case b <= 0 || a < b:
+		return a
+	}
+	return b
+}
+
+func tighterI(a, b int64) int64 {
+	switch {
+	case a <= 0:
+		return b
+	case b <= 0 || a < b:
+		return a
+	}
+	return b
 }
 
 // projectConfig is what the budget reads from <project>/.yakos.yml: the
@@ -542,10 +621,18 @@ type projectConfig struct {
 // supervisorAgent is the one agent whose budget is built in: the supervisor.
 const supervisorAgent = "supervisor"
 
-// aliasFor returns the agent whose budget agent keeps: "supervisor" when agent is
-// a name the project gives its supervisor (and is not "supervisor" itself), else
-// "". It can only add the supervisor's built-in limits and stop factor to an agent
-// that has none, so it can only tighten.
+// projectUSD is the dollar limit the project's agent_budgets: asks for agent, or nil.
+func (c projectConfig) projectUSD(agent string) *float64 {
+	if v, ok := c.limits[agent]; ok {
+		return &v
+	}
+	return nil
+}
+
+// aliasFor returns "supervisor" when agent is a name the project gives its supervisor
+// (and is not "supervisor" itself), else "". Such an agent is budgeted at the stricter
+// of its own limit and the supervisor's (see tighter), so naming an agent the supervisor
+// can only add limits to it, never raise one.
 func (c projectConfig) aliasFor(agent string) string {
 	if agent == supervisorAgent {
 		return ""

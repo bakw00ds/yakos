@@ -22,7 +22,8 @@ func (r *runner) checkAgentBudgets() {
 		bad bool
 	}
 	var rows []row
-	// The agent a project names as its supervisor has the supervisor's budget under
+	// The agent a project names as its supervisor is budgeted at the stricter of its
+	// own limit and the supervisor's (budget.Evaluate builds that one limit) under
 	// whatever name it gives it, so it gets the supervisor's wording too.
 	supervisors := map[string]bool{"supervisor": true}
 	for _, n := range budget.ProjectSupervisorAgents(r.cfg.ProjectPath) {

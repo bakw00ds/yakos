@@ -279,7 +279,6 @@ func Evaluate(agent string, o Options) (Status, error) {
 	dir := o.dir()
 	now := o.now()
 	pol, perr := LoadPolicy(dir)
-	var projectUSD *float64
 	var warns []string
 	if perr != nil {
 		warns = append(warns, perr.Error())
@@ -287,17 +286,16 @@ func Evaluate(agent string, o Options) (Status, error) {
 	cfg := readProjectConfig(o.Project)
 	if cfg.warn != "" {
 		warns = append(warns, cfg.warn)
-	} else if v, ok := cfg.limits[agent]; ok {
-		projectUSD = &v
 	}
-	// The agent a project names as its supervisor keeps the supervisor's budget
-	// under that name: a project can rename it, never escape the built-in limits
-	// (K-136, sec-330 finding 8).
-	lim := resolve(agent, cfg.aliasFor(agent), pol, projectUSD)
+	// The agent a project names as its supervisor is budgeted at the stricter of its
+	// own limit and the supervisor's, per unit and per stop, with the longer window
+	// (K-136, sec-330 finding 8): a project can rename its supervisor and never raise
+	// anything. effective builds that one tuple, and it is what is reported below.
+	lim := effective(agent, pol, cfg)
 	st := Status{
 		Agent: agent, State: StateOff, Window: lim.Window, WindowKey: WindowKey(lim.Window, now),
-		LimitUSD: lim.USD, StopUSD: lim.USD * lim.StopFactor, WarnPct: lim.WarnPct, Source: lim.Source, Warnings: append(warns, lim.Warnings...),
-		LimitTokens: lim.Tokens, StopTokens: int64(float64(lim.Tokens) * lim.StopFactor),
+		LimitUSD: lim.USD, StopUSD: lim.StopUSD, WarnPct: lim.WarnPct, Source: lim.Source, Warnings: append(warns, lim.Warnings...),
+		LimitTokens: lim.Tokens, StopTokens: lim.StopTokens,
 	}
 	st.Reason = ReasonOff
 	if lim.USD <= 0 && lim.Tokens <= 0 {
@@ -385,7 +383,7 @@ func Reset(agent string, o Options) (Status, error) {
 	dir := o.dir()
 	now := o.now()
 	pol, _ := LoadPolicy(dir)
-	lim := resolve(agent, readProjectConfig(o.Project).aliasFor(agent), pol, nil)
+	lim := effective(agent, pol, readProjectConfig(o.Project))
 	key := WindowKey(lim.Window, now)
 	if err := resetLocked(dir, agent, lim.Window, key, now); err != nil {
 		return Status{}, err

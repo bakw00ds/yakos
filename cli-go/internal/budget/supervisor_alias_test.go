@@ -6,7 +6,9 @@ package budget
 // budget is keyed on that name, so before this a project that wrote `supervisor: agent:
 // watchdog` ran its supervisor with no budget at all and lifted the built-in limits a
 // committed file has no right to lift. The user-level file is still the only place to
-// raise or turn off a limit.
+// raise or turn off a limit. The agent is budgeted at the stricter of its own limits and
+// the supervisor's, never looser than either: the rule is pinned case by case in
+// supervisor_alias_tighten_test.go.
 
 import (
 	"os"
@@ -82,9 +84,11 @@ func TestRenamedSupervisor_OnlyTheNamedAgentIsAffected(t *testing.T) {
 	}
 }
 
-// The renamed supervisor is budgeted as the supervisor is, so the operator's own entry
-// for the supervisor (raised, or turned off) is what it gets, and an entry for its own
-// name, which only the operator can write, wins over both.
+// The renamed supervisor is budgeted at the supervisor's limits where it has none of its
+// own, so the operator's entry for the supervisor (raised, or turned off) is what it
+// gets, and an entry for its own name, which only the operator can write, holds beside it
+// when it is the stricter (a looser one does not loosen the supervisor's: see
+// supervisor_alias_tighten_test.go).
 func TestRenamedSupervisor_FollowsTheOperatorsSupervisorEntry(t *testing.T) {
 	proj := projectWith(t, renamedSupervisor)
 	rows := ledgerLine("watchdog", octMid, "subscription", 70_000_000, 0, 0, 0, 0)
@@ -106,14 +110,14 @@ func TestRenamedSupervisor_FollowsTheOperatorsSupervisorEntry(t *testing.T) {
 		t.Fatalf("a user-level opt-out of the supervisor budget covers the renamed supervisor: %+v", st)
 	}
 
-	// An entry under watchdog's own name wins over the supervisor's entry and the built-ins.
+	// An entry under watchdog's own name that is stricter than the supervisor's holds.
 	dir = t.TempDir()
 	appendLog(t, dir, rows)
 	setTokenLimit(t, dir, "supervisor", 100_000_000, Monthly)
 	setTokenLimit(t, dir, "watchdog", 1_000, Monthly)
 	st := mustEval(t, "watchdog", Options{StateDir: dir, Project: proj, Now: clock(octMid)})
-	if st.LimitTokens != 1_000 || st.State != StateHardStop || st.StopTokens != 2_000 || st.LimitUSD != 100 {
-		t.Fatalf("its own entry wins for the limit it sets, the supervisor's built-ins stand for the rest: %+v", st)
+	if st.LimitTokens != 1_000 || st.State != StateHardStop || st.StopTokens != 1_000 || st.LimitUSD != 100 || st.StopUSD != 200 {
+		t.Fatalf("its own stricter entry holds for the limit it sets and for that unit's stop (1000, not the supervisor's factor of 2), and the supervisor's limit and stop stand for the dollars it has no entry for: %+v", st)
 	}
 }
 
@@ -127,8 +131,8 @@ func TestRenamedSupervisor_ProjectDollarsOnlyLower(t *testing.T) {
 	}
 	proj = projectWith(t, renamedSupervisor+"agent_budgets:\n  watchdog: 5000\n")
 	st := mustEval(t, "watchdog", Options{StateDir: dir, Project: proj, Now: clock(octMid)})
-	if st.LimitUSD != 100 || len(st.Warnings) == 0 {
-		t.Fatalf("a project cannot raise it: %+v", st)
+	if st.LimitUSD != 100 || st.StopUSD != 200 {
+		t.Fatalf("a project cannot raise it past the supervisor's limit: %+v", st)
 	}
 }
 
