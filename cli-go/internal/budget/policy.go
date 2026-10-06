@@ -569,7 +569,12 @@ func effective(agent string, p Policy, cfg projectConfig) Limit {
 //     factor), not the stop of whichever side has the smaller amount (an own 50M limit
 //     with a 50M stop beside the supervisor's 33M with a 66M stop is 33M with a 50M
 //     stop, not 33M with 66M);
-//   - the window is lifetime if either side is lifetime, monthly only when both are;
+//   - the window is lifetime if either side that has a limit, in either unit, is
+//     lifetime, and monthly when every side that has a limit is monthly. A side with no
+//     limit at all counts nothing, so its window does not: an unlimited agent whose
+//     lifetime window comes from the policy default, beside a supervisor an entry
+//     makes monthly, is monthly. When neither side has a limit there is nothing to count
+//     and the agent's own window is kept;
 //   - a unit that is off or unlimited on one side counts as infinite there, so only an
 //     agent that would otherwise be unlimited in a unit gains the supervisor's limit.
 //
@@ -581,9 +586,13 @@ func tighter(own, sup Limit) Limit {
 	out.StopUSD = tighterF(own.StopUSD, sup.StopUSD)
 	out.Tokens = tighterI(own.Tokens, sup.Tokens)
 	out.StopTokens = tighterI(own.StopTokens, sup.StopTokens)
-	if own.Window == Lifetime || sup.Window == Lifetime {
+	ownLimited, supLimited := own.USD > 0 || own.Tokens > 0, sup.USD > 0 || sup.Tokens > 0
+	switch {
+	case !ownLimited && !supLimited:
+		out.Window = own.Window // nothing is counted: keep the agent's own
+	case (ownLimited && own.Window == Lifetime) || (supLimited && sup.Window == Lifetime):
 		out.Window = Lifetime
-	} else {
+	default:
 		out.Window = Monthly
 	}
 	if sup.WarnPct < out.WarnPct {

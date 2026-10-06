@@ -288,9 +288,10 @@ func Evaluate(agent string, o Options) (Status, error) {
 		warns = append(warns, cfg.warn)
 	}
 	// The agent a project names as its supervisor is budgeted at the stricter of its
-	// own limit and the supervisor's, per unit and per stop, with the longer window
-	// (K-136, sec-330 finding 8): a project can rename its supervisor and never raise
-	// anything. effective builds that one tuple, and it is what is reported below.
+	// own limit and the supervisor's, per unit and per stop, with a lifetime window if
+	// a side that has a limit is lifetime (K-136, sec-330 finding 8): a project can
+	// rename its supervisor and never raise anything. effective builds that one tuple,
+	// and it is what is reported below.
 	lim := effective(agent, pol, cfg)
 	st := Status{
 		Agent: agent, State: StateOff, Window: lim.Window, WindowKey: WindowKey(lim.Window, now),

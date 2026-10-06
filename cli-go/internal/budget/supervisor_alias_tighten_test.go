@@ -187,19 +187,38 @@ func TestTighter_PerUnitAmountsAndStops(t *testing.T) {
 	if g := tighter(own, Limit{Window: Monthly, WarnPct: 80, StopFactor: 1, Source: "none"}); g.USD != 50 || g.Tokens != 50_000_000 || g.StopTokens != 50_000_000 {
 		t.Errorf("an unlimited supervisor leaves the agent's own: %+v", g)
 	}
-	if g := tighter(Limit{Window: Monthly, WarnPct: 80, StopFactor: 1}, Limit{Window: Lifetime, WarnPct: 80, StopFactor: 1}); g.USD != 0 || g.Tokens != 0 || g.Window != Lifetime {
-		t.Errorf("both unlimited stays unlimited, and the window is still the longer: %+v", g)
+	// Window: lifetime if a side that has a limit, in either unit, is lifetime. A side with no
+	// limit at all counts no window, and when neither side has one the agent's own is kept.
+	limited := func(w Window) Limit {
+		return Limit{USD: 10, StopUSD: 10, Window: w, WarnPct: 80, StopFactor: 1}
 	}
-	// Window: lifetime if either side is.
-	for name, c := range map[string]struct{ a, b, want Window }{
-		"monthly monthly":   {Monthly, Monthly, Monthly},
-		"lifetime monthly":  {Lifetime, Monthly, Lifetime},
-		"monthly lifetime":  {Monthly, Lifetime, Lifetime},
-		"lifetime lifetime": {Lifetime, Lifetime, Lifetime},
+	tokensOnly := func(w Window) Limit {
+		return Limit{Tokens: 5, StopTokens: 5, Window: w, WarnPct: 80, StopFactor: 1}
+	}
+	unlimited := func(w Window) Limit { return Limit{Window: w, WarnPct: 80, StopFactor: 1} }
+	for name, c := range map[string]struct {
+		own, sup Limit
+		want     Window
+	}{
+		"limited monthly, limited monthly":    {limited(Monthly), limited(Monthly), Monthly},
+		"limited lifetime, limited monthly":   {limited(Lifetime), limited(Monthly), Lifetime},
+		"limited monthly, limited lifetime":   {limited(Monthly), limited(Lifetime), Lifetime},
+		"limited lifetime, limited lifetime":  {limited(Lifetime), limited(Lifetime), Lifetime},
+		"unlimited lifetime, limited monthly": {unlimited(Lifetime), limited(Monthly), Monthly},
+		"limited monthly, unlimited lifetime": {limited(Monthly), unlimited(Lifetime), Monthly},
+		"unlimited monthly, limited lifetime": {unlimited(Monthly), limited(Lifetime), Lifetime},
+		"limited lifetime, unlimited monthly": {limited(Lifetime), unlimited(Monthly), Lifetime},
+		"tokens alone count as a limit":       {tokensOnly(Lifetime), limited(Monthly), Lifetime},
+		"tokens alone, the other unlimited":   {unlimited(Lifetime), tokensOnly(Monthly), Monthly},
+		"neither limited keeps own, lifetime": {unlimited(Lifetime), unlimited(Monthly), Lifetime},
+		"neither limited keeps own, monthly":  {unlimited(Monthly), unlimited(Lifetime), Monthly},
 	} {
-		if g := tighter(Limit{Window: c.a, WarnPct: 80, StopFactor: 1}, Limit{Window: c.b, WarnPct: 80, StopFactor: 1}); g.Window != c.want {
+		if g := tighter(c.own, c.sup); g.Window != c.want {
 			t.Errorf("%s: %s, want %s", name, g.Window, c.want)
 		}
+	}
+	if g := tighter(unlimited(Monthly), unlimited(Lifetime)); g.USD != 0 || g.Tokens != 0 || g.StopUSD != 0 || g.StopTokens != 0 {
+		t.Errorf("both unlimited stays unlimited: %+v", g)
 	}
 	// The result is never looser than either side, whichever way round they are given.
 	for _, pair := range [][2]Limit{{own, sup}, {sup, own}} {
