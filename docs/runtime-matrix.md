@@ -327,12 +327,17 @@ their own SDK shapes, which the tables do not cover. The bash `yakos cost` does 
 read `usage` at all: it totals the chars/4 estimates `est_input_tokens` and
 `est_output_tokens`.
 
-- **Totals agree across the two conventions.** Every token total taken from `usage`
-  adds all four kinds (`input_tokens`, `output_tokens`, `cache_read` and
-  `cache_creation`), as `cost.TokenTotals.Total` does. The bash codex convention
-  (cached tokens inside `input_tokens`, `cache_read` 0) and the Go convention (the
-  fresh remainder in `input_tokens`, the cached part in `cache_read`) therefore give
-  the same total for the same run.
+- **Totals agree across the two conventions, in the readers that add all four
+  kinds.** The budget aggregate and the cost views (`yakos cost`, the Performance
+  dashboard, the Cost tab) add all four kinds (`input_tokens`, `output_tokens`,
+  `cache_read` and `cache_creation`), as `cost.TokenTotals.Total` does. The bash
+  codex convention (cached tokens inside `input_tokens`, `cache_read` 0) and the Go
+  convention (the fresh remainder in `input_tokens`, the cached part in
+  `cache_read`) therefore give the same total for the same run. Two older readers
+  add only `input_tokens` and `output_tokens`: the metrics collector's tokens per
+  task and the token total `work close` records. For a legacy bash codex row they
+  count the whole prompt, and for a Go row of the same run only its fresh part, so
+  those two totals differ between the writers.
 - **Only the split differs.** claude rows agree between the two writers. A legacy
   bash codex row shows the whole prompt as `input_tokens` and no cache read, so a
   reader that reports the input/cache split (a cache hit rate, say) sees different

@@ -128,21 +128,45 @@ What changes for you:
 - **Turning a built-in budget off:** `yakos budget set supervisor 0` now turns off
   the dollar limit only, and prints a note that the token limit remains. Use
   `yakos budget set supervisor 0 --tokens 0` to turn the whole budget off.
-  `yakos budget check` exits 4 when either limit is reached, so the supervisor
-  hook's gate stops on the token limit with no change.
-- **API-key operators:** nothing moves. A run with `ANTHROPIC_API_KEY`,
-  `OPENAI_API_KEY`, `GEMINI_API_KEY` (or their siblings) in its environment is
-  `api`, and its dollars count as before. Rows written before this release, and
-  every row the bash dispatcher writes (still the default for `yakos dispatch`),
-  have no `billing` field and keep counting their dollars, so no budget resets
-  itself on upgrade.
+  `yakos budget check` exits 4 when either limit is reached.
+- **The supervisor hook's launch gate now reads tokens too** (both twins, K-136).
+  It used to be dollar-gated: off when `limit_usd` was 0, with a 2x high-risk
+  ceiling that compared dollars only. It now decides from the unified status of
+  `yakos budget check --json`: the supervisor budget is off only with no limit of
+  either kind, routine launches are refused at the limit of either unit,
+  high-risk launches are blocked at 2x either unit, and a token ceiling writes
+  the synthetic CRITICAL finding (`Supervisor token-budget ceiling (N tokens)
+  reached`). Hook log records for token messages carry `spent_tokens`,
+  `limit_tokens` and `ceiling_tokens`; dollar records are unchanged. Upgrade the
+  `yakos` binary and refresh the hooks (`yakos refresh`) together: the bash hook
+  reads the token fields from the binary, and an older binary that prints none
+  leaves the gate dollar-only.
+- **A project can rename its supervisor and keep its budget.** The agent a
+  project names as its supervisor (`supervisor: agent:` in `.yakos.yml`) now has
+  the supervisor's budget under that name, including whatever you set for
+  `supervisor` in your own policy file; before, the renamed agent had no budget.
+  `yakos budget status`, `yakos doctor` and `yakos budget reset` take the project
+  into account (`--project`, else the working directory).
+- **API-key operators:** your dollars count as before. A run with
+  `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` (or their siblings) in
+  its environment is `api`, and its dollars count toward `limit_usd`. What is new
+  for you is the token side: the built-in token limits count every run whatever
+  its billing, so the supervisor and librarian also stop at 33,000,000 and
+  13,000,000 tokens a month, and a month with unusually many tokens per dollar
+  could trip a token limit before the dollar one. Rows written before this
+  release, and every row the bash dispatcher writes (still the default for
+  `yakos dispatch`), have no `billing` field and keep counting their dollars, so
+  no budget resets itself on upgrade.
 - **Console-login (pay-per-token) users:** a harness signed in that way, or given
   a key by its own settings file, has no key in the environment yakos passes to
   it, so it reads as a subscription and `limit_usd` will not see it. Use a token
   limit.
 - The budget spend cache is rebuilt from the log once, on first use.
 - `yakos cost` prints exactly what it printed unless the log holds rows with a
-  `billing` field; then it adds token columns. The `efficiency.total_cost_usd`
+  `billing` field; then it adds token columns, in the Go `yakos cost` (under
+  `YAKOS_IMPL=go` or a Go-only install; with the bash tree present and
+  `YAKOS_IMPL` unset it is still served by bash and prints the old table until
+  the Go dispatcher becomes the default). The `efficiency.total_cost_usd`
   trend in the metrics dashboard steps down after the upgrade, because older
   snapshots summed every dollar figure.
 - Interactive Chat turns are now in the dispatch-log (surface `console-chat`),

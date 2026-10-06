@@ -60,8 +60,9 @@ for claude; `OPENAI_API_KEY` or `CODEX_API_KEY` for codex; `GEMINI_API_KEY`,
   not reset itself when you upgrade. The bash dispatcher is still the default
   `yakos dispatch` implementation, so its rows stay on the old rule until the
   Go dispatcher becomes the default.
-- Codex and agy report tokens and no dollar figure, so under a subscription they
-  show tokens and no dollars anywhere. Only a token limit can stop them.
+- Codex and agy report tokens and no dollar figure, so under either billing they
+  show tokens and no dollars anywhere (an API-billed run has no figure to count).
+  Only a token limit can stop them.
 - The built-in supervisor and librarian budgets carry a token limit as well as a
   dollar limit, so they still stop for a subscription operator, whose runs cost no
   dollars and never move `limit_usd`. "Default limits" gives the numbers and the
@@ -112,7 +113,10 @@ yakos budget check <agent> [--project <path>] [--json]
   `set supervisor 0 --tokens 0`.
 - `reset` starts the agent's current window over. Spend already logged stops
   counting. The dispatch-log is not edited. A reset belongs to the window it was
-  made in and does not carry into the next month.
+  made in and does not carry into the next month. `reset <agent> --project <path>`
+  (the working directory by default, as for `status`) reads the project's
+  `supervisor: agent:` name, so a renamed supervisor is reset in the window it is
+  counted in.
 - `check` is the pre-flight for hooks and scripts. Exit 0 means the agent may
   run (also for `warning`, `off`, and any read failure, which fails open). Exit 4
   means `hard_stop`. It never exits 2, because exit 2 is the Claude Code hook
@@ -132,10 +136,14 @@ yakos budget check <agent> [--project <path>] [--json]
   controls (a repeated `agent_budgets` key in `.yakos.yml` is echoed back in the
   YAML error).
 - `yakos doctor` lists agents in `warning` or `hard_stop`, and prints nothing
-  about budgets when every agent is healthy. The supervisor is special: at
-  `hard_stop` doctor reports an **error**, "LLM supervision disabled: supervisor
-  budget exhausted", because `block_on_critical` silently stops protecting
-  anything while it is exhausted; at `warning` it is a warning.
+  about budgets when every agent is healthy. An agent with a token limit is
+  described in tokens first, with the limit that was reached named (token, dollar
+  or both) and the matching flag to raise it: `--tokens <n>` for a token stop,
+  `<usd>` for a dollar stop. The supervisor, and the agent a project names as its
+  supervisor, are special: at `hard_stop` doctor reports an **error**, "LLM
+  supervision disabled: supervisor budget exhausted", because `block_on_critical`
+  silently stops protecting anything while it is exhausted; at `warning` it is a
+  warning.
 
 ## Default limits
 
@@ -225,6 +233,25 @@ no user-level limit (off becomes limited). A value above the user-level limit, o
 zero or negative, is ignored with a warning. A project cannot change the window
 or the warning percentage. The user-level file is the only place to raise or
 disable a limit.
+
+A project can also name the agent its supervisor runs as:
+
+```yaml
+supervisor:
+  agent: watchdog
+```
+
+The supervisor hook launches `yakos dispatch watchdog` and asks for the budget of
+that name, so the agent a project names as its supervisor has the supervisor's
+budget under that name: the built-in dollar and token limits, the 2x dispatch
+stop, and whatever the user-level file says for `supervisor`. A project can rename
+its supervisor and cannot escape those limits, which would otherwise let a
+committed file lift them. An entry in the user-level file under the new name still
+wins for the limit it sets. Both hooks read the name (the Go hook as YAML, the bash
+hook with a line scan), and every name either of them arrives at is treated as the
+supervisor. The renamed agent has its own spend counter, and `status` and `doctor`
+list it when run in the project. The model ceiling below is keyed on the agent name
+alone, so a renamed supervisor does not get the supervisor's `sonnet` ceiling.
 
 ## Model ceiling
 
@@ -325,7 +352,7 @@ change the decision.
 |---|---|---|
 | `timeout` | the `yakos budget check` child outlived its 2 s wall-clock bound and was killed | bash |
 | `no_output` | it printed nothing and exited non-zero, or could not run (a CLI too old to have `budget`, one that crashed, a missing binary) | bash |
-| `parse` | what it printed is not a budget: not JSON, JSON without a numeric `limit_usd`, or a failing `jq` | bash |
+| `parse` | what it printed is not a budget: not JSON, JSON without a numeric `limit_usd` or a string `state`, or a failing `jq` | bash |
 | `read_error` | the spend could not be read: the CLI's JSON says `read_failed: true` (its numbers then read "ok, nothing spent"), also when it failed inside; the Go twin sees the same error in-process | both |
 
 The bash hook never reads the CLI's stderr: it carries text a project controls,
@@ -334,9 +361,11 @@ config. A CLI built before the `read_failed` field existed is a normal CLI to th
 hook: the absence of the field is an ordinary read, so everything still works, and
 the bash hook simply cannot report an unreadable spend log then (the Go twin still
 does, in-process). The Go twin evaluates in-process, so only `read_error` exists
-there. A budget that is switched off (a limit of 0) is not a failure and logs
-nothing, and neither is a CLI that prints nothing and exits 0: it has no budget to
-report.
+there. A budget that is switched off, with no limit of either kind (a dollar limit
+of 0 and a token limit of 0 or absent), is not a failure and logs nothing, and
+neither is a CLI that prints nothing and exits 0: it has no budget to report. The
+bash hook tests `read_failed` before any limit, so a zero limit can never turn an
+unreadable spend log into "off".
 
 ## Where it is enforced
 
@@ -364,14 +393,28 @@ gate, next to the launch cap:
 | at the limit (`hard_stop`) | **refused**: WARN in the hook log, one stderr line, hook exits 0, no "forked async" | runs, with a WARN noting the exemption |
 | at 2x the limit | refused | **refused**, and one synthetic CRITICAL finding is written so `block_on_critical` operators are alerted |
 
-"The limit" is either limit. The supervisor's `hard_stop` state is reached at 100%
-of its dollar limit or of its token limit (33,000,000 tokens a month by default),
-and the hook reads that state, so a supervisor on a subscription, which spends no
-dollars, stops routine launches at its token limit with the gate unchanged. The 2x
-ceiling for high-risk launches is still computed in the hook from dollars alone;
-`yakos dispatch` itself refuses the supervisor at 2x its token limit, so a
-high-risk launch past 2x the tokens starts the wrapper and the dispatch it forks
-exits 4. Teaching the hook the token ceiling is a follow-up.
+"The limit" is either limit, and "2x the limit" is 2x either limit (K-136). The
+supervisor's `hard_stop` state is reached at 100% of its dollar limit or of its
+token limit (33,000,000 tokens a month by default), and the hook decides from that
+state: a supervisor on a subscription, which spends no dollars, has its routine
+launches refused at its token limit and its high-risk launches blocked at 2x its
+tokens, with the CRITICAL finding. The budget is off only when the supervisor has
+no limit of either kind: turning off the dollar limit alone leaves the built-in
+token limit gating, and a token-only budget (a dollar limit of 0) is gated at 1x
+and 2x its tokens. `yakos dispatch` stays the 2x backstop for both units.
+
+Each hook message names one unit, tokens first. At the limit it is tokens when the
+token limit itself has been reached, else dollars; at the warning level it is the
+unit with the larger share of its limit (a tie goes to tokens); at the 2x ceiling
+it is the unit that is past its own stop. A dollar message and its log record are
+the ones they always were. A token message has the same shape with `spent_tokens`
+and `limit_tokens` (and `ceiling_tokens` where the dollar record has
+`ceiling_usd`) in place of the dollar fields, whole numbers, and its stderr line
+reads `850 of 1000 tokens`. The CRITICAL finding reads `Supervisor token-budget
+ceiling (N tokens) reached` or `Supervisor dollar-budget ceiling ($N) reached`; a
+session gets one budget CRITICAL, whichever ceiling is reached first. The two hook
+twins write byte-identical records (a parity test compares them), and an older
+`yakos` that prints no token fields leaves the gate dollar-only, as before.
 
 The exemption is decided inside the hook. There is no env var or flag that
 carries it. To make that work without one, `yakos dispatch` itself refuses the
@@ -391,9 +434,9 @@ and agents run as the same user, so no check here could tell them apart. The
 `budget-guard` hook does block an agent-issued `yakos dispatch supervisor`,
 as a speed bump.
 
-The count ceiling (3x the launch cap) and the dollar ceiling (2x the limit)
-each write their own synthetic CRITICAL finding, once per session, with
-separate flags, so one never suppresses the other.
+The count ceiling (3x the launch cap) and the budget ceiling (2x the limit, in
+dollars or in tokens) each write their own synthetic CRITICAL finding, once per
+session, with separate flags, so one never suppresses the other.
 
 Only the LLM tier stops at hard stop. The local pre-filter and its logging, and
 the Jev shadow decision, keep running.

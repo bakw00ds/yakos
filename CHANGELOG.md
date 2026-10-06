@@ -31,7 +31,10 @@ subscription harness or a local model; see UPGRADING.md.
   change:** a dollar budget (`limit_usd`) no longer moves for subscription runs,
   so the built-in supervisor and librarian budgets also carry a token limit (see
   the next entry) and keep tripping for every billing class. See UPGRADING.md and
-  `docs/budgets.md`.
+  `docs/budgets.md`. Not converted yet: the Chat pane's summary and stored
+  transcript, the MCP, JSON-RPC and REST summaries, and the Flows per-node cost
+  still show the harness-reported `total_cost_usd`; only the log splits it into
+  spend and an API-equivalent.
 
 - **Budgets gain token limits, and the built-in budgets have them (K-136).**
   `budget-policy.yml` entries accept `limit_tokens` next to `limit_usd`, set with
@@ -39,9 +42,10 @@ subscription harness or a local model; see UPGRADING.md.
   `2b`). It counts the input, output and cache tokens of every run whatever its
   billing, and trips exactly like `limit_usd` (warning at `warn_pct`, hard stop
   at 100%, same window and reset rules); an agent with both stops when either is
-  reached, and `yakos budget check` reports `hard_stop` (exit 4) for either, so
-  the supervisor hook's gate stops on tokens with no change. **The supervisor and
-  librarian get a built-in monthly token limit** next to their dollar limit:
+  reached, and `yakos budget check` reports `hard_stop` (exit 4) for either; the
+  supervisor hook's launch gate decides from that status (see the next entries).
+  **The supervisor and librarian get a built-in monthly token limit** next to their
+  dollar limit:
   33,000,000 and 13,000,000 tokens, each the dollar ceiling converted at the
   Sonnet reference rate of $3 per million tokens and rounded down to a whole
   million ($100 / $3 = 33.3M, $40 / $3 = 13.3M; the dispatch-log shows the
@@ -55,6 +59,26 @@ subscription harness or a local model; see UPGRADING.md.
   ` spent_tokens=<n> limit_tokens=<n>` for an agent that has a token limit. The
   spend cache is rebuilt from the log once.
 
+- **The supervisor hook's launch gate is token-aware, in both twins (K-136).** It
+  was dollar-gated: it switched itself off when `limit_usd` was 0, and its 2x
+  high-risk ceiling compared dollars only, so a token-only or subscription budget
+  could launch past `hard_stop` and write no CRITICAL finding. The gate now
+  decides from the unified status of `yakos budget check --json` (the Go twin from
+  `budget.Evaluate` in-process): the budget is off only when it has no limit of
+  either kind; routine launches are refused at the limit of either unit;
+  high-risk launches run on to 2x the limit of either unit and are then refused
+  with one synthetic CRITICAL finding, `Supervisor token-budget ceiling (N
+  tokens) reached` for a token ceiling. Turning off the dollar limit alone leaves
+  the supervisor's built-in token limit gating. Each message names one unit,
+  tokens first: a dollar message and record are byte-identical to before, a token
+  message has the same shape with `spent_tokens`, `limit_tokens` and
+  `ceiling_tokens`, and a parity test compares the twins' records. A failed read
+  is still tested before any limit, so a zero limit never turns it into "off", and
+  an older `yakos` that prints no token fields leaves the gate dollar-only. The
+  "budget unavailable" WARN now says the launch is "not checked against the
+  budget" (it said "dollar budget"). Upgrade the binary and refresh the hooks
+  together; see UPGRADING.md.
+
 - **`dispatch.Account` is the only writer of `dispatch_started` and
   `dispatch_finished` (K-136).** `Run`, `RunStream`, the MCP, JSON-RPC, REST and
   gRPC transports, Flows nodes and the console's interactive turns all go
@@ -66,8 +90,12 @@ subscription harness or a local model; see UPGRADING.md.
   column only when some run was billed per API call, and a muted `api_equiv`
   column (what subscription runs would have cost at API rates, not spend); logs
   without the new rows print exactly as before, and `--json` rows gain `tokens`,
-  `usd` and `api_equivalent_usd`. The Performance dashboard and the console Cost
-  tab show tokens by default and dollars only for API-billed runs. The hard-coded
+  `usd` and `api_equivalent_usd`. The token layout is the Go `yakos cost`: it
+  shows under `YAKOS_IMPL=go` or a Go-only install, and with the bash tree
+  present and `YAKOS_IMPL` unset `yakos cost` is still served by bash and prints
+  the old table until the Go dispatcher becomes the default. The Performance
+  dashboard and the console Cost tab show tokens by default and dollars only for
+  API-billed runs. The hard-coded
   Sonnet-rate estimate is gone, so a run with no reported cost reads $0 instead
   of a guess. `/api/perf/*` and `/api/metrics/live_cost` gain additive token,
   `billing`, `api_equivalent_usd` and per-runtime keys, plus a `tokens`
@@ -436,6 +464,38 @@ subscription harness or a local model; see UPGRADING.md.
   window is reset. Only the session's owner is told the budget state; another
   operator still gets the engine's 403.
 
+- **The stored transcript of an interactive Chat session no longer repeats
+  earlier turns (K-136).** The assistant text buffer was never emptied, and an
+  interactive session emits a summary for every turn, so each stored assistant
+  entry after the first held all the turns before it ("reply", then
+  "replyreply"). The transcript is persisted and served by the history endpoint,
+  so the corruption was permanent. The buffer is now emptied after each turn's
+  entry, for the CLI and the Agent SDK engine, and a test reads the stored
+  entries. A one-shot dispatch has one summary, which hid it.
+
+- **A project can no longer rename its supervisor out of the supervisor's budget
+  (K-136).** The supervisor hook runs `yakos dispatch <name>` with the name from
+  the project's `.yakos.yml` (`supervisor: agent:`), and the budget is keyed on
+  the agent name, so a committed file that renamed the supervisor lifted both
+  built-in limits, the dollar one and, with this release, the token one that is a
+  subscription operator's only backstop. `Evaluate` and `reset` now give the
+  agent a project names as its supervisor the supervisor's built-in limits, stop
+  factor and user-level entry (it can only tighten; an entry under the new name
+  in the user-level file still wins). Both hooks read the name, the Go one as
+  YAML and the bash one with a line scan, and every name either arrives at counts.
+  `yakos budget status` and `doctor` list the renamed agent when run in the
+  project, and `yakos budget reset` takes `--project`. The model ceiling is keyed
+  on the agent name alone and does not follow a rename.
+
+- **`yakos doctor` reports token budgets in tokens (K-136).** At a token stop it
+  printed `$0.00 of $100.00` and recommended the dollar form of the budget
+  command, which lifts nothing, and the built-in token limits make that the first
+  thing a subscription operator sees. An agent with a token limit is now
+  described in tokens first, the limit that was reached is named (token, dollar
+  or both), and the matching flag is recommended (`--tokens <n>` for a token
+  stop). A dollar-only agent reads as before. Budget messages list tokens before
+  dollars everywhere.
+
 - **An interactive session keeps the agent it started as (K-136).** A second
   dispatch on a live conversation could name any roster agent, and later turns
   were then accounted and budget-checked as that agent while the process went on
@@ -446,9 +506,13 @@ subscription harness or a local model; see UPGRADING.md.
   Negative token counts and a negative cost in a harness's usage object are
   recorded as 0, and a cost that is infinite or not a number is recorded as 0
   instead of making the whole `dispatch_finished` event unencodable, which dropped
-  the event and its tokens. The router's `route_rule` and `route_reason` text also
-  loses C1 control characters, bidirectional overrides and isolates, zero-width
-  and other format characters, and line and paragraph separators.
+  the event and its tokens. For a run that is not billed per API call
+  `usage.total_cost_usd` is 0 whatever the harness reported, so a hostile figure
+  (`-5`, `1e30`) cannot be summed as spend by a reader of the raw field; only an
+  in-range figure is kept, as `api_equivalent_usd`. The router's `route_rule` and
+  `route_reason` text also loses C1 control characters, bidirectional overrides
+  and isolates, zero-width and other format characters, and line and paragraph
+  separators.
 
 - **Setting a token limit no longer changes the agent's window (K-136).** The
   dollar and token limits share one window, and `yakos budget set` without
