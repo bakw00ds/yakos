@@ -52,6 +52,8 @@ on:
       - 'tests/run-validator-fixtures.sh'
       - 'tests/run-supervisor-shadow-test.sh'
       - 'tests/run-supervisor-budget-test.sh'
+      - 'tests/run-ledger-compat-test.sh'
+      - 'tests/fixtures/ledger-compat/**'
       - 'tests/fixtures/hooks/**'
   pull_request:
     branches: [main]
@@ -66,6 +68,8 @@ on:
       - 'tests/run-validator-fixtures.sh'
       - 'tests/run-supervisor-shadow-test.sh'
       - 'tests/run-supervisor-budget-test.sh'
+      - 'tests/run-ledger-compat-test.sh'
+      - 'tests/fixtures/ledger-compat/**'
       - 'tests/fixtures/hooks/**'
   workflow_dispatch:
 
@@ -163,6 +167,25 @@ jobs:
         shell: bash
         timeout-minutes: 10
         run: bash tests/run-supervisor-budget-test.sh
+
+      # K-136: every offline bash reader of the dispatch log on the Go dispatcher's
+      # ledger rows (new keys, a zero usage cost for a subscription run). The ubuntu
+      # job in ci.yml runs it under bash 5 without the Go binary; this step runs it
+      # under stock /bin/bash on macOS, the 3.2 floor the hooks are held to, and with
+      # bin/yakos built above, so section 7 (the supervisor hook's budget gate on a
+      # mixed spend log) cannot be skipped.
+      - name: Bash readers on ledger rows (stock /bin/bash on macOS)
+        shell: bash
+        timeout-minutes: 5
+        env:
+          YAKOS_REQUIRE_GO_BINARY: "1"
+        run: |
+          if [ "$(uname -s)" = Darwin ]; then
+            /bin/bash --version | head -1
+            /bin/bash tests/run-ledger-compat-test.sh
+          else
+            bash tests/run-ledger-compat-test.sh
+          fi
 
       - name: Upload hook parity matrix
         if: always()
