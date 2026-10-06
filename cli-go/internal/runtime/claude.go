@@ -407,16 +407,25 @@ func parseStreamLineWithThinking(
 	case "result":
 		var res struct {
 			TotalCostUSD float64 `json:"total_cost_usd"`
+			DurationMs   float64 `json:"duration_ms"`
 			Usage        struct {
-				InputTokens  int64 `json:"input_tokens"`
-				OutputTokens int64 `json:"output_tokens"`
+				InputTokens              int64 `json:"input_tokens"`
+				OutputTokens             int64 `json:"output_tokens"`
+				CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+				CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
 			} `json:"usage"`
 		}
 		_ = json.Unmarshal(line, &res)
+		// The whole usage of the turn (K-136): cache reads and writes are most of
+		// a claude turn's prompt, and tokens are the primary accounting unit, so a
+		// streamed turn must report them as the one-shot LineParser does.
 		u := &cost.Usage{
-			InputTokens:  res.Usage.InputTokens,
-			OutputTokens: res.Usage.OutputTokens,
-			TotalCostUSD: res.TotalCostUSD,
+			InputTokens:   res.Usage.InputTokens,
+			OutputTokens:  res.Usage.OutputTokens,
+			CacheRead:     res.Usage.CacheReadInputTokens,
+			CacheCreation: res.Usage.CacheCreationInputTokens,
+			DurationMs:    int64(res.DurationMs),
+			TotalCostUSD:  res.TotalCostUSD,
 		}
 		return "", true, res.TotalCostUSD, u, nil, nil
 
