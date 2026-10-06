@@ -276,11 +276,18 @@ exit 1")"
             # A runner so slow that a hook reached the 3 s lock ceiling. K-128 journals that hook's tick instead
             # of dropping it, so what must hold regardless is: still exactly one launch, and no increment lost
             # (the counter plus the records waiting for the next holder is 10).
+            # The same goes for a hook that reached the ceiling at the GATE: its trigger is journaled for the next
+            # gate holder, so every "launch-state lock busy" record must say so (the unfixed hook dropped the trigger,
+            # its record says "skipping this supervisor launch"). Records can be folded by a later gate holder
+            # before this check, so they are bounded, not counted; (k11) in the stream suite pins the record itself.
             _cnt="$(tr -d '[:space:]' < "$sb/work/current/.supervisor-counter" 2>/dev/null || echo 0)"
             _rec="$(nrec "$sb/work/current" .supervisor-counter.add.)"
-            [ "$_forked" = 1 ] && [ "$(runs "$sb")" = 1 ] && [ $((${_cnt:-0} + _rec)) = 10 ] \
-                && ok "(9) $side round $_round: $_skipped hook(s) hit the lock ceiling and journaled their tick; one launch, no increment lost (counter ${_cnt:-0} + $_rec records)" \
-                || bad "(9) $side round $_round: $_skipped lock skip(s), forked=$_forked runs=$(runs "$sb") counter=${_cnt:-0} records=$_rec"
+            _gbusy="$(logs "$sb" | grep -c 'launch-state lock busy')"
+            _gjrn="$(logs "$sb" | grep -c 'launch-state lock busy or unremovable; trigger journaled for the next lock holder')"
+            _grec="$(nrec "$sb/work/current" ".supervisor-run.$SID.add.")"
+            [ "$_forked" = 1 ] && [ "$(runs "$sb")" = 1 ] && [ $((${_cnt:-0} + _rec)) = 10 ] && [ "$_gbusy" = "$_gjrn" ] && [ "$_grec" -le "$_gbusy" ] \
+                && ok "(9) $side round $_round: $_skipped hook(s) hit the lock ceiling and journaled their tick; one launch, no increment lost (counter ${_cnt:-0} + $_rec records), $_gbusy gate trigger(s) journaled" \
+                || bad "(9) $side round $_round: $_skipped lock skip(s), forked=$_forked runs=$(runs "$sb") counter=${_cnt:-0} records=$_rec gate-busy=$_gbusy journaled=$_gjrn gate-records=$_grec"
         fi
         release "$sb"
     done
@@ -331,15 +338,22 @@ fi
 
 # 10. K-122: both twins write the same hook-log records, field for field (`jq -c` keeps a record's
 # key order, so equal lines are equal bytes). Only the timestamp, the backoff deadline and the
-# wall-clock-derived values (duration, deferral, age) are removed, the sandbox path is masked, and the
-# lines are compared as a SORTED SET: the detached wrapper's records land asynchronously, so their
-# position relative to the hook's own is not part of the contract (K-128). What the sort cannot fix is a
-# scenario in which timing picks the BRANCH: each one here must give both twins the same decision however
-# long a hook takes, which is why "strict" uses a project interval of 0 and "interval" one of 8 s.
+# wall-clock-derived values (duration, deferral, age) are removed and the sandbox path is masked. The
+# HOOK's records (they carry a session_id) are compared IN ORDER: order is part of that contract. The
+# detached WRAPPER's records (no session_id) land asynchronously, so their position among the hook's is
+# not, and their durations differ by a clock tick between the twins: they are compared as a sorted set
+# (K-128). What the set cannot fix is a scenario in which timing picks the BRANCH: each one here must give
+# both twins the same decision however long a hook takes, which is why "strict" uses a project interval
+# of 0 and "interval" one computed from the measured hook time (IV, at least 11 s).
 if [ "$HAVE_GO" = 1 ]; then
     for scen in inflight cap interval failed slimit slimit2 badmodel trust strict floor hex quoted comment prose; do
         [ -d "$TMP/$scen-bash" ] && [ -d "$TMP/$scen-go" ] || continue
-        norm() { jq -c 'del(.ts, .duration_s, .backoff_until, .deferred_s, .age_s)' "$TMP/$1/work/current/logs/supervisor-stream.ndjson" 2>&1 | sed "s#$TMP/$1#<sb>#g" | sort; }
+        norm() {
+            local f="$TMP/$1/work/current/logs/supervisor-stream.ndjson" d='del(.ts, .duration_s, .backoff_until, .deferred_s, .age_s)'
+            jq -c "select(has(\"session_id\")) | $d" "$f" 2>&1 | sed "s#$TMP/$1#<sb>#g"
+            echo '-- the wrapper records, as a set --'
+            jq -c "select(has(\"session_id\") | not) | $d" "$f" 2>&1 | sed "s#$TMP/$1#<sb>#g" | sort
+        }
         b="$(norm "$scen-bash")"; g="$(norm "$scen-go")"
         if [ -n "$b" ] && [ "$b" = "$g" ]; then ok "(10) $scen hook-log records are byte-identical across twins"; else
             bad "(10) $scen hook-log records differ"; diff <(printf '%s\n' "$b") <(printf '%s\n' "$g") | cut -c1-300 | head -8; fi

@@ -198,13 +198,19 @@ done
 
 # 9. K-122: the two twins write the same hook-log records, field for field AND in
 # the same order (jq keeps an object literal's insertion order, so `jq -c` of each
-# record is a byte comparison with only the timestamp removed).
-# The records are compared as a sorted set with the wall-clock duration removed: the detached wrapper's
-# "run finished" record lands after the hook's own and carries the run time, so neither its position nor
-# its duration_s is part of the contract (K-128).
+# record is a byte comparison with only the timestamp removed). That holds for the HOOK's
+# records (they carry a session_id), compared in order. The detached WRAPPER's records (none)
+# land asynchronously: "run finished" arrives after the hook's own records and carries the run
+# time, so neither its position nor its duration_s is part of the contract, and those are
+# compared as a sorted set without durations (K-128).
+cmp_norm() { # cmp_norm <sandbox>
+    logs "$1" | jq -c 'select(has("session_id")) | del(.ts)' 2>&1
+    echo '-- the wrapper records, as a set --'
+    logs "$1" | jq -c 'select(has("session_id") | not) | del(.ts, .duration_s)' 2>&1 | sort
+}
 for scen in routine high ceil warn proj quiet flags; do
-    b="$(logs "$TMP/$scen-bash" | jq -c 'del(.ts, .duration_s)' 2>&1 | sort)"
-    g="$(logs "$TMP/$scen-go" | jq -c 'del(.ts, .duration_s)' 2>&1 | sort)"
+    b="$(cmp_norm "$TMP/$scen-bash")"
+    g="$(cmp_norm "$TMP/$scen-go")"
     if [ -n "$b" ] && [ "$b" = "$g" ]; then ok "(9) $scen hook-log records are byte-identical across twins"; else
         bad "(9) $scen hook-log records differ"; printf '    bash: %s\n    go:   %s\n' "$b" "$g"; fi
 done
