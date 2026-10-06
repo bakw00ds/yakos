@@ -393,32 +393,38 @@ func resolve(agent, alias string, p Policy, projectUSD *float64) Limit {
 			l.StopFactor = f
 		}
 	}
-	apply := func(a AgentLimit, src string) {
+	// apply layers one policy entry (name is "default" or an agent) on l. A limit that
+	// is out of range is IGNORED with a warning, and the limit it would have replaced
+	// (a built-in, or the global default's) stays: a value that cannot be a limit is a
+	// typo or a corrupt edit, not the operator turning the budget off, and turning a
+	// built-in off by accident would silently remove the supervisor's and librarian's
+	// backstop. 0 is how a limit is turned off, on purpose.
+	apply := func(name string, a AgentLimit, src string) {
 		if a.WarnPct > 0 && a.WarnPct <= 100 {
 			l.WarnPct = a.WarnPct
 		}
 		l.Window = parseWindow(a.Window, l.Window)
 		if a.LimitUSD != nil {
-			v := *a.LimitUSD
-			if math.IsNaN(v) || v < 0 {
-				v = 0
+			if v := *a.LimitUSD; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
+				l.Warnings = append(l.Warnings, fmt.Sprintf("policy limit_usd for %s ignored: %v is not a finite, non-negative number of dollars; the limit it would have replaced stays (0 turns a limit off)", name, v))
+			} else {
+				l.USD = v
+				l.Source = src
 			}
-			l.USD = v
-			l.Source = src
 		}
 		if a.LimitTokens != nil {
-			v := *a.LimitTokens
-			if v < 0 || v > maxTokenLimit {
-				v = 0
-			}
-			l.Tokens = v
-			if l.Source == "none" {
-				l.Source = src
+			if v := *a.LimitTokens; v < 0 || v > maxTokenLimit {
+				l.Warnings = append(l.Warnings, fmt.Sprintf("policy limit_tokens for %s ignored: %d is outside 0 to %d; the limit it would have replaced stays (0 turns a limit off)", name, v, maxTokenLimit))
+			} else {
+				l.Tokens = v
+				if l.Source == "none" {
+					l.Source = src
+				}
 			}
 		}
 	}
 	// Global default first so agent-level values override it field by field.
-	apply(p.Default, "policy-default")
+	apply("default", p.Default, "policy-default")
 	for _, n := range names {
 		if v, ok := builtinLimits[n]; ok {
 			// A built-in is more specific than the global default.
@@ -432,7 +438,7 @@ func resolve(agent, alias string, p Policy, projectUSD *float64) Limit {
 	}
 	for _, n := range names {
 		if a, ok := p.Agents[n]; ok {
-			apply(a, "policy")
+			apply(n, a, "policy")
 		}
 	}
 	if projectUSD != nil {
