@@ -478,23 +478,37 @@ subscription harness or a local model; see UPGRADING.md.
   the project's `.yakos.yml` (`supervisor: agent:`), and the budget is keyed on
   the agent name, so a committed file that renamed the supervisor lifted both
   built-in limits, the dollar one and, with this release, the token one that is a
-  subscription operator's only backstop. `Evaluate` and `reset` now give the
-  agent a project names as its supervisor the supervisor's built-in limits, stop
-  factor and user-level entry (it can only tighten; an entry under the new name
-  in the user-level file still wins). Both hooks read the name, the Go one as
-  YAML and the bash one with a line scan, and every name either arrives at counts.
-  `yakos budget status` and `doctor` list the renamed agent when run in the
-  project, and `yakos budget reset` takes `--project`. The model ceiling is keyed
-  on the agent name alone and does not follow a rename (K-139), and the renamed
-  agent has its own spend counter (K-160).
+  subscription operator's only backstop. The agent a project names as its
+  supervisor is now budgeted at the stricter of its own limits and the
+  supervisor's, combined into one limit on the agent's one spend counter: per
+  unit (dollars, tokens) the smaller amount, per unit the smaller dispatch stop
+  in absolute terms (not the stop of the side with the smaller amount), a
+  lifetime window if either side is lifetime, and a limit that is unset or off
+  on one side counts as unlimited there. Naming an agent the supervisor never
+  loosens its budget: an agent with no limit gains the supervisor's, one with a
+  limit keeps it when it is the smaller, and the result is never looser than
+  checking both separately (it can be stricter in the mixed case: an own $200
+  lifetime limit beside the supervisor's $100 monthly one becomes $100
+  lifetime). `budget check`, `status`, `doctor` and `reset` all use the combined
+  limit, and the two hooks read it from there. Both hooks read the name, the Go
+  one as YAML and the bash one with a line scan, and every name either arrives
+  at counts. `yakos budget status` and `doctor` list the renamed agent when run
+  in the project, and `yakos budget reset` takes `--project`. The model ceiling
+  is keyed on the agent name alone and does not follow a rename (K-139), and the
+  renamed agent has its own spend counter (K-160).
 
 - **A malformed limit in the budget policy no longer switches a built-in budget
-  off (K-136).** A negative, NaN or infinite `limit_usd`, or a `limit_tokens` that
-  was negative or above 2^50, resolved to 0, which is "off", so a typo or a corrupt
-  edit removed the supervisor's or the librarian's built-in limit, the one a
-  subscription operator relies on. Such a value is now ignored with a warning and
-  the limit it would have replaced, the built-in or the global default's, stays.
-  `0` still turns a limit off on purpose.
+  off or makes a limit infinite (K-136).** A negative or NaN `limit_usd`, or a
+  negative `limit_tokens`, resolved to "off", and an infinite or huge one to a
+  limit or a stop that could never be reached, so a typo or a corrupt edit removed
+  the supervisor's or the librarian's built-in limit, the one a subscription
+  operator relies on. Such a value is now ignored with a warning and the limit it
+  would have replaced, the built-in or the global default's, stays. Out of range is
+  a `limit_usd` that is negative, NaN, infinite or above $1,000,000,000, and a
+  `limit_tokens` that is negative, not a whole number (`1500000.5` used to be read
+  as 1,500,000), not a number, too large for 64 bits or above 2^50. `0` still turns
+  a limit off on purpose, a value at the bound is accepted, and `yakos budget set`
+  refuses the same dollar values.
 
 - **A summary that arrives as an interactive session closes no longer races the
   dispatch (K-136).** The chunk callback of an interactive chat dispatch runs on

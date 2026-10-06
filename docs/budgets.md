@@ -117,7 +117,7 @@ yakos budget check <agent> [--project <path>] [--json]
   made in and does not carry into the next month. `reset <agent> --project <path>`
   (the working directory by default, as for `status`) reads the project's
   `supervisor: agent:` name, so a renamed supervisor is reset in the window it is
-  counted in.
+  counted in: the combined one (see "Projects may only lower a limit").
 - `check` is the pre-flight for hooks and scripts. Exit 0 means the agent may
   run (also for `warning`, `off`, and any read failure, which fails open). Exit 4
   means `hard_stop`. It never exits 2, because exit 2 is the Claude Code hook
@@ -220,11 +220,20 @@ an entry may set one and inherit the other. A project cannot set a token limit
 (`agent_budgets:` is dollars only), so only this file can.
 
 A value in the file that is out of range is ignored with a warning, and the limit
-it would have replaced stays, so a typo or a corrupt edit cannot switch a built-in
-budget off. Out of range is a dollar limit that is negative, NaN or infinite, and a
-token limit that is negative or above 2^50 (about 10^15). `0` is how you turn a
-limit off, on purpose. The warning is printed by `yakos budget check` and on stderr
-before a dispatch, and `status --json` carries it in `warnings`.
+it would have replaced stays (the built-in one, or the `default:` entry's), so a
+typo or a corrupt edit can neither switch a built-in budget off nor make a limit or
+its stop infinite. Out of range is:
+
+- a dollar limit that is negative, NaN, positive or negative infinity, or above
+  $1,000,000,000 (so the stop of twice the limit stays a finite number);
+- a token limit that is negative, not a whole number (`1500000.5`), not a number at
+  all (`5m`, a list), too large for 64 bits, or above 2^50 (about 10^15).
+
+`0` is how you turn a limit off, on purpose, and a limit exactly at the bound is
+accepted. A bad value costs only itself: the rest of its entry and of the file is
+read as usual. The warning is printed by `yakos budget check` and on stderr before
+a dispatch, and `status --json` carries it in `warnings`. `yakos budget set` refuses
+the same dollar values.
 
 ## Projects may only lower a limit
 
@@ -250,18 +259,40 @@ supervisor:
 ```
 
 The supervisor hook launches `yakos dispatch watchdog` and asks for the budget of
-that name, so the agent a project names as its supervisor has the supervisor's
-budget under that name: the built-in dollar and token limits, the 2x dispatch
-stop, and whatever the user-level file says for `supervisor`. A project can rename
-its supervisor and cannot escape those limits, which would otherwise let a
-committed file lift them. An entry in the user-level file under the new name still
-wins for the limit it sets. Both hooks read the name (the Go hook as YAML, the bash
-hook with a line scan), and every name either of them arrives at is treated as the
-supervisor. The renamed agent has its own spend counter (K-160 tracks counting spend
-against the supervisor role instead of the name), and `status` and `doctor` list it
-when run in the project. The model ceiling below is keyed on the agent name alone, so
-a renamed supervisor does not get the supervisor's `sonnet` ceiling (K-139 passes the
-project to the ceiling).
+that name. A committed file must not be able to loosen a budget, so naming an agent
+the supervisor never does: the agent is budgeted at the stricter of its own limits
+(its entry in the user-level file, else its own built-in, else the `default:` entry)
+and the supervisor's (the supervisor's entry, else its built-in), combined into one
+limit on the agent's one spend counter, unit by unit:
+
+- **Amount:** the smaller of the two limits, for dollars and for tokens. A unit that
+  is not limited on one side (never set, or turned off with `0`) counts as unlimited
+  there, so an agent with no limit of its own gains the supervisor's, and an agent
+  with a limit keeps it when it is the smaller.
+- **Stop:** the smaller of the two sides' dispatch stops, in absolute terms, for each
+  unit. A side's stop is its amount times its stop factor (2 for the supervisor, 1 for
+  every other agent). It is not the stop of whichever side has the smaller amount: an
+  agent with its own 50,000,000 tokens (stop 50,000,000) named as the supervisor gets
+  33,000,000 tokens with a stop of 50,000,000, not the supervisor's 66,000,000.
+- **Window:** lifetime if either side is lifetime, monthly only when both are.
+- **Warning level:** the earlier of the two.
+
+The result is never looser than checking the agent's own limit and the supervisor's
+separately, and in the mixed case it can be stricter, because the agent has one
+counter and so one window: an own $200 lifetime limit beside the supervisor's $100
+monthly one becomes $100 lifetime. For example, a project that names `backend`
+changes nothing for an operator who gave `backend` a limit of $5 (it stays $5 with a
+$5 stop), nothing for the librarian (it stays $40 and 13,000,000 tokens, with no
+doubled stop), and gives an agent that had no limit the supervisor's $100 and
+33,000,000 tokens with the supervisor's stop. `yakos budget check`, `status`,
+`doctor` and `reset` all use the combined limit, and `check --json` prints it, so the
+two hooks, the console and `dispatch` agree. Both hooks read the name (the Go hook as
+YAML, the bash hook with a line scan), and every name either of them arrives at is
+treated as the supervisor. The renamed agent has its own spend counter (K-160 tracks
+counting spend against the supervisor role instead of the name), and `status` and
+`doctor` list it when run in the project. The model ceiling below is keyed on the
+agent name alone, so a renamed supervisor does not get the supervisor's `sonnet`
+ceiling (K-139 passes the project to the ceiling).
 
 ## Model ceiling
 
@@ -431,8 +462,9 @@ carries it. To make that work without one, `yakos dispatch` itself refuses the
 supervisor only at 2x its limit (every other agent at 1x): the hook is the 1x
 gate for routine launches and `dispatch` is the 2x backstop. The Go twin
 evaluates the budget in-process. The bash twin cannot, so at each launch
-decision (never per event) it runs `yakos budget check supervisor --json`, and
-fails open if the CLI is missing or too old to have `budget`. A project's
+decision (never per event) it runs `yakos budget check <agent> --json` (the
+supervisor, or the agent the project names as its supervisor), and fails open if the
+CLI is missing or too old to have `budget`. A project's
 `agent_budgets:` can only lower the limit, never loosen it. Log records carry a
 stable `budget_reason` (`budget_warning`, `budget_exhausted` or, when the
 budget could not be read, `budget_unavailable`).
