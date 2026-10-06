@@ -169,3 +169,174 @@ func TestDiscoveryProbe_ASignInCheckThatIgnoresItsContextDoesNotHoldTheProbe(t *
 		t.Errorf("the probe after a hung one: status %q reason %q err %v", rep.Status, rep.Reason, err)
 	}
 }
+
+// ---- round two: guards of the review fixes that had no test --------------------------
+
+// probeGrace is what production runs with (the tests that need a short one set it
+// themselves and put it back). It must outlast the runner's own wait delay, or a
+// probe is declared hung while its process is still being reaped, and it must stay
+// short, or a sign-in check that ignores its context holds a probe for as long as it
+// likes: with the default at 24h the context-ignoring test above passes only because
+// it overrides the variable.
+func TestDiscoveryProbe_DefaultGraceOutlastsTheWaitDelayAndIsShort(t *testing.T) {
+	if probeGrace <= waitDelay || probeGrace > 10*time.Second {
+		t.Errorf("probeGrace = %v, want more than waitDelay (%v) and at most 10s", probeGrace, waitDelay)
+	}
+}
+
+// The private working directory is made inside the state directory only once
+// statepath.SecureDir has accepted it. A symlinked state directory is refused (the
+// directory is then made in the temp directory, never through the link into
+// whatever it points at), and a group- or world-accessible one is tightened to 0700
+// before agy runs in a directory inside it.
+func TestDiscoveryProbe_TheWorkDirIsOnlyMadeInASecuredStateDir(t *testing.T) {
+	skipIfNoPosixModes(t)
+
+	t.Run("symlinked state directory", func(t *testing.T) {
+		target := t.TempDir()
+		link := filepath.Join(t.TempDir(), "state-link")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		var sawDir string
+		rig := newDiscRig(t, func(c *DiscovererConfig) { c.StateDir = link })
+		rig.runner.fn = func(_ context.Context, spec RunSpec) (RunResult, error) {
+			sawDir = spec.Dir
+			return discListing("model-a"), nil
+		}
+		if _, err := rig.d.Probe(context.Background(), "agy"); err != nil {
+			t.Fatal(err)
+		}
+		if parent := filepath.Dir(sawDir); parent == link || parent == target {
+			t.Errorf("the working directory %q was made through the symlinked state directory", sawDir)
+		}
+		if filepath.Dir(sawDir) != filepath.Clean(os.TempDir()) {
+			t.Errorf("working directory %q, want one directly under the temp directory %q", sawDir, os.TempDir())
+		}
+	})
+
+	t.Run("loose state directory", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.Chmod(dir, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		var parentMode os.FileMode
+		rig := newDiscRig(t, func(c *DiscovererConfig) { c.StateDir = dir })
+		rig.runner.fn = func(_ context.Context, spec RunSpec) (RunResult, error) {
+			if fi, err := os.Stat(filepath.Dir(spec.Dir)); err == nil {
+				parentMode = fi.Mode().Perm()
+			}
+			return discListing("model-a"), nil
+		}
+		if _, err := rig.d.Probe(context.Background(), "agy"); err != nil {
+			t.Fatal(err)
+		}
+		if parentMode != 0o700 {
+			t.Errorf("the state directory was mode %o while agy ran in a directory inside it, want 0700", parentMode)
+		}
+	})
+}
+
+// discPollUntil waits, for at most five seconds, for cond to hold.
+func discPollUntil(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// A cancelled run that is still dying is replaced by a fresh one. When the old run
+// finally ends it must remove its own registration only: removing the replacement's
+// too would let the next caller start a third run beside the one still in flight
+// instead of joining it.
+func TestDiscoveryProbe_ADyingRunEndingDoesNotUnregisterItsReplacement(t *testing.T) {
+	var runs atomic.Int32
+	started := make(chan int32, 8)
+	releaseOld := make(chan struct{})
+	releaseNew := make(chan struct{})
+	release := func(ch chan struct{}) {
+		select {
+		case <-ch:
+		default:
+			close(ch)
+		}
+	}
+	t.Cleanup(func() { release(releaseOld); release(releaseNew) })
+
+	rig := newDiscRig(t)
+	rig.runner.fn = func(ctx context.Context, spec RunSpec) (RunResult, error) {
+		n := runs.Add(1)
+		started <- n
+		switch n {
+		case 1: // the cancelled run: it dies only when the test lets it
+			<-ctx.Done()
+			<-releaseOld
+			return RunResult{}, ctx.Err()
+		case 2: // the replacement: held until the test lets it list
+			select {
+			case <-releaseNew:
+				return discListing("model-a"), nil
+			case <-ctx.Done():
+				return RunResult{}, ctx.Err()
+			}
+		}
+		return discListing("model-a"), nil
+	}
+
+	// A starts the first run and leaves: that run is dead but still running.
+	ctxA, cancelA := context.WithCancel(context.Background())
+	aDone := make(chan struct{})
+	go func() { defer close(aDone); _, _ = rig.d.Probe(ctxA, "agy") }()
+	<-started
+	cancelA()
+	<-aDone
+
+	// B arrives while it dies: a fresh run starts and is held.
+	type result struct {
+		rep ProbeReport
+		err error
+	}
+	bRes := make(chan result, 1)
+	go func() { rep, err := rig.d.Probe(context.Background(), "agy"); bRes <- result{rep, err} }()
+	if n := <-started; n != 2 {
+		t.Fatalf("the second run is number %d, want 2", n)
+	}
+
+	// The dying run ends now, while its replacement is still in flight.
+	release(releaseOld)
+	discPollUntil(t, "the dying run to finish", func() bool {
+		rig.d.mu.Lock()
+		defer rig.d.mu.Unlock()
+		return rig.d.active == 1
+	})
+
+	// C arrives: it must join the replacement (two waiters on it), not start a
+	// third run.
+	cRes := make(chan result, 1)
+	go func() { rep, err := rig.d.Probe(context.Background(), "agy"); cRes <- result{rep, err} }()
+	discPollUntil(t, "C to join the replacement run", func() bool {
+		rig.d.mu.Lock()
+		defer rig.d.mu.Unlock()
+		c := rig.d.inflight["agy"]
+		return c != nil && c.waiters == 2
+	})
+
+	release(releaseNew)
+	for name, ch := range map[string]chan result{"B": bRes, "C": cRes} {
+		select {
+		case r := <-ch:
+			if r.err != nil || r.rep.Status != ProbeUpdated {
+				t.Errorf("%s: status %q reason %q err %v, want updated", name, r.rep.Status, r.rep.Reason, r.err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s never returned", name)
+		}
+	}
+	if got := runs.Load(); got != 2 {
+		t.Errorf("%d runs, want 2 (the cancelled one and one replacement that B and C shared)", got)
+	}
+}
