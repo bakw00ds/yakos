@@ -54,3 +54,10 @@ cli-go/cmd/yakos/testdata/fixtures/refresh/**/.claude/rules/*.md text eol=lf
 # Windows autocrlf checkout cannot turn the compare into a CRLF mismatch.
 cli-go/internal/agentscompose/testdata/cachestable/** text eol=lf
 cli-go/internal/projectcfg/testdata/*.yml text eol=lf
+
+# Cost goldens and ledger fixtures (K-136). `yakos cost` output is compared
+# with these byte for byte, and the bash twin reads the compat log. Force LF so
+# a Windows autocrlf checkout cannot turn the compare into a CRLF mismatch.
+cli-go/cmd/yakos/testdata/fixtures/cost/*.golden text eol=lf
+cli-go/cmd/yakos/testdata/fixtures/cost/ledger-*.ndjson text eol=lf
+tests/fixtures/ledger-compat/* text eol=lf

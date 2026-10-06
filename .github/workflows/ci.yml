@@ -140,6 +140,11 @@ jobs:
       - name: Check scripts/hooks mirror gate self-check
         run: |
           ./tests/run-check-hook-mirror-test.sh
+      # K-136: the bash readers of the dispatch log on the Go dispatcher's ledger
+      # rows (new keys, zero usage cost). Section 7 needs bin/yakos and skips here.
+      - name: Check the bash readers on ledger rows
+        run: |
+          ./tests/run-ledger-compat-test.sh
 
   e2e:
     name: end-to-end smoke (every subcommand)

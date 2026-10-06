@@ -276,6 +276,94 @@ The gemini shim was disabled on 2026-09-01; Gemini CLI stopped serving
 individual accounts on 2026-06-18. Use `agy`. `runtime: gemini` in agent
 frontmatter still validates, as a deprecation warning.
 
+## Usage fields by harness
+
+A `dispatch_finished` row of the dispatch-log can carry a `usage` object with six
+fields: `input_tokens`, `output_tokens`, `cache_read`, `cache_creation`,
+`duration_ms` and `total_cost_usd` (`cost.Usage`, aliased as `runtime.Usage`). The
+Go dispatcher fills it from the harness's own stdout, through the line parser that
+`ParserFor` picks for the runtime. The bash dispatcher fills it from what each
+adapter in `cli/lib/runtimes/` writes to `YAKOS_USAGE_OUT`. The two writers read
+the same native fields a little differently, and the tables record where.
+
+The Go convention is Anthropic's. `input_tokens` counts only fresh prompt tokens,
+those not served from a cache. `cache_read` and `cache_creation` count the cached
+remainder, so the whole prompt is `input_tokens + cache_read + cache_creation`.
+`output_tokens` includes reasoning tokens. `total_cost_usd` is whatever the harness
+itself reported; yakOS never computes a price.
+
+What Go rows contain (`claudeLineParser`, `codexLineParser` and `agyLineParser` in
+`cli-go/internal/runtime/`):
+
+| `usage` field | claude (`result` event) | codex (`turn.completed` event) | agy (`step_update` and `result` events) |
+|---|---|---|---|
+| `input_tokens` | `usage.input_tokens` | `usage.input_tokens` (alias `prompt_tokens`) minus `cached_input_tokens` (alias `cache_read_input_tokens`) minus `cache_write_input_tokens`, never below 0 (`codexUsage.normalize`) | `usage.input_tokens`, which already leaves out the cached part |
+| `output_tokens` | `usage.output_tokens` | `usage.output_tokens` (alias `completion_tokens`); `reasoning_output_tokens` is a subset of it and is not added | `usage.output_tokens`, which includes `thinking_tokens` |
+| `cache_read` | `usage.cache_read_input_tokens` | `usage.cached_input_tokens` (alias `cache_read_input_tokens`) | `usage.cache_read_tokens` |
+| `cache_creation` | `usage.cache_creation_input_tokens` | `usage.cache_write_input_tokens` | not reported, 0 |
+| `duration_ms` | `duration_ms` | not reported, 0 | `duration_seconds` times 1000 on a first turn, 0 after it |
+| `total_cost_usd` | `total_cost_usd` | not reported, 0 | not reported, 0 |
+
+A codex stream with several `turn.completed` events is summed over them.
+
+What legacy bash rows contain (the usage extraction in `cli/lib/runtimes/claude.sh`,
+`codex.sh` and `agy.sh`; the bash writer is unchanged):
+
+| `usage` field | claude | codex | agy |
+|---|---|---|---|
+| `input_tokens` | `usage.input_tokens` | `usage.input_tokens` (alias `prompt_tokens`): the whole prompt, cached tokens included | an estimate, task bytes divided by 4 |
+| `output_tokens` | `usage.output_tokens` | `usage.output_tokens` (alias `completion_tokens`) | an estimate, output bytes divided by 4 |
+| `cache_read` | `usage.cache_read_input_tokens` | `usage.cache_read_input_tokens`, a name codex 0.154.0 does not write (it writes `cached_input_tokens`), so 0 | 0 |
+| `cache_creation` | `usage.cache_creation_input_tokens` | absent | absent |
+| `duration_ms` | `duration_ms` | absent | absent |
+| `total_cost_usd` | `total_cost_usd` | absent | absent |
+
+The bash adapters keep only the last `result` event (claude) or the last
+`turn.completed` event (codex) of a stream. The bash codex and agy objects also
+hold a `total_tokens` key, and the agy one a `source` key
+(`estimate-only-agy-no-headless-telemetry`); `cost.Usage` has no field for them and
+a reader ignores both. The bash `claude-sdk` and `antigravity-sdk` adapters write
+their own SDK shapes, which the tables do not cover. The bash `yakos cost` does not
+read `usage` at all: it totals the chars/4 estimates `est_input_tokens` and
+`est_output_tokens`.
+
+- **Totals agree across the two conventions.** Every token total taken from `usage`
+  adds all four kinds (`input_tokens`, `output_tokens`, `cache_read` and
+  `cache_creation`), as `cost.TokenTotals.Total` does. The bash codex convention
+  (cached tokens inside `input_tokens`, `cache_read` 0) and the Go convention (the
+  fresh remainder in `input_tokens`, the cached part in `cache_read`) therefore give
+  the same total for the same run.
+- **Only the split differs.** claude rows agree between the two writers. A legacy
+  bash codex row shows the whole prompt as `input_tokens` and no cache read, so a
+  reader that reports the input/cache split (a cache hit rate, say) sees different
+  numbers for it than for a Go row of the same run. Nothing rewrites old rows.
+- **agy reports a running total.** The `result` event's `usage` sums the whole
+  conversation, so on a `--conversation` turn after the first it counts every
+  earlier turn again. The parser decides from the event's own `num_turns`
+  (`agyFrame.firstTurn`: 1 or less). On a first turn `Usage` is the event's counts
+  and its duration. After the first turn `Usage` is the sum of the `usage` of the
+  `DONE` steps in this run's own stream, with `duration_ms` 0 because the event's
+  duration is the session's, and a stream with no step usage reports no tokens
+  (`agyTally.own`). A run that ended without a `result` event keeps the sum of its
+  steps. The conversation total is kept apart, as `ParseResult.CumulativeUsage`
+  (`Result.CumulativeUsage` in the dispatcher): it is for reference and
+  cross-checking, it is not written to the log, and it is never added across runs,
+  because adding it would count the earlier turns again. On the Go path the agy
+  counts are agy's own. Legacy bash agy rows are estimates, because the bash
+  adapter ran agy in plain-text mode, where agy reports no usage.
+- **Dollars.** Only claude reports a dollar figure, the `total_cost_usd` of its
+  `result` event. codex and agy report none: their `total_cost_usd` is 0 on a Go
+  row and absent on a bash row. The figure is spend only for a row whose `billing`
+  is `api`, and for a row that predates the `billing` field, which keeps counting so
+  that a budget does not reset itself on upgrade; the bash writer never sets
+  `billing`. A `subscription` or `local` row never counts as spend. For a
+  `subscription` row the Go dispatcher stores 0 in `usage.total_cost_usd` and keeps
+  the harness's figure as the row's `api_equivalent_usd`, which is informational.
+  Go readers take the dollars of a row from `cost.Event.SpendUSD`; a bash reader
+  that reads `usage.total_cost_usd` directly gets the same answer for such a row,
+  because the 0 is already there. Tokens are the primary unit; dollars matter only
+  for runs billed per API call.
+
 ## Soft-degrade rules
 
 When the operator passes a flag the chosen runtime can't honor,
