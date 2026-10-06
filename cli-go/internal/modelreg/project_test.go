@@ -1,6 +1,10 @@
 package modelreg
 
 import (
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,6 +184,59 @@ func TestLoadProject_ReadErrorsNameNoPath(t *testing.T) {
 		t.Fatalf("warnings = %q, want exactly [%q]", warns, want)
 	}
 	if strings.Contains(warns[0], "roj") || strings.Contains(warns[0], os.TempDir()) {
+		t.Errorf("the warning names the project's path: %q", warns[0])
+	}
+}
+
+// projectReadWarning words a read failure by role, whatever the error: an OS error
+// carries the project's path (and the text of the failure), and the warning reaches a
+// terminal and, later, an API. The permission branch has its own test above; this
+// reaches every other branch, each with a path in the error that must not appear.
+func TestProjectReadWarning_WordsEveryBranchWithoutThePath(t *testing.T) {
+	const path = "/secret/project-dir/.yakos.yml"
+	lost := ", so a models: disable list in it is NOT applied"
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"permission", &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}, ".yakos.yml: permission denied" + lost},
+		{"wrapped permission", fmt.Errorf("while reading %s: %w", path, fs.ErrPermission), ".yakos.yml: permission denied" + lost},
+		{"too many links", &fs.PathError{Op: "stat", Path: path, Err: errors.New("too many levels of symbolic links")}, ".yakos.yml: it could not be read" + lost},
+		{"short read", &fs.PathError{Op: "read", Path: path, Err: io.ErrUnexpectedEOF}, ".yakos.yml: it could not be read" + lost},
+		{"vanished", &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}, ".yakos.yml: it could not be read" + lost},
+		{"plain text", errors.New("read " + path + ": input/output error"), ".yakos.yml: it could not be read" + lost},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := projectReadWarning(c.err)
+			if got != c.want {
+				t.Errorf("projectReadWarning = %q, want %q", got, c.want)
+			}
+			if strings.Contains(got, "secret") || strings.Contains(got, "project-dir") || strings.Contains(got, "input/output") {
+				t.Errorf("the warning carries the path or the OS text: %q", got)
+			}
+		})
+	}
+}
+
+// The same branch through the real reader: a .yakos.yml that is a symlink to itself
+// fails to stat with an error that is not a permission error and not "not found".
+func TestLoadProject_AReadErrorThatIsNotAPermissionErrorNamesNoPath(t *testing.T) {
+	skipIfNoPosixModes(t)
+	dir := filepath.Join(t.TempDir(), "proj-secret-name")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(".yakos.yml", filepath.Join(dir, ".yakos.yml")); err != nil {
+		t.Skipf("cannot make a symlink loop here: %v", err)
+	}
+	pol, warns := LoadProject(dir)
+	want := ".yakos.yml: it could not be read, so a models: disable list in it is NOT applied"
+	if len(pol.Disable) != 0 || len(warns) != 1 || warns[0] != want {
+		t.Fatalf("policy %+v, warnings %q, want one warning %q", pol, warns, want)
+	}
+	if strings.Contains(warns[0], "proj-secret-name") || strings.Contains(warns[0], os.TempDir()) {
 		t.Errorf("the warning names the project's path: %q", warns[0])
 	}
 }
