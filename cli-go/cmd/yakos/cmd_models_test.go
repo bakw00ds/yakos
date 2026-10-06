@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -37,6 +38,8 @@ type modelsRig struct {
 	ready    bool
 	run      modelreg.Runner
 	runs     int
+	// timeouts are the per-probe timeouts the command asked the discoverer for.
+	timeouts []time.Duration
 }
 
 func newModelsRig(t *testing.T) *modelsRig {
@@ -58,6 +61,7 @@ func (r *modelsRig) env() modelsEnv {
 		stateDir: r.stateDir,
 		cwd:      func() (string, error) { return r.project, nil },
 		discoverer: func(sd string, timeout time.Duration) *modelreg.Discoverer {
+			r.timeouts = append(r.timeouts, timeout)
 			return modelreg.NewDiscoverer(modelreg.DiscovererConfig{
 				StateDir: sd,
 				Probe: func(context.Context, string) (bool, string) {
@@ -499,10 +503,30 @@ func TestModelsProbe_AdmitThroughTheOverlay(t *testing.T) {
 	if strings.Contains(out, "gemini-9-flash-low") {
 		t.Fatalf("a discovered id was registered without the overlay:\n%s", out)
 	}
+	// Before the overlay admits, probe says the id stays unregistered and how to admit.
+	_, pout, _ := r.do("probe", "--harness", "agy")
+	if !strings.Contains(pout, "  not in the catalog: gemini-9-flash-low\n") ||
+		!strings.Contains(pout, "    they stay unregistered unless model-registry.yml says `discovery: {admit: [agy]}`\n") {
+		t.Errorf("probe before the admit:\n%s", pout)
+	}
 	r.writeOverlay("discovery:\n  admit: [agy]\n", 0o600)
 	_, out, _ = r.do("list", "--harness", "agy")
 	if got := listRows(out)["gemini-9-flash-low"]; len(got) < 4 || got[1] != "agy" || got[3] != "yes" {
 		t.Errorf("an admitted id is registered and available:\n%s", out)
+	}
+	// Once admitted, probe does not claim the id is unregistered.
+	_, pout, _ = r.do("probe", "--harness", "agy")
+	if strings.Contains(pout, "stay unregistered") {
+		t.Errorf("probe says the ids stay unregistered although the overlay admits them:\n%s", pout)
+	}
+	if !strings.Contains(pout, "  not in the catalog: gemini-9-flash-low\n") ||
+		!strings.Contains(pout, "    model-registry.yml admits them: they are registered as discovered entries (a name that is a tier alias or a Claude tier is skipped)\n") {
+		t.Errorf("probe after the admit:\n%s", pout)
+	}
+	// And show says where the billing of such an entry came from.
+	_, sout, _ := r.do("show", "gemini-9-flash-low")
+	if want := "  " + fmt.Sprintf("%-13s %s", "billing:", "subscription (discovered)") + "\n"; !strings.Contains(sout, want) {
+		t.Errorf("show of an admitted id lacks %q:\n%s", want, sout)
 	}
 }
 
@@ -973,5 +997,89 @@ func TestModelsProbeStopsAgyWhenTheContextEnds(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("probe did not return after its context ended")
+	}
+}
+
+// ---- the command's own plumbing -----------------------------------------------------------
+
+// --timeout reaches the discoverer, with the default when it is absent. The reason a
+// timed-out probe prints names the duration, so the plumbing is observable end to
+// end as well (see the router test).
+func TestModelsProbeTimeoutReachesTheDiscoverer(t *testing.T) {
+	r := newModelsRig(t)
+	if code, _, errs := r.do("probe", "--harness", "agy", "--timeout", "7s"); code != 0 {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+	if got := r.timeouts[len(r.timeouts)-1]; got != 7*time.Second {
+		t.Errorf("--timeout 7s reached the discoverer as %v", got)
+	}
+	if code, _, errs := r.do("probe", "--harness", "agy"); code != 0 {
+		t.Fatalf("exit %d: %s", code, errs)
+	}
+	if got := r.timeouts[len(r.timeouts)-1]; got != defaultProbeTimeout {
+		t.Errorf("no --timeout reached the discoverer as %v, want %v", got, defaultProbeTimeout)
+	}
+	// A timeout that bites is reported with its own value.
+	r.run = func(ctx context.Context, spec modelreg.RunSpec) (modelreg.RunResult, error) {
+		select {
+		case <-ctx.Done():
+			return modelreg.RunResult{}, ctx.Err()
+		case <-time.After(3 * time.Second):
+			return modelreg.RunResult{Stdout: []byte(agyListing)}, nil
+		}
+	}
+	code, out, _ := r.do("probe", "--harness", "agy", "--timeout", "150ms")
+	if code != 1 || !strings.Contains(out, "agy: failed, agy models did not finish within 150ms\n") {
+		t.Errorf("exit %d\n%s", code, out)
+	}
+}
+
+// runYakosIn is runYakos with the working directory chosen: the project a command
+// defaults to is the working directory, and a unit test cannot exercise that
+// without a process of its own.
+func runYakosIn(t *testing.T, dir string, args ...string) (int, string) {
+	t.Helper()
+	b, _ := json.Marshal(args)
+	cmd := exec.Command(os.Args[0], "-test.run=^TestBudgetHelperMain$")
+	cmd.Dir = dir
+	cmd.Env = []string{"YAKOS_TEST_MAIN_ARGS=" + string(b), "HOME=" + t.TempDir(), "PATH=" + t.TempDir()}
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	err := cmd.Run()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	return code, out.String()
+}
+
+// Without --project the project is the working directory: a .yakos.yml there
+// disables models, and a different directory does not.
+func TestModelsListThroughTheRouterDefaultsTheProjectToTheWorkingDirectory(t *testing.T) {
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, ".yakos.yml"), []byte("models:\n  disable: [haiku]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, out := runYakosIn(t, project, "models", "list", "--harness", "claude")
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	if got := listRows(out)["haiku"]; len(got) < 4 || got[3] != "disabled" {
+		t.Errorf("a .yakos.yml in the working directory did not disable haiku (row %q):\n%s", got, out)
+	}
+	if got := listRows(out)["sonnet"]; len(got) < 4 || got[3] != "unknown" {
+		t.Errorf("sonnet row = %q", got)
+	}
+	// Another directory, no .yakos.yml: nothing is disabled.
+	code, out = runYakosIn(t, t.TempDir(), "models", "list", "--harness", "claude")
+	if got := listRows(out)["haiku"]; code != 0 || len(got) < 4 || got[3] != "unknown" {
+		t.Errorf("a directory with no .yakos.yml disabled haiku (exit %d, row %q)", code, got)
+	}
+	// --project wins over the working directory.
+	code, out = runYakosIn(t, t.TempDir(), "models", "list", "--harness", "claude", "--project", project)
+	if got := listRows(out)["haiku"]; code != 0 || len(got) < 4 || got[3] != "disabled" {
+		t.Errorf("--project did not apply (exit %d, row %q)", code, got)
 	}
 }

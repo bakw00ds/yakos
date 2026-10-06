@@ -611,3 +611,144 @@ func TestLoad_CapsTheMergeWarnings(t *testing.T) {
 		t.Fatalf("%d warnings, last %q", len(w), w[len(w)-1])
 	}
 }
+
+// ---- a model more than one harness lists -----------------------------------------------
+
+// twoHarnessCatalog is the minimal catalog plus one model that codex and agy both
+// list. The embedded catalog has no such model (every id is on one harness), so the
+// code that applies a setting "on every harness that lists the id" can only be
+// exercised with one.
+func twoHarnessCatalog(t *testing.T) *Catalog {
+	t.Helper()
+	c := minimalCatalog()
+	c["models"] = append(c["models"].([]any), map[string]any{
+		"id": "shared-one", "name": "Shared One", "provider": "openai",
+		"harnesses": []any{"codex", "agy"}, "billing": "subscription",
+	})
+	cat, err := ParseCatalog(encode(t, c))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return cat
+}
+
+// A project's disable names an id, and it applies on every harness that lists it:
+// the second harness must still be reached after the first. This is the
+// tighten-only control, so a project that disables a model on one harness must not
+// leave it enabled on the other.
+func TestLoad_ProjectDisableReachesEveryHarnessThatListsTheID(t *testing.T) {
+	project := writeProject(t, "models:\n  disable: [shared-one]\n")
+	r := mustLoad(t, Options{Catalog: twoHarnessCatalog(t), Project: project})
+	got := r.Find("shared-one")
+	if len(got) != 2 || got[0].Harness != "codex" || got[1].Harness != "agy" {
+		t.Fatalf("Find(shared-one) = %v, want codex then agy", ids(got))
+	}
+	for _, e := range got {
+		if e.Enabled || e.EnabledBy != FromProject {
+			t.Errorf("%s/%s = enabled %v by %s, want disabled by the project", e.Harness, e.ID, e.Enabled, e.EnabledBy)
+		}
+	}
+	if e := entry(t, r, "claude", "haiku"); !e.Enabled {
+		t.Errorf("a disable of one id switched off another: %+v", e)
+	}
+	if len(r.Warnings()) != 0 {
+		t.Errorf("warnings = %v", r.Warnings())
+	}
+}
+
+// The overlay's per-model settings reach every harness the same way.
+func TestLoad_OverlaySettingsReachEveryHarnessThatListsTheID(t *testing.T) {
+	dir := privateStateDir(t)
+	writeOverlay(t, dir, "models:\n  shared-one:\n    enabled: false\n    billing: api\n    pricing: {input: 1, output: 2}\n", 0o600)
+	r := mustLoad(t, Options{Catalog: twoHarnessCatalog(t), StateDir: dir})
+	got := r.Find("shared-one")
+	if len(got) != 2 {
+		t.Fatalf("Find(shared-one) = %v, want codex and agy", ids(got))
+	}
+	for _, e := range got {
+		if e.Enabled || e.EnabledBy != FromOverlay || e.Billing != BillingAPI || e.BillingBy != FromOverlay || e.Cost == nil || e.Cost.Output != 2 {
+			t.Errorf("%s/%s = %+v, want the overlay's settings applied", e.Harness, e.ID, e)
+		}
+	}
+}
+
+// Discovery results are read for every harness, not only the first one that has
+// one. Only agy has a listing wired in today, but the registry takes any
+// SnapshotSource, and a listing for a second harness must not be dropped.
+func TestLoad_ReadsASnapshotForEveryHarness(t *testing.T) {
+	snaps := fakeSnaps{
+		"claude": {Harness: "claude", Source: "claude models", ProbedAt: t0, Models: []DiscoveredModel{{ID: "haiku"}}},
+		"codex":  {Harness: "codex", Source: "codex models", ProbedAt: t0, Models: []DiscoveredModel{{ID: "gpt-5.5"}}},
+		"agy":    agySnapshot(t0, "gemini-3.8-flash-low"),
+	}
+	r := mustLoad(t, Options{Snapshots: snaps, Now: func() time.Time { return t0 }})
+	for _, c := range []struct {
+		harness, id string
+		want        AvailState
+		source      string
+	}{
+		{"claude", "haiku", AvailYes, "claude models"}, {"claude", "opus", AvailNo, "claude models"},
+		{"codex", "gpt-5.5", AvailYes, "codex models"}, {"codex", "gpt-6-astra", AvailNo, "codex models"},
+		{"agy", "gemini-3.8-flash-low", AvailYes, "agy models"}, {"agy", "gemini-3.8-flash-high", AvailNo, "agy models"},
+	} {
+		if a := entry(t, r, c.harness, c.id).Availability; a.State != c.want || a.Source != c.source {
+			t.Errorf("%s/%s availability = %+v, want %s from %q", c.harness, c.id, a, c.want, c.source)
+		}
+	}
+}
+
+// ---- discovered ids ----------------------------------------------------------------
+
+// A discovered id is not in the catalog, and its billing says so: it is the harness
+// default assumed, not something the catalog states.
+func TestLoad_AdmittedIDsLabelTheirBillingAsDiscovered(t *testing.T) {
+	dir := privateStateDir(t)
+	writeOverlay(t, dir, "discovery:\n  admit: [agy]\nmodels:\n  priced-new-low: {billing: api, pricing: {input: 1, output: 2}}\n", 0o600)
+	snaps := fakeSnaps{"agy": agySnapshot(t0, "plain-new-low", "priced-new-low")}
+	r := mustLoad(t, Options{StateDir: dir, Snapshots: snaps, Now: func() time.Time { return t0 }})
+	if e := entry(t, r, "agy", "plain-new-low"); e.Billing != BillingSubscription || e.BillingBy != FromDiscovery {
+		t.Errorf("plain = %s by %s, want subscription by discovered", e.Billing, e.BillingBy)
+	}
+	// An overlay that states the billing is the one that decided it.
+	if e := entry(t, r, "agy", "priced-new-low"); e.Billing != BillingAPI || e.BillingBy != FromOverlay {
+		t.Errorf("priced = %s by %s, want api by overlay", e.Billing, e.BillingBy)
+	}
+	// A catalog entry keeps saying catalog.
+	if e := entry(t, r, "agy", "gemini-3.8-flash-low"); e.BillingBy != FromCatalog {
+		t.Errorf("a catalog entry's billing is by %s", e.BillingBy)
+	}
+}
+
+// dispatch reads a tier alias as that alias (so a model with the name could never be
+// reached) and drops a Claude tier name on any other harness (it names no model
+// there). A discovered id with such a name is not registered, and the operator is
+// told.
+func TestLoad_AdmitSkipsNamesDispatchReadsAsOtherThings(t *testing.T) {
+	dir := privateStateDir(t)
+	writeOverlay(t, dir, "discovery:\n  admit: [agy]\n", 0o600)
+	reserved := []string{"cheap", "balanced", "best", "reasoning", "frontier", "haiku", "sonnet", "opus", "fable"}
+	listing := append([]string{"fine-new-model-low"}, reserved...)
+	r := mustLoad(t, Options{StateDir: dir, Snapshots: fakeSnaps{"agy": agySnapshot(t0, listing...)}, Now: func() time.Time { return t0 }})
+
+	if _, ok := r.Lookup("agy", "fine-new-model-low"); !ok {
+		t.Error("an ordinary discovered id was not admitted")
+	}
+	w := r.Warnings()
+	for _, id := range reserved {
+		if _, ok := r.Lookup("agy", id); ok {
+			t.Errorf("%q was admitted as an agy model", id)
+		}
+		if !hasWarning(w, id+" on agy is not registered: dispatch reads that word as a tier alias or a Claude tier") {
+			t.Errorf("no warning for %q: %v", id, w)
+		}
+	}
+	// The claude tiers are claude's own and stay so.
+	for _, id := range []string{"haiku", "sonnet", "opus", "fable"} {
+		if e, ok := r.Lookup("claude", id); !ok || e.Source != FromCatalog {
+			t.Errorf("claude/%s = %+v, %v", id, e, ok)
+		}
+	}
+	if got := len(r.Entries()); got != 29+1 {
+		t.Errorf("%d entries, want the catalog's 29 plus the one ordinary id", got)
+	}
+}

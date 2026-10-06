@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -235,5 +236,14 @@ func TestReadTrusted_RefusesAFileSwappedAfterTheCheck(t *testing.T) {
 	}
 	if !IsUntrusted(err) || !strings.Contains(err.Error(), "changed while it was being opened") {
 		t.Errorf("err = %v, want an untrusted error saying the file changed while it was opened", err)
+	}
+}
+
+// The seam the owner tests replace must default to the real predicate. Pointer
+// equality of two references to one top-level function is how Go says "the same
+// function"; a wrapper, a stub that returns true, or a different predicate is not.
+func TestOwnedByDefaultsToTheRealPredicate(t *testing.T) {
+	if reflect.ValueOf(ownedBy).Pointer() != reflect.ValueOf(ownedByCurrentUser).Pointer() {
+		t.Error("ownedBy is not ownedByCurrentUser: the trust checks would not apply the real owner test")
 	}
 }

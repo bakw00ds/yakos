@@ -115,3 +115,41 @@ func checkSignalEndsAgyAndItsHelpers(t *testing.T, sig os.Signal) {
 		t.Errorf("output:\n%s", out.String())
 	}
 }
+
+// --timeout reaches the command's own discoverer, not only the unit-test rig: a
+// fake agy that hangs is stopped at the value given, and the failure names it. The
+// production wiring (defaultModelsEnv) passes the value on; a version that dropped
+// it would wait out the 15 second default and say so.
+func TestModelsProbeThroughTheRouterHonoursTimeout(t *testing.T) {
+	bin := t.TempDir()
+	pidFile := filepath.Join(t.TempDir(), "pids")
+	script := "#!/bin/sh\necho $$ >> '" + pidFile + "'\nexec /bin/sleep 3601\n"
+	if err := os.WriteFile(filepath.Join(bin, "agy"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		raw, _ := os.ReadFile(pidFile)
+		for _, f := range strings.Fields(string(raw)) {
+			if n, err := strconv.Atoi(f); err == nil && n > 1 {
+				_ = syscall.Kill(n, syscall.SIGKILL)
+			}
+		}
+	})
+	start := time.Now()
+	code, out := runYakos(t, t.TempDir(), []string{
+		"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + t.TempDir(), "ANTIGRAVITY_API_KEY=agy-key",
+	}, "models", "probe", "--harness", "agy", "--timeout", "1s")
+	elapsed := time.Since(start)
+	if code != 1 || !strings.Contains(out, "agy: failed, agy models did not finish within 1s\n") {
+		t.Errorf("exit %d, want 1 and a timeout of 1s (took %v):\n%s", code, elapsed, out)
+	}
+	if elapsed > 12*time.Second {
+		t.Errorf("the probe took %v with --timeout 1s", elapsed)
+	}
+	raw, _ := os.ReadFile(pidFile)
+	for _, f := range strings.Fields(string(raw)) {
+		if n, err := strconv.Atoi(f); err == nil && len(pidsAlive([]int{n})) > 0 {
+			t.Errorf("agy (pid %d) outlived the timed-out probe", n)
+		}
+	}
+}
