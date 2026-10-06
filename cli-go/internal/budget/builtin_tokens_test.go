@@ -8,6 +8,7 @@ package budget
 import (
 	"math"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -175,17 +176,23 @@ func TestBuiltinTokenLimit_PolicyOverridesAndUntrustedFileDoesNotDisable(t *test
 	}
 
 	// An untrusted policy file (group and world writable) is ignored whole, so the
-	// built-in token limit applies again.
-	if err := os.Chmod(PolicyPath(dir), 0o666); err != nil {
-		t.Skipf("cannot make the policy untrusted here: %v", err)
-	}
-	st, err := Evaluate("supervisor", o)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.LimitTokens != 33_000_000 || st.State != StateHardStop {
-		t.Fatalf("an untrusted policy must not disable the built-in token limit: %+v", st)
-	}
+	// built-in token limit applies again. A subtest, so that the overrides above
+	// still run, and report, where the file modes cannot be made untrusted.
+	t.Run("an untrusted policy file does not disable it", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("POSIX permission bits: chmod 0666 does not make a file untrusted on Windows")
+		}
+		if err := os.Chmod(PolicyPath(dir), 0o666); err != nil {
+			t.Skipf("cannot make the policy untrusted here: %v", err)
+		}
+		st, err := Evaluate("supervisor", o)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.LimitTokens != 33_000_000 || st.State != StateHardStop {
+			t.Fatalf("an untrusted policy must not disable the built-in token limit: %+v", st)
+		}
+	})
 }
 
 // An agent with no built-in limits has no token limit unless the operator sets one.
