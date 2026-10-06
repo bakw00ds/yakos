@@ -362,6 +362,13 @@ for side in bash go; do
     w="$(logs "$sb" | grep -n 'budget_unavailable' | head -n 1 | cut -d: -f1)"; l="$(logs "$sb" | grep -n 'forked async' | head -n 1 | cut -d: -f1)"
     if [ -n "$w" ] && [ -n "$l" ] && [ "$w" -lt "$l" ]; then ok "(10) $side the WARN comes ahead of the launch record"; else bad "(10) $side WARN at record ${w:-none}, launch at ${l:-none}"; fi
     if grep -qi budget "$sb/hook.stderr"; then bad "(10) $side the WARN must stay in the hook log, stderr: $(cat "$sb/hook.stderr")"; else ok "(10) $side nothing on stderr"; fi
+    # The same with a token-only budget (limit_usd 0, which is what a subscription operator has), through the real CLI: the
+    # CLI's read_failed must not depend on a dollar limit. The bash hook reads only that JSON, so a read_failed that needed
+    # limit_usd > 0 would leave "ok, nothing spent" and the launch would go ahead with no WARN at all (K-136, rev-327).
+    sb="$(mksbt "unreadtok-$side" 0 1000 0)"; mkdir "$sb/state/dispatch-log.ndjson"
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    if unavail_is "$sb" read_error && [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ]; then ok "(10) $side an unreadable spend log under a token-only budget: one WARN, cause read_error, the launch still happens"
+    else bad "(10) $side unreadable spend log, token-only budget: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
     # S12 (sec-327's probe, with the real CLI): a project's .yakos.yml whose agent_budgets repeats a key spelled like the
     # CLI's notice. The YAML error echoes it on stderr, the spend is at the limit: the launch is refused and nothing is
     # logged as unavailable (the bash hook once took the words for an unreadable spend log and launched at the hard stop).
@@ -606,6 +613,14 @@ logs "$sb" | grep 'skipping this routine' | grep -q '"spent_tokens":1500,"limit_
 sb="$(stubsb stub-hardunit-usd-bash '{"state":"hard_stop","spent_usd":150,"limit_usd":100,"stop_usd":200,"spent_tokens":999,"limit_tokens":1000,"stop_tokens":2000}' 4)"
 fire bash "$sb" "$TMP/benign.json"; settle
 logs "$sb" | grep 'skipping this routine' | grep -q '"spent_usd":150,"limit_usd":100' && ! logs "$sb" | grep -q '_tokens' && ok "(12) bash a token limit one token short of reached leaves the message in dollars" || bad "(12) bash hard unit, tokens one short"
+# ... and exactly at the token limit (1000 of 1000: the boundary the pair above brackets), with the dollars far from theirs, the
+# message names tokens: the at-limit flag is >=, and a > there would put a dollar message at an exact token limit
+sb="$(stubsb stub-hardunit-tokat-bash '{"state":"hard_stop","spent_usd":10,"limit_usd":100,"stop_usd":200,"spent_tokens":1000,"limit_tokens":1000,"stop_tokens":2000}' 4)"
+fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
+r="$(logs "$sb" | grep 'skipping this routine')"
+if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && printf '%s' "$r" | grep -q '"spent_tokens":1000,"limit_tokens":1000,"budget_reason":"budget_exhausted","kind":"routine"' && ! printf '%s' "$r" | grep -q '_usd' \
+    && grep -q '(1000 of 1000 tokens); routine supervisor runs are skipped' "$sb/hook.stderr"; then ok "(12) bash a token limit exactly reached (1000 of 1000) names tokens, in the record and on stderr"
+else bad "(12) bash hard unit, tokens exactly at their limit: rc=$rc runs=$(runs "$sb") $r / $(cat "$sb/hook.stderr")"; fi
 # ceiling: the limit that is past its own stop, in either direction
 sb="$(stubsb stub-ceilunit-usd-bash '{"state":"hard_stop","spent_usd":200,"limit_usd":100,"stop_usd":200,"spent_tokens":1999,"limit_tokens":1000,"stop_tokens":2000}' 4)"
 fire bash "$sb" "$TMP/high.json"; settle
@@ -691,7 +706,7 @@ cmp_norm() { # cmp_norm <sandbox>
     echo '-- the wrapper records, as a set --'
     logs "$1" | jq -c 'select(has("session_id") | not) | del(.ts, .duration_s)' 2>&1 | sort
 }
-for scen in routine high ceil warn proj quiet flags unread off stub spoof spoofsup spoofctl \
+for scen in routine high ceil warn proj quiet flags unread unreadtok off stub spoof spoofsup spoofctl \
             tokhard tokhigh tokceil tokwarn bothtok bothusd bothboth bothceil usdexempt usdwarn offboth dolloff flagstok \
             rengain renhigh renloose rentight renstopok renstopceil renlife renmonth; do
     b="$(cmp_norm "$TMP/$scen-bash")"
