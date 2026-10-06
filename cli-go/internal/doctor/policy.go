@@ -101,7 +101,9 @@ type RuntimeProbe struct {
 	// CLIPresent is true when the runtime's CLI is on PATH.
 	CLIPresent bool
 	// Authed is true when credentials look configured. The check is best effort,
-	// like `yakos auth status`: it reads no credential and makes no network call.
+	// like `yakos auth status`: it only checks that a login exists (including a
+	// look at yakOS's own keyring entry), prints no credential and makes no
+	// network call.
 	Authed bool
 	// Note says something the probe could not settle, for the report (the OS
 	// keyring did not answer in time). Empty when there is nothing to add.
@@ -265,15 +267,11 @@ const (
 // checkDefaultRuntime reports a default-runtime file that dispatch refuses. The
 // default steers every unpinned dispatch to a vendor, so the Go dispatcher reads
 // it only when no one else could have written it (statepath.ReadTrusted, through
-// auth.ReadDefaultRuntime) and ignores it otherwise, with a line on stderr that
-// carries the path. This reads the same file in the same directory through the
-// same trust check and says why it was refused, without printing a path.
+// auth.ReadDefaultRuntime) and ignores it otherwise, with a one-line warning.
+// This reads the same file in the same directory through the same trust check
+// and words the refusal the same way, without printing a path.
 func checkDefaultRuntime(e PolicyEnv) []PolicyFinding {
-	dir := e.dispatchStateDir()
-	if dir == "" {
-		return nil
-	}
-	path := filepath.Join(dir, defaultRuntimeFile)
+	path := filepath.Join(e.dispatchStateDir(), defaultRuntimeFile)
 	_, err := statepath.ReadTrusted(path, defaultRuntimeMaxBytes)
 	var untrusted *statepath.UntrustedError
 	if !errors.As(err, &untrusted) {
@@ -293,13 +291,14 @@ func checkDefaultRuntime(e PolicyEnv) []PolicyFinding {
 
 // dispatchStateDir is the directory dispatch reads the default runtime from,
 // statepath.Dir() resolved from this environment: YAKOS_DISPATCH_LOG when set,
-// else $HOME/.yakos-state. Empty when there is no home to resolve.
+// else $HOME/.yakos-state, and with no home to resolve the same fallback
+// statepath.Dir() has, a .yakos-state directory under the temp directory.
 func (e PolicyEnv) dispatchStateDir() string {
 	if v := e.Getenv("YAKOS_DISPATCH_LOG"); v != "" {
 		return v
 	}
 	if e.Home == "" {
-		return ""
+		return filepath.Join(os.TempDir(), ".yakos-state")
 	}
 	return filepath.Join(e.Home, ".yakos-state")
 }
@@ -341,7 +340,7 @@ func checkAgySignIn(e PolicyEnv) []PolicyFinding {
 		ID:       "agy-not-signed-in",
 		Severity: PolicyLow,
 		Message:  msg,
-		Fix:      "run 'yakos auth login agy'; this check is best effort and reads no credential",
+		Fix:      "run 'yakos auth login agy'; this check is best effort: it only checks that a login exists and prints no credential",
 	}}
 }
 

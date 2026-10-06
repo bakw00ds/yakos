@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/auth"
+	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
 // writeDefaultRuntime writes <stateDir>/default-runtime with the given mode.
@@ -180,6 +181,32 @@ func TestCheckPolicy_DefaultRuntimeIsReadWhereDispatchReadsIt(t *testing.T) {
 	})
 }
 
+func TestCheckPolicy_DefaultRuntimeFallsBackToTheTempDirectoryWithoutAHome(t *testing.T) {
+	skipWithoutPosixModes(t)
+	// statepath.Dir() falls back to <temp dir>/.yakos-state when no home can be determined,
+	// so that is where dispatch reads the default runtime and where the doctor must look.
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	t.Setenv("HOME", "")
+	t.Setenv("YAKOS_DISPATCH_LOG", "")
+	stateDir := statepath.Dir()
+	if filepath.Dir(stateDir) != filepath.Clean(tmp) {
+		t.Skipf("this platform has no TMPDIR-based fallback: statepath.Dir() = %q", stateDir)
+	}
+	writeDefaultRuntime(t, stateDir, "codex\n", 0o666)
+
+	got := byID(CheckPolicy(PolicyEnv{Getenv: func(string) string { return "" }}))
+	if _, ok := got["default-runtime-refused"]; !ok {
+		t.Fatalf("with no home the doctor must read the file dispatch reads, in the temp directory; got %v", got)
+	}
+	if !dispatchRefuses(stateDir) {
+		t.Error("the doctor reports a refusal the dispatcher does not make")
+	}
+	if msg := got["default-runtime-refused"].Message; strings.Contains(msg, tmp) {
+		t.Errorf("the report must not print the path: %q", msg)
+	}
+}
+
 // ---- agy sign-in ---------------------------------------------------------------
 
 func agyProbeFixture(t *testing.T, p RuntimeProbe) (*policyFixture, *struct {
@@ -232,6 +259,19 @@ func TestCheckPolicy_AgyOnPathButNotSignedIn(t *testing.T) {
 		if strings.Contains(strings.ToLower(got.Message+got.Fix), banned) {
 			t.Errorf("the agy finding must not use %q (K-158): %+v", banned, got)
 		}
+	}
+}
+
+func TestCheckPolicy_AgyFixDoesNotClaimItReadsNoCredential(t *testing.T) {
+	// auth.checkAuth reads yakOS's own keyring entry to test that one exists, so the report
+	// may say it prints no credential, never that it reads none.
+	f, _ := agyProbeFixture(t, RuntimeProbe{CLIPresent: true})
+	got := byID(f.check())["agy-not-signed-in"]
+	if strings.Contains(strings.ToLower(got.Fix), "reads no credential") {
+		t.Errorf("the check reads a keyring entry; the fix must not say it reads no credential: %q", got.Fix)
+	}
+	if !strings.Contains(got.Fix, "prints no credential") {
+		t.Errorf("the fix must say what is true, that the check prints no credential: %q", got.Fix)
 	}
 }
 
