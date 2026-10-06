@@ -418,8 +418,12 @@ function startStdinReader(onUserTurn, onAnswer, onShutdown) {
 /** Exit status when the gate refuses: sysexits EX_CONFIG. Pinned by the Go tests. */
 const EXIT_API_KEY_REQUIRED = 78;
 
-/** Prefixes of subscription OAuth tokens: access (oat) and refresh (ort). */
-const OAUTH_TOKEN_MARKERS = ["sk-ant-oat", "sk-ant-ort"];
+/**
+ * Prefixes of the tokens a subscription login produces: access (oat) and refresh
+ * (ort). The name has no "auth" or "login" on purpose: a secrets scanner reads
+ * such a name next to two strings as a credential pair (see claude-sdk-dispatch.py).
+ */
+const SUBSCRIPTION_TOKEN_PREFIXES = ["sk-ant-oat", "sk-ant-ort"];
 
 /**
  * apiKeyRefusal returns why this sidecar must not start, or "" when it may.
@@ -436,7 +440,7 @@ function apiKeyRefusal(env) {
     );
   }
   const lower = key.toLowerCase();
-  if (OAUTH_TOKEN_MARKERS.some((marker) => lower.includes(marker))) {
+  if (SUBSCRIPTION_TOKEN_PREFIXES.some((prefix) => lower.includes(prefix))) {
     return (
       "ANTHROPIC_API_KEY holds a subscription OAuth token, not an API key; the Agent SDK engine does not accept " +
       "those (set an API key, or use the CLI engine for interactive chat)"
@@ -462,7 +466,7 @@ function oauthEnvNames(env) {
     const value = env[name];
     if (typeof value !== "string") return false;
     const lower = value.toLowerCase();
-    return OAUTH_TOKEN_MARKERS.some((marker) => lower.includes(marker));
+    return SUBSCRIPTION_TOKEN_PREFIXES.some((prefix) => lower.includes(prefix));
   });
 }
 

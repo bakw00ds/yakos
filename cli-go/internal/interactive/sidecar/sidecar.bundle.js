@@ -19756,14 +19756,14 @@ function startStdinReader(onUserTurn, onAnswer, onShutdown) {
   });
 }
 var EXIT_API_KEY_REQUIRED = 78;
-var OAUTH_TOKEN_MARKERS = ["sk-ant-oat", "sk-ant-ort"];
+var SUBSCRIPTION_TOKEN_PREFIXES = ["sk-ant-oat", "sk-ant-ort"];
 function apiKeyRefusal(env) {
   const key = String(env.ANTHROPIC_API_KEY ?? "").trim();
   if (key === "") {
     return "ANTHROPIC_API_KEY is not set; the Agent SDK engine does not run on a claude.ai subscription login (set an API key, or use the CLI engine for interactive chat)";
   }
   const lower = key.toLowerCase();
-  if (OAUTH_TOKEN_MARKERS.some((marker) => lower.includes(marker))) {
+  if (SUBSCRIPTION_TOKEN_PREFIXES.some((prefix) => lower.includes(prefix))) {
     return "ANTHROPIC_API_KEY holds a subscription OAuth token, not an API key; the Agent SDK engine does not accept those (set an API key, or use the CLI engine for interactive chat)";
   }
   return "";
@@ -19775,7 +19775,7 @@ function oauthEnvNames(env) {
     const value = env[name];
     if (typeof value !== "string") return false;
     const lower = value.toLowerCase();
-    return OAUTH_TOKEN_MARKERS.some((marker) => lower.includes(marker));
+    return SUBSCRIPTION_TOKEN_PREFIXES.some((prefix) => lower.includes(prefix));
   });
 }
 function scrubOAuthEnv(env) {

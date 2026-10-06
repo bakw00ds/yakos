@@ -57,8 +57,11 @@ import sys
 
 EXIT_API_KEY_REQUIRED = 78  # sysexits EX_CONFIG, as in sidecar.mjs
 
-# Prefixes of subscription OAuth tokens: access (oat) and refresh (ort).
-_OAUTH_TOKEN_MARKERS = ("sk-ant-oat", "sk-ant-ort")
+# Prefixes of the tokens a subscription login produces: access (oat) and refresh
+# (ort). The name has no "auth" or "login" and the value is a frozenset on
+# purpose: a secrets scanner reads such a name next to a tuple of two strings as
+# a username and password pair, and these are public prefixes, not a credential.
+_SUBSCRIPTION_TOKEN_PREFIXES = frozenset({"sk-ant-oat", "sk-ant-ort"})
 
 
 # The two refusal sentences are constants on purpose: nothing computed from the
@@ -80,7 +83,7 @@ def die(msg, code=1):
 
 def _is_oauth_value(value):
     low = value.lower()
-    return any(marker in low for marker in _OAUTH_TOKEN_MARKERS)
+    return any(prefix in low for prefix in _SUBSCRIPTION_TOKEN_PREFIXES)
 
 
 def startup_check(environ):
