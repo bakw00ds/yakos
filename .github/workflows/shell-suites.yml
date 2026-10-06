@@ -302,7 +302,7 @@ jobs:
         timeout-minutes: 12
         env:
           YAKOS_REQUIRE_GO_BINARY: '1'
-          MIN_PASSED: '100'
+          MIN_PASSED: '130'
         run: |
           rc=0
           for sh in bash /bin/bash; do

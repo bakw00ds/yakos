@@ -417,6 +417,18 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   agent's text is invalid TOML (and invalid in a YAML double-quoted scalar), so
   both emitters now write it as `\u00XX`, as the chat path already did.
 
+- **Bash `yakos validate` checks the frontmatter of rules and skills when the
+  project has no agents directory (K-132 follow-up, rev-324b).** The
+  frontmatter pass ran its three `find` calls, for agents, skills and rules, in
+  one process substitution under `set -e`, and `find` exits 1 for a directory
+  that is not there. A project with no agents directory, no skills directory,
+  or an agents directory the dispatcher refuses ended the group at the first
+  `find` that failed, so the files after it, rules included, were never
+  validated and a file with no frontmatter passed. The Go validator always
+  checked them, so the two reported different findings. The pass now runs
+  whatever is missing, and `tests/run-agent-enums-test.sh` compares both
+  validators on four such projects.
+
 ### Security
 
 - **A conversation, and the claude session its follow-ups resume, belong to
@@ -490,16 +502,23 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   without blocking, and the open file must be a regular file and the same file
   that was checked. In Go, a link retargeted to an outside file, a directory
   swapped for a link, or a file swapped for a FIFO between the check and the
-  read is a skip, not a leak or a hang (rev-324). The bash composer still
-  checks and then reads: the open by descriptor that closes the race has no
-  bash equivalent, so a link retargeted between the check and the read can
-  still be followed there (rev-324 saw the retargeting link win in 3 of 17 runs
-  of a tight loop). The bash composer is the parity oracle that K-143 retires,
-  and the race is not closed in it. If you linked an agent or skill file to
-  another file of the project, move that file into `.claude/agents` or
-  `.claude/skills` (a subdirectory is fine). If you linked `.claude/agents`,
-  `.claude/skills` or `.claude` itself, make it a real directory. Links into
-  `lib/agents` and `lib/skills` keep working.
+  read is a skip, not a leak or a hang (rev-324). What is left in Go is the
+  path down to a file. The project's `.claude`, its agents and skills
+  directories, and a skill's own directory are checked or listed by path, so
+  one swapped for a link before a file in it is inspected is not caught. A swap
+  after the inspection is caught, as above, and only `*.md` and `SKILL.md`
+  files can be read through one. An `os.OpenRoot` design that opens the
+  project's directory once and reads through it is tracked on K-143, skill
+  directories included. The bash composer still checks and then reads: the open
+  by descriptor that closes the race has no bash equivalent, so a link
+  retargeted between the check and the read can still be followed there
+  (rev-324 saw the retargeting link win in 3 of 17 runs of a tight loop). The
+  bash composer is the parity oracle that K-143 retires, and the race is not
+  closed in it. If you linked an agent or skill file to another file of the
+  project, move that file into `.claude/agents` or `.claude/skills` (a
+  subdirectory is fine). If you linked `.claude/agents`, `.claude/skills` or
+  `.claude` itself, make it a real directory. Links into `lib/agents` and
+  `lib/skills` keep working.
 
 - **The skills listing skips a `SKILL.md` it may not read instead of failing
   (K-132 follow-up, sec-324).** `ComposeSkills`, behind `GET /api/skills`, read
