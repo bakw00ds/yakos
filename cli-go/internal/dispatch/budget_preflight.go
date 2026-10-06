@@ -7,7 +7,8 @@ import (
 	"github.com/bakw00ds/yakos/internal/budget"
 )
 
-// budgetPreflight enforces the agent's dollar budget (K-119, docs/budgets.md).
+// budgetPreflight enforces the agent's budget, in tokens, dollars or both (K-119,
+// K-136, docs/budgets.md).
 // It returns a *budget.RefusedError only for hard_stop. A warning is printed to
 // stderr; every other budget failure (unreadable log, untrusted policy file)
 // fails open so a cost guard can never take dispatching down.

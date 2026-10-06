@@ -38,8 +38,10 @@ Sources rolled up:
 
 Token columns:
   est_in / est_out — chars/4 estimate from prompt/output bytes.
-  Real per-runtime token counts arrive in v0.6.x once stream-json
-  parsing per-adapter lands.
+  A log with rows from the Go dispatcher also holds the token counts the
+  harness reported; the Go yakos cost then shows them first (in, out,
+  cache, tokens), with dollars only for runs billed per API call
+  (docs/budgets.md).
 
 Examples:
   yakos cost

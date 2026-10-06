@@ -8,7 +8,7 @@ package dispatch
 // one-shot turns) and the console's interactive turns (the persistent CLI and
 // Agent SDK engines, driven by consoleui) all open an Account and finish it, and
 // nothing else in the tree writes these two event types to the dispatch log.
-// account_single_writer_test.go keeps it that way.
+// TestAccount_IsTheOnlyWriterOfDispatchEvents keeps it that way.
 //
 // Why one writer. Accounting rules are the product here: tokens are the primary
 // unit, dollars count only for runs billed per API call, and a subscription run's
