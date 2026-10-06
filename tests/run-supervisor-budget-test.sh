@@ -24,6 +24,18 @@
 #                 a budget that is switched off is not such a failure, and text
 #                 a project controls (a repeated agent_budgets key spelled like
 #                 the CLI's notice) is never mistaken for one (S12).
+# K-136: the budget has two units, dollars and tokens, and the gate decides over both.
+# 11. tokens    a token-only budget (limit_usd 0, which is what a subscription operator has)
+#               past its limit refuses routine launches, past 2x its tokens blocks high-risk
+#               ones with one synthetic CRITICAL, and warns in tokens; with both limits the
+#               unit that tripped is named (tokens first); a budget is OFF only when BOTH
+#               limits are 0; the built-in token limit stays on when only the dollar limit is
+#               turned off. Each twin, through the real CLI, and the twins' records compared
+#               in (9).
+# 12. stub      the JSON the bash hook reads (a stub CLI): a token-only budget is not "off"
+#               through the old limit_usd filter, read_failed is tested before any limit,
+#               tokens read as 0 when an older CLI prints none, and the unit rules hold at
+#               their thresholds.
 # Run under both `bash` and `/bin/bash` (3.2 on macOS).
 set -u
 
@@ -59,6 +71,23 @@ mksb() {
         printf '{"type":"dispatch_finished","ts":"%s","agent":"supervisor","usage":{"total_cost_usd":%s}}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$3" > "$sb/state/dispatch-log.ndjson"
     fi
     # Fake CLI: budget goes to the real engine, dispatch is recorded.
+    printf '#!/bin/sh\nif [ "$1" = budget ]; then exec "%s" "$@"; fi\nprintf "run\\n" >> "%s/runs"\n' "$GO_BINARY" "$sb" > "$sb/bin/fakeyakos"
+    chmod +x "$sb/bin/fakeyakos"
+    printf '%s' "$sb"
+}
+# mksbt <name> <usd-limit> <token-limit> <spent-tokens> [<spent-usd> [extra project yml]] (K-136): a sandbox whose
+# supervisor budget has the given dollar and token limits (0 turns a limit off, a built-in one included) and one run
+# that spent the given tokens, and dollars. The row has no billing field, so it counts like a legacy row: both units.
+mksbt() {
+    local sb="$TMP/$1"
+    mkdir -p "$sb/.claude" "$sb/work/current/logs" "$sb/bin" "$sb/state"
+    chmod 700 "$sb/state"
+    printf 'supervisor:\n  score_every_n_calls: 1\n%s' "${6:-}" > "$sb/.yakos.yml"
+    printf 'min_launch_interval_s: 0\n' > "$sb/state/supervisor-policy.yml"; chmod 600 "$sb/state/supervisor-policy.yml"
+    YAKOS_DISPATCH_LOG="$sb/state" "$GO_BINARY" budget set supervisor "$2" --tokens "$3" >/dev/null
+    if [ "$4" != 0 ] || [ "${5:-0}" != 0 ]; then
+        printf '{"type":"dispatch_finished","ts":"%s","agent":"supervisor","usage":{"input_tokens":%s,"output_tokens":0,"total_cost_usd":%s}}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$4" "${5:-0}" > "$sb/state/dispatch-log.ndjson"
+    fi
     printf '#!/bin/sh\nif [ "$1" = budget ]; then exec "%s" "$@"; fi\nprintf "run\\n" >> "%s/runs"\n' "$GO_BINARY" "$sb" > "$sb/bin/fakeyakos"
     chmod +x "$sb/bin/fakeyakos"
     printf '%s' "$sb"
@@ -351,6 +380,195 @@ for side in bash go; do
     else bad "(10) $side budget off: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
 done
 
+# 11. K-136: the budget has two units, dollars and tokens, and the gate decides over both, through the real CLI (bash)
+# and in-process (Go). A token-only budget (limit_usd 0: what a subscription operator has, since subscription runs
+# spend no dollars) is not "off" through a zero dollar limit: it refuses routine launches at its hard stop (1000
+# tokens here; the supervisor's dispatch stop is 2x: 2000), exempts high-risk ones up to that stop and blocks them at
+# it with ONE synthetic CRITICAL, and warns in tokens. A dollar message is the one it always was. With both limits the
+# unit that tripped is named (tokens first when both did). Only a budget with NO limit of either kind is off. The
+# sandboxes feed (9): bash and Go write the same records.
+for side in bash go; do
+    # token-only, past the limit (1500 of 1000): a routine launch is refused, in tokens
+    sb="$(mksbt "tokhard-$side" 0 1000 1500)"
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    [ "$(runs "$sb")" = 0 ] && [ "$rc" = 0 ] && ok "(11) $side a token-only budget past its limit refuses a routine launch" || bad "(11) $side token-only hard stop: runs=$(runs "$sb") rc=$rc"
+    r="$(logs "$sb" | grep 'skipping this routine')"
+    if printf '%s' "$r" | grep -q '"severity":"WARN"' && printf '%s' "$r" | grep -q '"spent_tokens":1500,"limit_tokens":1000,"budget_reason":"budget_exhausted","kind":"routine"' && ! printf '%s' "$r" | grep -q '_usd'; then
+        ok "(11) $side the WARN names tokens, with no dollar field"
+    else bad "(11) $side token WARN: $r"; fi
+    if [ "$(grep -c 'supervisor budget exhausted' "$sb/hook.stderr")" = 1 ] && grep -q '(1500 of 1000 tokens); routine supervisor runs are skipped' "$sb/hook.stderr"; then ok "(11) $side exactly one stderr line, in tokens"
+    else bad "(11) $side stderr: $(cat "$sb/hook.stderr")"; fi
+    logs "$sb" | grep -q 'forked async' && bad "(11) $side logged forked async for a refused launch" || ok "(11) $side no forked async"
+
+    # token-only, past the limit and one token under 2x: a high-risk launch runs, noted, no CRITICAL yet
+    sb="$(mksbt "tokhigh-$side" 0 1000 1999)"
+    fire "$side" "$sb" "$TMP/high.json"; rc=$?; settle
+    [ "$(runs "$sb")" = 1 ] && [ "$rc" = 0 ] && ok "(11) $side a high-risk launch under the token ceiling runs" || bad "(11) $side high-risk under 2x tokens: runs=$(runs "$sb") rc=$rc"
+    r="$(logs "$sb" | grep 'allowed under the ceiling')"
+    if printf '%s' "$r" | grep -q '"spent_tokens":1999,"limit_tokens":1000,"ceiling_tokens":2000,"budget_reason":"budget_exhausted"' && ! printf '%s' "$r" | grep -q '_usd' \
+        && grep -q '(1999 of 1000 tokens); launching high-risk supervision under the 2000 token ceiling' "$sb/hook.stderr"; then ok "(11) $side the exempt launch is noted in tokens (ceiling 2000)"
+    else bad "(11) $side exempt note: $r / $(cat "$sb/hook.stderr")"; fi
+    [ -z "$(findings "$sb")" ] && ok "(11) $side no CRITICAL finding below the token ceiling" || bad "(11) $side unexpected finding"
+
+    # token-only, at 2x (2000): nothing launches, ONE synthetic CRITICAL naming tokens
+    sb="$(mksbt "tokceil-$side" 0 1000 2000)"
+    fire "$side" "$sb" "$TMP/high.json"; rc=$?; fire "$side" "$sb" "$TMP/high.json"; settle
+    [ "$(runs "$sb")" = 0 ] && [ "$rc" = 0 ] && ok "(11) $side nothing launches at the token ceiling" || bad "(11) $side at 2x tokens: runs=$(runs "$sb") rc=$rc"
+    f="$(findings "$sb")"
+    if printf '%s' "$f" | grep -q '"overall":"CRITICAL"' && printf '%s' "$f" | grep -q '"synthetic":true' && printf '%s' "$f" | grep -q 'Supervisor token-budget ceiling (2000 tokens) reached' && ! printf '%s' "$f" | grep -q dollar; then ok "(11) $side synthetic CRITICAL finding naming the token ceiling"
+    else bad "(11) $side token finding: $f"; fi
+    [ "$(printf '%s\n' "$f" | grep -c CRITICAL)" = 1 ] && ok "(11) $side token finding written once" || bad "(11) $side token findings repeated: $f"
+    r="$(logs "$sb" | grep 'supervisor budget ceiling reached')"
+    if printf '%s' "$r" | grep -q '"spent_tokens":2000,"ceiling_tokens":2000,"budget_reason":"budget_exhausted"' && ! printf '%s' "$r" | grep -q '_usd' && grep -q 'supervisor budget ceiling (2000 tokens) reached' "$sb/hook.stderr"; then ok "(11) $side the ceiling note is a token record"
+    else bad "(11) $side ceiling note: $r / $(cat "$sb/hook.stderr")"; fi
+
+    # token-only warning (850 of 1000)
+    sb="$(mksbt "tokwarn-$side" 0 1000 850)"
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    [ "$(runs "$sb")" = 1 ] && [ "$rc" = 0 ] && ok "(11) $side a token warning still launches" || bad "(11) $side token warning: runs=$(runs "$sb") rc=$rc"
+    r="$(logs "$sb" | grep 'budget_warning')"
+    if printf '%s' "$r" | grep -q '"spent_tokens":850,"limit_tokens":1000,"budget_reason":"budget_warning"' && ! printf '%s' "$r" | grep -q '_usd' && grep -q 'supervisor budget at 85% (850 of 1000 tokens); at 100% routine supervisor runs stop' "$sb/hook.stderr"; then ok "(11) $side the warning is in tokens"
+    else bad "(11) $side token warning record: $r / $(cat "$sb/hook.stderr")"; fi
+
+    # both limits: the one that tripped is named
+    sb="$(mksbt "bothtok-$side" 100 1000 1500 10)"    # tokens reached, dollars at 10%
+    fire "$side" "$sb" "$TMP/benign.json"; settle
+    r="$(logs "$sb" | grep 'skipping this routine')"
+    if [ "$(runs "$sb")" = 0 ] && printf '%s' "$r" | grep -q '"spent_tokens":1500,"limit_tokens":1000' && ! printf '%s' "$r" | grep -q '_usd'; then ok "(11) $side with both limits, only the token limit reached: refused, in tokens"
+    else bad "(11) $side both limits, tokens tripped: runs=$(runs "$sb") $r"; fi
+    sb="$(mksbt "bothusd-$side" 100 1000 10 150)"     # dollars reached, tokens at 1%
+    fire "$side" "$sb" "$TMP/benign.json"; settle
+    r="$(logs "$sb" | grep 'skipping this routine')"
+    if [ "$(runs "$sb")" = 0 ] && printf '%s' "$r" | grep -q '"spent_usd":150,"limit_usd":100,"budget_reason":"budget_exhausted","kind":"routine"' && ! printf '%s' "$r" | grep -q '_tokens' \
+        && grep -q 'budget exhausted (\$150.00 of \$100.00); routine' "$sb/hook.stderr"; then ok "(11) $side with both limits, only the dollar limit reached: refused, in dollars, as before"
+    else bad "(11) $side both limits, dollars tripped: runs=$(runs "$sb") $r / $(cat "$sb/hook.stderr")"; fi
+    sb="$(mksbt "bothboth-$side" 100 1000 1500 180)"  # both reached; the dollars have the larger share (180% vs 150%)
+    fire "$side" "$sb" "$TMP/benign.json"; settle
+    r="$(logs "$sb" | grep 'skipping this routine')"
+    if [ "$(runs "$sb")" = 0 ] && printf '%s' "$r" | grep -q '"spent_tokens":1500,"limit_tokens":1000' && ! printf '%s' "$r" | grep -q '_usd'; then ok "(11) $side with both limits reached, tokens are named first"
+    else bad "(11) $side both limits reached: runs=$(runs "$sb") $r"; fi
+    sb="$(mksbt "bothceil-$side" 100 1000 1500 250)"  # dollars over their stop (250 > 200), tokens only at their limit
+    fire "$side" "$sb" "$TMP/high.json"; fire "$side" "$sb" "$TMP/high.json"; settle
+    r="$(logs "$sb" | grep 'supervisor budget ceiling reached')"; f="$(findings "$sb")"
+    if [ "$(runs "$sb")" = 0 ] && printf '%s' "$r" | grep -q '"spent_usd":250,"ceiling_usd":200,"budget_reason":"budget_exhausted"' && ! printf '%s' "$r" | grep -q '_tokens' \
+        && printf '%s' "$f" | grep -q 'Supervisor dollar-budget ceiling (\$200.00) reached' && [ "$(printf '%s\n' "$f" | grep -c CRITICAL)" = 1 ]; then ok "(11) $side with both limits, the ceiling names the limit that is past its own stop (the dollar one)"
+    else bad "(11) $side both limits, dollar ceiling: runs=$(runs "$sb") $r / $f"; fi
+
+    # a budget with no limit of either kind is OFF, whatever was spent
+    sb="$(mksbt "offboth-$side" 0 0 90000000000 5000)"
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    fire "$side" "$sb" "$TMP/high.json"; settle
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 2 ] && ! logs "$sb" | grep -qi budget && ! grep -qi budget "$sb/hook.stderr" && [ -z "$(findings "$sb")" ]; then ok "(11) $side a budget off on both units launches, logs nothing budget-related and writes no finding"
+    else bad "(11) $side budget off on both units: rc=$rc runs=$(runs "$sb") findings=[$(findings "$sb")] logs=[$(logs "$sb" | grep -i budget)]"; fi
+
+    # turning off only the dollar limit leaves the supervisor's built-in token limit (33,000,000 a month) on
+    sb="$(mksb "dolloff-$side" 0 0)"
+    printf '{"type":"dispatch_finished","ts":"%s","agent":"supervisor","billing":"subscription","usage":{"input_tokens":34000000,"output_tokens":0,"total_cost_usd":0}}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$sb/state/dispatch-log.ndjson"
+    fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
+    r="$(logs "$sb" | grep 'skipping this routine')"
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && printf '%s' "$r" | grep -q '"spent_tokens":34000000,"limit_tokens":33000000,"budget_reason":"budget_exhausted","kind":"routine"'; then ok "(11) $side a dollar limit of 0 leaves the built-in token limit gated: 34M of 33M tokens refuses"
+    else bad "(11) $side dollar limit off, built-in tokens: rc=$rc runs=$(runs "$sb") $r"; fi
+
+    # the count ceiling and the token ceiling each report once, independently (as (8), for tokens)
+    sb="$(mksbt "flagstok-$side" 0 1000 0 0 $'max_launches_per_session: 1\n')"
+    printf 'min_launch_interval_s: 0\nmax_launches_per_session: 1\n' > "$sb/state/supervisor-policy.yml"; chmod 600 "$sb/state/supervisor-policy.yml"
+    printf 'start=\nlaunches=0\nhlaunches=3\nlast=0\npending=0\nhigh=0\ncaplog=0\nceillog=0\nbackoff=0\nbudgetlog=0\n' > "$sb/work/current/.supervisor-run.$SID"
+    fire "$side" "$sb" "$TMP/high.json"; settle
+    printf '{"type":"dispatch_finished","ts":"%s","agent":"supervisor","usage":{"input_tokens":2500,"output_tokens":0,"total_cost_usd":0}}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$sb/state/dispatch-log.ndjson"
+    sed -i.bak 's/^hlaunches=.*/hlaunches=0/' "$sb/work/current/.supervisor-run.$SID"; rm -f "$sb/work/current/.supervisor-run.$SID.bak"
+    fire "$side" "$sb" "$TMP/high.json"; settle
+    f="$(findings "$sb")"
+    printf '%s\n' "$f" | grep -q 'token-budget ceiling (2000 tokens)' && [ "$(printf '%s\n' "$f" | grep -c CRITICAL)" = 2 ] && ok "(11) $side the token ceiling's CRITICAL is written after the count ceiling's, each once" || bad "(11) $side token ceiling after the count one: $f"
+    fire "$side" "$sb" "$TMP/high.json"; settle
+    [ "$(findings "$sb" | grep -c CRITICAL)" = 2 ] && ok "(11) $side neither repeats" || bad "(11) $side repeated findings"
+done
+
+# 12. K-136: the JSON the bash hook reads, from a stub CLI (the Go twin does not read it). stubsb <name> <json> [exit]: a
+# sandbox whose CLI answers `budget` with that JSON. A real read_failed test comes before any limit test, so a zero limit
+# can never turn a failed read into "off"; a token-only budget (limit_usd 0) is on; a CLI that prints no token fields (an
+# older one) is read with tokens at 0; and the three unit rules (warning: the larger share, a tie to tokens; hard: tokens
+# when the token limit is itself reached; ceiling: tokens when it is itself past its stop) hold at their thresholds.
+stubsb() { local sb; sb="$(mksb "$1" 100 0)"; fakecli "$sb" "echo '$2'; exit ${3:-0}"; printf '%s' "$sb"; }
+TOKHARD='{"state":"hard_stop","spent_usd":0,"limit_usd":0,"stop_usd":0,"spent_tokens":1500,"limit_tokens":1000,"stop_tokens":2000}'
+sb="$(stubsb stub-tokhard-bash "$TOKHARD" 4)"
+fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
+if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && logs "$sb" | grep 'skipping this routine' | grep -q '"spent_tokens":1500,"limit_tokens":1000,"budget_reason":"budget_exhausted","kind":"routine"' && [ -z "$(unavail "$sb")" ]; then ok "(12) bash a token-only budget (limit_usd 0) past its limit is refused: it does not read as off"
+else bad "(12) bash token-only stub, routine: rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
+sb="$(stubsb stub-tokhigh-bash "$TOKHARD" 4)"
+fire bash "$sb" "$TMP/high.json"; rc=$?; settle
+if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ] && logs "$sb" | grep 'allowed under the ceiling' | grep -q '"ceiling_tokens":2000' && [ -z "$(findings "$sb")" ]; then ok "(12) bash a token-only budget between 1x and 2x lets a high-risk launch run, noted"
+else bad "(12) bash token-only stub, high-risk under 2x: rc=$rc runs=$(runs "$sb") findings=[$(findings "$sb")]"; fi
+sb="$(stubsb stub-tokceil-bash '{"state":"hard_stop","spent_usd":0,"limit_usd":0,"stop_usd":0,"spent_tokens":2000,"limit_tokens":1000,"stop_tokens":2000}' 4)"
+fire bash "$sb" "$TMP/high.json"; rc=$?; fire bash "$sb" "$TMP/high.json"; settle
+if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && findings "$sb" | grep -q 'Supervisor token-budget ceiling (2000 tokens) reached' && [ "$(findings "$sb" | grep -c CRITICAL)" = 1 ]; then ok "(12) bash a token-only budget at 2x blocks a high-risk launch with one CRITICAL"
+else bad "(12) bash token-only stub, at 2x: rc=$rc runs=$(runs "$sb") findings=[$(findings "$sb")]"; fi
+sb="$(stubsb stub-tokwarn-bash '{"state":"warning","spent_usd":0,"limit_usd":0,"stop_usd":0,"spent_tokens":850,"limit_tokens":1000,"stop_tokens":2000}')"
+fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
+if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ] && logs "$sb" | grep 'budget_warning' | grep -q '"spent_tokens":850,"limit_tokens":1000' && grep -q '(850 of 1000 tokens)' "$sb/hook.stderr"; then ok "(12) bash a token-only warning is read and named in tokens"
+else bad "(12) bash token-only stub, warning: rc=$rc runs=$(runs "$sb")"; fi
+# off needs both units unset or zero, with the token fields absent (an older CLI) or explicit zeros
+for spec in 'absent|{"state":"off","spent_usd":0,"limit_usd":0,"stop_usd":0}' 'zeros|{"state":"off","spent_usd":0,"limit_usd":0,"stop_usd":0,"spent_tokens":5,"limit_tokens":0,"stop_tokens":0}'; do
+    name="${spec%%|*}"; json="${spec#*|}"
+    sb="$(stubsb "stub-off-$name-bash" "$json")"
+    fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
+    if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ] && ! logs "$sb" | grep -qi budget && ! grep -qi budget "$sb/hook.stderr"; then ok "(12) bash a budget with no limit of either kind ($name token fields) is off: launched, silent"
+    else bad "(12) bash off stub ($name): rc=$rc runs=$(runs "$sb")"; fi
+done
+# read_failed first: a zero dollar limit, with or without a token limit, never turns a failed read into "off"
+for spec in 'usdzero|{"state":"ok","spent_usd":0,"limit_usd":0,"stop_usd":0,"read_failed":true}' 'tokens|{"state":"ok","spent_usd":0,"limit_usd":0,"stop_usd":0,"spent_tokens":0,"limit_tokens":1000,"stop_tokens":2000,"read_failed":true}'; do
+    name="${spec%%|*}"; json="${spec#*|}"
+    sb="$(stubsb "stub-readfailed-$name-bash" "$json")"
+    fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
+    if unavail_is "$sb" read_error && [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ]; then ok "(12) bash read_failed with a zero dollar limit ($name) is a failed read, not off: one WARN, cause read_error"
+    else bad "(12) bash read_failed stub ($name): rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")]"; fi
+done
+# the token fields are optional and only numbers count: an older CLI's JSON, or a garbled one, reads as dollars alone
+sb="$(stubsb stub-oldjson-bash '{"state":"hard_stop","spent_usd":100,"limit_usd":100,"stop_usd":200,"limit_tokens":"lots","spent_tokens":"many","stop_tokens":null}' 4)"
+fire bash "$sb" "$TMP/benign.json"; rc=$?; settle
+if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && logs "$sb" | grep 'skipping this routine' | grep -q '"spent_usd":100,"limit_usd":100,"budget_reason":"budget_exhausted"' && ! logs "$sb" | grep -q '_tokens'; then ok "(12) bash token fields that are not numbers read as 0: the dollar budget decides, as before"
+else bad "(12) bash garbled token fields: rc=$rc runs=$(runs "$sb")"; fi
+# a status that lacks its state or its amounts is not a budget at all (parse), as before: it must not read as off or as over
+for spec in 'nostate|{"spent_usd":0,"limit_usd":100,"stop_usd":200}' 'nostop|{"state":"hard_stop","spent_usd":100,"limit_usd":100}'; do
+    name="${spec%%|*}"; json="${spec#*|}"
+    sb="$(stubsb "stub-malformed-$name-bash" "$json")"
+    fire bash "$sb" "$TMP/high.json"; rc=$?; settle
+    if unavail_is "$sb" parse && [ "$rc" = 0 ] && [ "$(runs "$sb")" = 1 ] && [ -z "$(findings "$sb")" ]; then ok "(12) bash a status without its $name is a parse failure (fail open, one WARN), not off and not over"
+    else bad "(12) bash malformed stub ($name): rc=$rc runs=$(runs "$sb") warns=[$(unavail "$sb")] findings=[$(findings "$sb")]"; fi
+done
+# a token limit without its stop reads the stop as the limit (a CLI quirk; ours prints both)
+sb="$(stubsb stub-nostoptok-bash '{"state":"hard_stop","spent_usd":0,"limit_usd":0,"stop_usd":0,"spent_tokens":1500,"limit_tokens":1000}' 4)"
+fire bash "$sb" "$TMP/high.json"; rc=$?; settle
+if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && findings "$sb" | grep -q 'token-budget ceiling (1000 tokens)'; then ok "(12) bash a token limit without stop_tokens reads its stop as the limit"
+else bad "(12) bash token stop missing: rc=$rc runs=$(runs "$sb") findings=[$(findings "$sb")]"; fi
+# the unit rules at their thresholds. warning: the larger share of its limit, a tie to tokens
+for spec in 'tokshare|85|900|tokens' 'usdshare|90|850|dollars' 'tie|85|850|tokens'; do
+    IFS='|' read -r name usd tok want <<EOF_SPEC
+$spec
+EOF_SPEC
+    sb="$(stubsb "stub-warnunit-$name-bash" "{\"state\":\"warning\",\"spent_usd\":$usd,\"limit_usd\":100,\"stop_usd\":200,\"spent_tokens\":$tok,\"limit_tokens\":1000,\"stop_tokens\":2000}")"
+    fire bash "$sb" "$TMP/benign.json"; settle
+    r="$(logs "$sb" | grep 'budget_warning')"
+    if [ "$want" = tokens ]; then
+        if printf '%s' "$r" | grep -q "\"spent_tokens\":$tok," && ! printf '%s' "$r" | grep -q '_usd'; then ok "(12) bash a warning names the larger share: $name -> tokens"; else bad "(12) bash warning unit $name: $r"; fi
+    else
+        if printf '%s' "$r" | grep -q "\"spent_usd\":$usd," && ! printf '%s' "$r" | grep -q '_tokens'; then ok "(12) bash a warning names the larger share: $name -> dollars"; else bad "(12) bash warning unit $name: $r"; fi
+    fi
+done
+# hard: tokens when the token limit is itself reached, even though the dollars have the larger share
+sb="$(stubsb stub-hardunit-tok-bash '{"state":"hard_stop","spent_usd":180,"limit_usd":100,"stop_usd":200,"spent_tokens":1500,"limit_tokens":1000,"stop_tokens":2000}' 4)"
+fire bash "$sb" "$TMP/benign.json"; settle
+logs "$sb" | grep 'skipping this routine' | grep -q '"spent_tokens":1500,"limit_tokens":1000' && ok "(12) bash at the limit with both reached the message names tokens" || bad "(12) bash hard unit, both reached"
+sb="$(stubsb stub-hardunit-usd-bash '{"state":"hard_stop","spent_usd":150,"limit_usd":100,"stop_usd":200,"spent_tokens":999,"limit_tokens":1000,"stop_tokens":2000}' 4)"
+fire bash "$sb" "$TMP/benign.json"; settle
+logs "$sb" | grep 'skipping this routine' | grep -q '"spent_usd":150,"limit_usd":100' && ! logs "$sb" | grep -q '_tokens' && ok "(12) bash a token limit one token short of reached leaves the message in dollars" || bad "(12) bash hard unit, tokens one short"
+# ceiling: the limit that is past its own stop, in either direction
+sb="$(stubsb stub-ceilunit-usd-bash '{"state":"hard_stop","spent_usd":200,"limit_usd":100,"stop_usd":200,"spent_tokens":1999,"limit_tokens":1000,"stop_tokens":2000}' 4)"
+fire bash "$sb" "$TMP/high.json"; settle
+logs "$sb" | grep 'supervisor budget ceiling reached' | grep -q '"spent_usd":200,"ceiling_usd":200' && findings "$sb" | grep -q 'dollar-budget ceiling' && ok "(12) bash dollars at their stop (tokens one short of theirs): the dollar ceiling" || bad "(12) bash ceiling unit, dollars"
+sb="$(stubsb stub-ceilunit-tok-bash '{"state":"hard_stop","spent_usd":199.99,"limit_usd":100,"stop_usd":200,"spent_tokens":2000,"limit_tokens":1000,"stop_tokens":2000}' 4)"
+fire bash "$sb" "$TMP/high.json"; settle
+logs "$sb" | grep 'supervisor budget ceiling reached' | grep -q '"spent_tokens":2000,"ceiling_tokens":2000' && findings "$sb" | grep -q 'token-budget ceiling (2000 tokens)' && ok "(12) bash tokens at their stop (dollars just short of theirs): the token ceiling" || bad "(12) bash ceiling unit, tokens"
+
 # 9. K-122: the two twins write the same hook-log records, field for field AND in
 # the same order (jq keeps an object literal's insertion order, so `jq -c` of each
 # record is a byte comparison with only the timestamp removed). That holds for the HOOK's
@@ -363,7 +581,8 @@ cmp_norm() { # cmp_norm <sandbox>
     echo '-- the wrapper records, as a set --'
     logs "$1" | jq -c 'select(has("session_id") | not) | del(.ts, .duration_s)' 2>&1 | sort
 }
-for scen in routine high ceil warn proj quiet flags unread off stub spoof spoofsup spoofctl; do
+for scen in routine high ceil warn proj quiet flags unread off stub spoof spoofsup spoofctl \
+            tokhard tokhigh tokceil tokwarn bothtok bothusd bothboth bothceil offboth dolloff flagstok; do
     b="$(cmp_norm "$TMP/$scen-bash")"
     g="$(cmp_norm "$TMP/$scen-go")"
     if [ -n "$b" ] && [ "$b" = "$g" ]; then ok "(9) $scen hook-log records are byte-identical across twins"; else
