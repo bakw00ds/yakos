@@ -541,3 +541,50 @@ func TestDiscoveryExec_RunsInASessionOfItsOwn(t *testing.T) {
 		t.Errorf("agy shares the caller's process group %s", mine)
 	}
 }
+
+// A hung agy that ignores SIGTERM, and helpers that inherit the ignore: the cancel
+// must kill, not ask. The group is killed with SIGKILL, which no process can ignore.
+// (With SIGTERM the helper survived and the program itself only died when exec's own
+// wait delay killed it.)
+func TestDiscoveryExec_ProcessesThatIgnoreTermAreStillKilled(t *testing.T) {
+	pidFile := filepath.Join(t.TempDir(), "pids")
+	killAtCleanup(t, pidFile)
+	script := discScript(t,
+		"trap '' TERM\n"+
+			"/bin/sleep 3602 &\necho $! >> "+shq(pidFile)+"\n"+
+			"echo $$ >> "+shq(pidFile)+"\nexec /bin/sleep 3601\n")
+	rig := newDiscRig(t, discReal(script, 600*time.Millisecond))
+	rep, err := probeWithin(t, rig.d, context.Background(), 15*time.Second)
+	if rep.Status != ProbeFailed || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("got %q %v, want failed with a deadline error", rep.Status, err)
+	}
+	for i, pid := range discReadPIDs(t, pidFile, 2) {
+		if !discProcessDead(pid) {
+			t.Errorf("process %d (%d of 2) ignored the cancel and outlived the probe", pid, i+1)
+		}
+	}
+}
+
+// os/exec expects Cancel to report a command that is already gone as
+// os.ErrProcessDone; any other error from a finished command's cancellation would
+// become Wait's error.
+func TestIsolateProcessCancelOfAGoneGroupIsProcessDone(t *testing.T) {
+	cmd := exec.CommandContext(context.Background(), "/bin/sh", "-c", "exit 0")
+	isolateProcess(cmd)
+	if err := cmd.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Cancel(); !errors.Is(err, os.ErrProcessDone) {
+		t.Errorf("Cancel of a finished command's group = %v, want os.ErrProcessDone", err)
+	}
+}
+
+// Cancel before the command was started has no process to signal and must say
+// nothing rather than dereference it.
+func TestIsolateProcessCancelBeforeStartIsHarmless(t *testing.T) {
+	cmd := exec.CommandContext(context.Background(), "/bin/true")
+	isolateProcess(cmd)
+	if err := cmd.Cancel(); err != nil {
+		t.Errorf("Cancel before Start = %v, want nil", err)
+	}
+}

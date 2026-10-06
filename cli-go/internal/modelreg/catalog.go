@@ -14,9 +14,9 @@ import (
 )
 
 // embeddedCatalogJSON is a byte-for-byte copy of lib/settings/model-catalog.json.
-// go:embed cannot reach outside the package directory, and the staged framework
-// copy (internal/framework/embedded) is empty in a source checkout, so the
-// catalog the Go programs read lives here too, the way the alias table lives in
+// An embed directive cannot reach outside the package directory, and the staged
+// framework copy (internal/framework/embedded) is empty in a source checkout, so
+// the catalog the Go programs read lives here too, the way the alias table lives in
 // internal/runtime. TestEmbeddedCatalogMatchesLib fails when the two drift;
 // refresh with
 //

@@ -282,3 +282,15 @@ func TestLoad_WarnsWhenOneIDIsMappedUnderAliasesOfDifferentCostClasses(t *testin
 		t.Errorf("the catalog alone must not warn: %v", w)
 	}
 }
+
+// Every alias that maps to the id is compared, not only the first two: best and
+// reasoning share a rank, and it is the third (frontier) that makes the mapping
+// ambiguous.
+func TestLoad_WarnsWhenThreeAliasesShareOneID(t *testing.T) {
+	dir := privateStateDir(t)
+	writeOverlay(t, dir, "aliases:\n  best: {codex: gpt-5.6-sol}\n  reasoning: {codex: gpt-5.6-sol}\n  frontier: {codex: gpt-5.6-sol}\n", 0o600)
+	w := mustLoad(t, Options{StateDir: dir}).Warnings()
+	if !hasWarning(w, "aliases best, reasoning, frontier all map to gpt-5.6-sol on codex but are different cost classes; the dearest counts") {
+		t.Errorf("no warning for best, reasoning and frontier on codex: %v", w)
+	}
+}

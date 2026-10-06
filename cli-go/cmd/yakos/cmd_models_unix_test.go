@@ -36,6 +36,18 @@ func pidsAlive(pids []int) []int {
 // for that before it exits. This runs the real router in a subprocess of the test
 // binary against a fake agy that starts two sleeping helpers.
 func TestModelsProbeThroughTheRouterInterruptEndsAgyAndItsHelpers(t *testing.T) {
+	for _, sig := range []struct {
+		name string
+		sig  os.Signal
+	}{{"SIGINT", os.Interrupt}, {"SIGTERM", syscall.SIGTERM}} {
+		t.Run(sig.name, func(t *testing.T) { checkSignalEndsAgyAndItsHelpers(t, sig.sig) })
+	}
+}
+
+// checkSignalEndsAgyAndItsHelpers sends sig to the running command and checks agy and
+// the helpers it started are gone when the command has exited. A terminal's Ctrl-C is
+// SIGINT and a service manager's stop is SIGTERM; both must end the probe.
+func checkSignalEndsAgyAndItsHelpers(t *testing.T, sig os.Signal) {
 	bin := t.TempDir()
 	pidFile := filepath.Join(t.TempDir(), "pids")
 	script := "#!/bin/sh\n/bin/sleep 3602 &\necho $! >> '" + pidFile + "'\n/bin/sleep 3603 &\necho $! >> '" + pidFile + "'\necho $$ >> '" + pidFile + "'\nexec /bin/sleep 3601\n"
@@ -80,7 +92,7 @@ func TestModelsProbeThroughTheRouterInterruptEndsAgyAndItsHelpers(t *testing.T) 
 		_ = cmd.Process.Kill()
 		t.Fatalf("the fake agy never started its helpers (%d pids):\n%s", len(pids), out.String())
 	}
-	if err := cmd.Process.Signal(os.Interrupt); err != nil {
+	if err := cmd.Process.Signal(sig); err != nil {
 		t.Fatal(err)
 	}
 	select {
