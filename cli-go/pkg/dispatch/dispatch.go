@@ -124,6 +124,7 @@ func Run(ctx context.Context, req Request) (*Result, error) {
 		Runtime:   req.Runtime,
 		Model:     req.Model,
 		Timeout:   req.Timeout,
+		Surface:   internaldispatch.SurfaceLibrary,
 	}
 
 	start := time.Now()

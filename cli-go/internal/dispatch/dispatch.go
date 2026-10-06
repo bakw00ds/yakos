@@ -20,9 +20,10 @@ const defaultTimeout = 600
 //  2. Compose the agent roster from yakosRoot + project.
 //  3. Find the target agent in the roster.
 //  4. Select the runtime adapter.
-//  5. Write dispatch_started event to the log.
+//  5. Open the dispatch's ledger entry (Account) and write dispatch_started.
 //  6. Exec the runtime with stderr split to capture (PR #34).
-//  7. Write dispatch_finished event with full schema (PR #40).
+//  7. Finish the entry: dispatch_finished with the full schema (PR #40) and
+//     the K-136 ledger fields. Account is the only writer of both events.
 //  8. Return stdout bytes and Result. stdout is the runtime's raw capture
 //     (stream-json, JSONL or prose); Result carries what it means: the
 //     agent's Text, the token Usage and the native SessionID (K-135).
@@ -107,10 +108,10 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	// --- 6b. File-based agent registration for codex and agy (K-134) ---
 	materializeAgentFiles(runtimeName, req.Project, req.WorkDirOverride, *targetAgent)
 
-	// --- 7. Write dispatch_started (PR #40: includes project field) ---
-	logPath := dispatchLogPath()
-	tsStart := time.Now()
-	writeStarted(req, tsStart, logPath)
+	// --- 7. Open the ledger entry: dispatch_started (PR #40: includes project) ---
+	acct := NewAccount(req)
+	acct.Start()
+	tsStart := acct.Started()
 
 	taskBytes := int64(len(req.Task))
 
@@ -177,8 +178,8 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	// when there is something to record.
 	res.applyOutput(adapter.Name(), dispatchOut)
 
-	// --- 10. Write dispatch_finished (PR #40) ---
-	writeFinished(req, res, tsEnd, logPath)
+	// --- 10. Finish the ledger entry: dispatch_finished (PR #40) ---
+	acct.FinishAt(res, tsEnd)
 
 	if dispatchErr != nil {
 		return dispatchOut, res, fmt.Errorf("dispatch: runtime error: %w", dispatchErr)

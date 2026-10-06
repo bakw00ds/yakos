@@ -233,6 +233,7 @@ func handleDispatchRun(cfg Config) jsonrpc.Handler {
 			Model:     p.Model,
 			Timeout:   p.Timeout,
 			YakosRoot: p.YakosRoot, // per-request override; empty → Service uses cfg default
+			Surface:   dispatch.SurfaceJSONRPC,
 			// JSON-RPC transport does not yet carry identity fields in the
 			// wire params; OperatorID/ConversationID/SessionID are stamped
 			// by the Service from its daemon-level defaults.
