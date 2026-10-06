@@ -5,7 +5,7 @@ package budget
 // code review of #330). A project file is the attacker in this model, so naming an agent
 // the supervisor may add limits to an agent that has none, and may never raise anything:
 // per unit the smaller amount, per unit the smaller absolute stop, the window lifetime if
-// either side is lifetime, and an off or unlimited unit counts as infinite. The adopted
+// a side that has a limit is lifetime, and an off or unlimited unit counts as infinite. The adopted
 // reviewer probes (alias_tighten_only_*_test.go, policy_out_of_range_sec330_test.go) sweep
 // hundreds of policies and project files for a loosening; these tests pin the rule case by
 // case, with the values it must give.
@@ -141,8 +141,8 @@ func TestTightenOnly_ALoweredSupervisorLowersTheRenamedAgent(t *testing.T) {
 	}
 }
 
-// Reset records the reset in the window the combined limit counts in: lifetime when
-// either side is lifetime, here the agent's own default while the supervisor's is monthly.
+// Reset records the reset in the window the combined limit counts in: lifetime when a
+// side that has a limit is lifetime, here the agent's own default while the supervisor's is monthly.
 func TestTightenOnly_ResetUsesTheCombinedWindow(t *testing.T) {
 	dir := t.TempDir()
 	pol := Policy{Default: AgentLimit{Window: "lifetime"}, Agents: map[string]AgentLimit{

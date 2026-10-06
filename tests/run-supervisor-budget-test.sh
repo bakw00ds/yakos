@@ -41,7 +41,8 @@
 #               supervisor's, unit by unit. An agent with no limit of its own gains the
 #               supervisor's, an own limit looser than the supervisor's does not loosen it, a
 #               stricter one holds, the stop is the smaller absolute stop (not the stop of the
-#               side with the smaller amount), and the window is lifetime if either side is.
+#               side with the smaller amount), and the window is lifetime if a side that has a
+#               limit is.
 #               Each twin reads the name its own way (Go as YAML, bash with a line scan).
 # 14. project    a project's agent_budgets value (.inf, 1e308, 5e-324, below the one-cent floor) cannot
 #               switch the gate off: with the operator's dollar limit off, both twins still refuse the
@@ -635,7 +636,7 @@ logs "$sb" | grep 'supervisor budget ceiling reached' | grep -q '"spent_tokens":
 # 13. K-136: a project that names its supervisor (supervisor: agent: watchdog) makes the hook launch, and budget, THAT
 # agent. The Go twin reads the name as YAML, the bash twin with a line scan; both then ask the budget for the agent's
 # limit, which is the stricter of the agent's own and the supervisor's, unit by unit (budget.tighter): the smaller
-# amount, the smaller ABSOLUTE stop, and a lifetime window if either side is lifetime. The supervisor itself keeps its
+# amount, the smaller ABSOLUTE stop, and a lifetime window if a side that has a limit is lifetime. The supervisor itself keeps its
 # built-in 33,000,000 tokens (stop 66,000,000). The sandboxes feed (9): bash and Go write the same records.
 for side in bash go; do
     # no limit of its own: it gains the supervisor's, and a routine launch past 33M tokens is refused, under its own name
@@ -683,7 +684,7 @@ for side in bash go; do
     if [ "$rc" = 0 ] && [ "$(runs "$sb")" = 0 ] && printf '%s' "$f" | grep -q 'Supervisor token-budget ceiling (50000000 tokens) reached' && [ "$(printf '%s\n' "$f" | grep -c CRITICAL)" = 1 ]; then
         ok "(13) $side own 50M beside the supervisor's 33M: nothing launches at 55M, past the 50M stop, and one CRITICAL names it"
     else bad "(13) $side renamed, stop reached: rc=$rc runs=$(runs "$sb") $f"; fi
-    # the window is lifetime if either side is: a run from 2025 counts beside an own lifetime limit, and not beside a monthly one
+    # the window is lifetime if a side that has a limit is: a run from 2025 counts beside an own lifetime limit, and not beside a monthly one
     sb="$(mksbr "renlife-$side" watchdog 500000000 40000000 lifetime 2025-01-15T12:00:00Z)"
     fire "$side" "$sb" "$TMP/benign.json"; rc=$?; settle
     r="$(logs "$sb" | grep 'skipping this routine')"

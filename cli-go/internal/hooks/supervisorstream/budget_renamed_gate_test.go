@@ -15,8 +15,8 @@ import (
 // hook launch, and budget, THAT agent. The Go twin reads the name as YAML; the
 // budget package reads the same file and combines the agent's own limits with the
 // supervisor's into one tuple on the agent's one spend counter (budget.tighter): per
-// unit the smaller amount, per unit the smaller absolute stop, lifetime if either
-// side is lifetime. A renamed supervisor is never budgeted more loosely than the
+// unit the smaller amount, per unit the smaller absolute stop, lifetime if a side that
+// has a limit is lifetime. A renamed supervisor is never budgeted more loosely than the
 // supervisor is. These tests drive the launch gate over that, in-process; the bash
 // twin reads the name with a line scan and the combined tuple through
 // `yakos budget check --json`: tests/run-supervisor-budget-test.sh (13).

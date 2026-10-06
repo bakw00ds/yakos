@@ -35,8 +35,8 @@ below lists them); see UPGRADING.md.
   the next entry) and keep tripping for every billing class. See UPGRADING.md and
   `docs/budgets.md`. Not converted yet: the Chat pane's summary and stored
   transcript, the MCP and JSON-RPC summaries, and the Flows per-node cost still
-  show the harness-reported `total_cost_usd` (REST and gRPC return no cost); only
-  the log splits it into spend and an API-equivalent.
+  show the harness-reported `total_cost_usd` (a REST or gRPC dispatch result
+  carries no cost figure); only the log splits it into spend and an API-equivalent.
 
 - **Budgets gain token limits, and the built-in budgets have them (K-136).**
   `budget-policy.yml` entries accept `limit_tokens` next to `limit_usd`, set with
