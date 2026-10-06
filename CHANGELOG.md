@@ -440,44 +440,57 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   warning and rejected by `yakos validate`. The chat summary event also
   carries `runtime_resolved`, the runtime that actually ran the turn.
 
-- **Compose no longer follows a symlinked agent file out of the project, or
-  blocks or exhausts memory on a special file (K-132 follow-up, sec-324).** A
-  cloned repository controls the project's `.claude/agents`, and the roster
-  reader followed whatever a link there pointed at. A link to a file such as
-  `~/.aws/credentials` became an agent's persona: its first line was the
-  description `/api/skills` returns to every reader of the endpoint, and the
-  daemon sent the whole file to the model vendor as the system prompt. A
-  dangling link or a link to a directory emptied the roster, a link to a FIFO
-  blocked it for good, and a link to `/dev/zero` would have used up the daemon's
-  memory. A symlinked agent file is now followed only to a regular file inside
-  the framework's `lib/agents` or the project's `.claude/agents`, so the per-file
-  links an install makes into `lib/agents` keep working. The roots are those
-  directories and not the project or `lib/` around them, because the project
-  holds files that are not agents: a link to the project's own `.env` or
-  `.git/config` would otherwise have become the persona and gone to the vendor
-  (rev-324). Anything else that is not a
+- **Compose follows a symlink only to a file or directory inside the agent
+  directories, and no longer blocks or exhausts memory on a special file (K-132
+  follow-up, sec-324, rev-324).** A cloned repository controls the project's
+  `.claude/agents`, and the roster reader followed whatever a link there
+  pointed at. A link to a file such as `~/.aws/credentials` became an agent's
+  persona: its first line was the description `/api/skills` returns to every
+  reader of the endpoint, and the daemon sent the whole file to the model
+  vendor as the system prompt. A dangling link or a link to a directory emptied
+  the roster, a link to a FIFO blocked it for good, and a link to `/dev/zero`
+  would have used up the daemon's memory. A symlinked agent file is now
+  followed only to a regular file inside the framework's `lib/agents` or the
+  project's `.claude/agents`, so the per-file links an install makes into
+  `lib/agents` keep working. Those two directories are the containment roots
+  for agent files, and `lib/skills` and the project's `.claude/skills` are the
+  roots for skills. The roots are not the project or `lib/` around them,
+  because the project holds files that are not agents: a link to the project's
+  own `.env` or `.git/config` would otherwise have become the persona and gone
+  to the vendor (rev-324). The directories are checked themselves too, because
+  a file seen through a linked directory is a regular file and never reaches
+  the rule for files. A project `.claude/agents` or `.claude/skills` that is a
+  symlink, or sits under a symlinked `.claude`, must resolve to a directory
+  inside the project, compared by directory identity so that `/var` against
+  `/private/var`, a symlinked root and a case-insensitive file system agree.
+  Otherwise the whole directory is skipped, with one warning that names it. A
+  directory linked to another directory of the project composes like a plain
+  one, and the rule for files holds inside it. Anything else that is not a
   regular file is skipped without being opened, a file over 4 MiB is skipped,
   and the read itself is bounded. Each is skipped with the same once-per-file
   warning that names the file, and so is any failure to read a file in the
   project directory, so one bad file no longer stops the other agents. A
   framework file that cannot be read is still an error. What is checked is what
-  is read: the file is opened by the path the check resolved, without following a
-  link and without blocking, and the open file must be a regular file and the
+  is read: the file is opened by the path the check resolved, without following
+  a link and without blocking, and the open file must be a regular file and the
   same file that was checked. A link retargeted to an outside file, a directory
-  swapped for a link, or a file swapped for a FIFO between the check and the read
-  is a skip, not a leak or a hang (rev-324).
+  swapped for a link, or a file swapped for a FIFO between the check and the
+  read is a skip, not a leak or a hang (rev-324).
 
 - **The skills listing skips a `SKILL.md` it may not read instead of failing
-  (K-132 follow-up, sec-324).** `ComposeSkills`, behind `GET /api/skills`, read a
-  symlinked `SKILL.md` wherever it led, and one that pointed at a directory failed
-  the whole listing, which the console served as an empty one. A `SKILL.md` is now
-  read under the rules for an agent file: a symlink only to a regular file inside
-  the framework's `lib/skills` or the project's `.claude/skills`, nothing that is not a regular
-  file, nothing over 4 MiB, no line of 1 MiB or more, and a failure to read a file
-  in the project directory is a skip. Each is skipped with a once-per-file
-  warning that names the file, and the rest of the listing is served. A framework
-  skill that cannot be read is still an error. A skill directory without a
-  `SKILL.md` is skipped silently, as before.
+  (K-132 follow-up, sec-324).** `ComposeSkills`, behind `GET /api/skills`, read
+  a symlinked `SKILL.md` wherever it led, and one that pointed at a directory
+  failed the whole listing, which the console served as an empty one. A
+  `SKILL.md` is now read under the rules for an agent file: a symlink only to a
+  regular file inside the framework's `lib/skills` or the project's
+  `.claude/skills`, nothing that is not a regular file, nothing over 4 MiB, no
+  line of 1 MiB or more, and a failure to read a file in the project directory
+  is a skip. The project's `.claude/skills` is checked itself, like
+  `.claude/agents`: a link that does not resolve to a directory inside the
+  project skips the whole directory, with one warning. Each is skipped with a
+  once-per-file warning that names the file, and the rest of the listing is
+  served. A framework skill that cannot be read is still an error. A skill
+  directory without a `SKILL.md` is skipped silently, as before.
 
 - **`extends:` names a framework template and nothing else (K-132 follow-up,
   sec-324, rev-324).** The value came from the agent's own file and went into a
@@ -495,21 +508,34 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   file, which a clone cannot change. The bash composer
   (`cli/lib/agents-compose.sh`, behind `yakos start`, `yakos doctor` and the
   bash dispatchers) had the same hole, for `extends:` and for a symlinked agent
-  file, and now applies the same rules and prints the same warning text. A Go
-  test runs both composers on one fixture, under bash 3.2 and bash 5.
+  file, and now applies the same rules, the directory rule included, and prints
+  the same warning text. A Go test runs both composers on one fixture, under
+  bash 3.2 and bash 5.
 
-- **`yakos validate` rejects the agent files the Go dispatcher skips (K-132
-  follow-up, sec-324).** A skipped project file that overrides a framework agent
-  leaves the framework's version in place with only a warning on stderr, so CI
-  could not see it. The bash and the Go validator now both report, with the same
-  text, an agent file with a line of 1 MiB or more, a file over 4 MiB, an entry
-  that is not a regular file, a symlink that does not end at a regular file
-  inside the framework's `lib/agents` or the project's `.claude/agents`, and an
-  `extends:` that is not a bare agent id. The bash validator also
+- **`yakos validate` rejects the agent files and directories the Go dispatcher
+  skips (K-132 follow-up, sec-324, rev-324).** A skipped project file that
+  overrides a framework agent leaves the framework's version in place with only
+  a warning on stderr, so CI could not see it. The bash and the Go validator
+  now both report, with the same text, an agent file with a line of 1 MiB or
+  more, a file over 4 MiB, an entry that is not a regular file, a symlink that
+  does not end at a regular file inside the framework's `lib/agents` or the
+  project's `.claude/agents`, an `extends:` that is not a bare agent id, and a
+  project `.claude/agents` or `.claude/skills` that is a symlink, or sits under
+  a symlinked `.claude`, and does not resolve to a directory inside the
+  project. No pass reads a directory it reports. Neither validator walks into a
+  symlinked agents or skills directory, as before, so what is in one is not
+  validated here although the dispatcher composes it. The bash validator also
   checks the `runtime` and `model-policy` of an agent reached through a symlink
-  it accepts, as the Go one always did. The Go validator no longer reads a symlink
-  to a FIFO or a device in any pass over agent files, where it would have blocked
-  or read without end.
+  it accepts, as the Go one always did. The Go validator no longer reads a
+  symlink to a FIFO or a device in any pass over agent files, where it would
+  have blocked or read without end, and leaves a FIFO among the skills and
+  rules alone, as the bash one does. The bash validator's playbook-reference
+  pass read every file in the agents, rules and skills directories with a
+  recursive `grep`, so a FIFO there blocked it for good while the Go validator
+  returned at once; it now reads regular files only. The shell suite that runs
+  both validators on the same fixtures and compares their findings,
+  `tests/run-agent-enums-test.sh`, now runs in CI on Linux and macOS, under
+  bash 5 and bash 3.2.
 
 - **codex dispatch is sandboxed by default; agy gets `--sandbox` but is not
   contained (K-133, K-158).** The Go dispatcher (console, MCP, Flows, JSON-RPC,
