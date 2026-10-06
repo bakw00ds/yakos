@@ -1150,12 +1150,15 @@ _ss_gfold_done() { # after the run state has been written
 # K-128 (S3): a failed read still fails open, but no longer silently. _ss_bud_cause says
 # why: timeout (the CLI outlived its wall-clock bound), no_output (it printed nothing and
 # exited non-zero: too old to have `budget`, crashed, or could not be run), parse (what it
-# printed is not a budget) or read_error (it answered, but said on stderr that it could not
-# read the spend log and failed open, so its "ok, nothing spent" is not a measurement).
+# printed is not a budget) or read_error (its JSON says read_failed: it could not read the
+# spend log, or failed inside, so its "ok, nothing spent" is not a measurement).
 # _ss_gate_report writes one WARN record naming the cause, after the lock is dropped. Not
 # failures, so silent: a budget that is merely off (a limit of 0), and a CLI that prints
-# nothing and exits 0 (it has no budget to report, as the test stubs do). Go twin: the cause
-# of evalBudget.
+# nothing and exits 0 (it has no budget to report, as the test stubs do). Nothing is ever
+# inferred from the words the CLI writes: its stderr and the warnings in its JSON carry
+# text a project controls (a repeated agent_budgets key in .yakos.yml is echoed back in the
+# YAML error), so the decision rests on the exit status, the watchdog and the structured
+# fields of the JSON only (K-128, S12). Go twin: the cause of evalBudget.
 # _ss_budget_raw: run the CLI in the background and give it _ss_budget_wait
 # seconds of WALL-CLOCK time, so a hung or slow CLI can never stall the hook (no
 # GNU `timeout`: see the K-117 rule). A watchdog subshell (the wrapper's pattern)
@@ -1165,17 +1168,14 @@ _ss_gfold_done() { # after the run state has been written
 # exits non-zero at the hard stop AFTER printing its JSON, so the exit status is
 # never used: only the watchdog's flag file marks a timeout.
 # Sets _ss_bud_raw (the CLI's stdout; empty on a timeout), _ss_bud_rc (its exit status,
-# used only when it printed nothing), _ss_bud_cause=timeout when the watchdog fired and
-# _ss_bud_failopen=1 when the CLI's stderr (kept in a private temp
-# file) carries the "(failing open)" notice it prints when it could not read the spend
-# log: it still prints a budget then ("ok, nothing spent"), so only that notice tells
-# the two apart. The CLI is exec'd in a subshell so the stderr file is created 0600.
+# used only when it printed nothing) and _ss_bud_cause=timeout when the watchdog fired.
+# The CLI's stderr is discarded: nothing is read from it (see above).
 _ss_budget_raw() {
-    local tmp pid wd flag err line n=0 rc=0
-    _ss_bud_raw=""; _ss_bud_cause=""; _ss_bud_failopen=0; _ss_bud_rc=0
+    local tmp pid wd flag rc=0
+    _ss_bud_raw=""; _ss_bud_cause=""; _ss_bud_rc=0
     tmp="$(mktemp 2>/dev/null)" || { _ss_bud_cause=no_output; return 0; }
-    flag="$tmp.timeout"; err="$tmp.err"
-    ( umask 077; exec "$yakos_cli" budget check "$sup_agent" --project "$project_dir" --json >"$tmp" 2>"$err" ) 2>/dev/null &
+    flag="$tmp.timeout"
+    "$yakos_cli" budget check "$sup_agent" --project "$project_dir" --json >"$tmp" 2>/dev/null &
     pid=$!
     (
         sp=""
@@ -1197,13 +1197,8 @@ _ss_budget_raw() {
         _ss_bud_cause=timeout
     else
         _ss_bud_raw="$(cat "$tmp" 2>/dev/null)" || true
-        # A few lines at most: the notice is the first one the CLI writes.
-        { while [ "$n" -lt 8 ] && IFS= read -r line; do
-            case "$line" in *"(failing open)"*) _ss_bud_failopen=1; break ;; esac
-            n=$((n + 1))
-        done < "$err"; } 2>/dev/null || true
     fi
-    rm -f "$tmp" "$flag" "$err"
+    rm -f "$tmp" "$flag"
     return 0
 }
 _ss_budget() {
@@ -1220,19 +1215,21 @@ _ss_budget() {
         if [ "$_ss_bud_rc" != 0 ]; then _ss_bud_cause=no_output; fi
         return 0
     fi
-    # Not a budget at all (no numeric limit_usd, or not JSON) is a parse failure; a limit of
-    # 0 is the budget switched off, which is not.
-    out="$(printf '%s' "$_ss_bud_raw" | jq -r 'if (.limit_usd | type) != "number" then error("no limit_usd") else select(.limit_usd > 0) | [.state, .spent_usd, .limit_usd, .stop_usd, (if .state == "hard_stop" then 1 else 0 end), (if .state == "hard_stop" and (.spent_usd + 0.000000001) >= .stop_usd then 1 else 0 end)] | @tsv end' 2>/dev/null)" || { _ss_bud_cause=parse; return 0; }
+    # The CLI's own word that it could not read the spend (read_failed: set from the error and never
+    # from text, also on its internal-error path) comes first, because its numbers are then "ok, nothing
+    # spent", not a measurement. Otherwise not a budget at all (no numeric limit_usd, or not JSON) is a
+    # parse failure, and a limit of 0 is the budget switched off, which is not. The seventh field is
+    # read_failed as 0 or 1.
+    out="$(printf '%s' "$_ss_bud_raw" | jq -r 'if .read_failed == true then ["off", 0, 0, 0, 0, 0, 1] elif (.limit_usd | type) != "number" then error("no limit_usd") else select(.limit_usd > 0) | [.state, .spent_usd, .limit_usd, .stop_usd, (if .state == "hard_stop" then 1 else 0 end), (if .state == "hard_stop" and (.spent_usd + 0.000000001) >= .stop_usd then 1 else 0 end), 0] end | @tsv' 2>/dev/null)" || { _ss_bud_cause=parse; return 0; }
     [ -n "$out" ] || return 0
-    IFS="$(printf '\t')" read -r _ss_bud_state _ss_bud_spent _ss_bud_limit _ss_bud_stop _ss_bud_hard _ss_bud_over <<EOF_BUD
+    IFS="$(printf '\t')" read -r _ss_bud_state _ss_bud_spent _ss_bud_limit _ss_bud_stop _ss_bud_hard _ss_bud_over _ss_bud_rf <<EOF_BUD
 $out
 EOF_BUD
-    case "$_ss_bud_hard$_ss_bud_over" in
-        [01][01]) : ;;
+    case "$_ss_bud_hard$_ss_bud_over$_ss_bud_rf" in
+        [01][01][01]) : ;;
         *) _ss_bud_state=off; _ss_bud_hard=0; _ss_bud_over=0; _ss_bud_cause=parse; return 0 ;;
     esac
-    # It said it failed open: what it printed is the "ok, nothing spent" of an unreadable log.
-    if [ "$_ss_bud_failopen" = 1 ]; then
+    if [ "$_ss_bud_rf" = 1 ]; then
         _ss_bud_state=off; _ss_bud_hard=0; _ss_bud_over=0
         _ss_bud_spent=0; _ss_bud_limit=0; _ss_bud_stop=0
         _ss_bud_cause=read_error
