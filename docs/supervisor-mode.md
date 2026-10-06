@@ -156,6 +156,26 @@ supervisor:
     below 30 s (or 0) is invalid and falls back to the default with a WARN.
   - After an account session-limit failure launches pause for
     `session_limit_backoff_min` minutes.
+  - **The supervisor's budget** (K-119, K-136; `docs/budgets.md`) is read at
+    every launch decision, over both of its units, dollars and tokens: through
+    `yakos budget check --json` in the bash hook and in-process in the Go hook.
+    At the limit of EITHER unit (`hard_stop`) a routine launch is refused; a
+    high-risk launch runs on up to 2x the limit of either unit, and is refused
+    past it, with one synthetic CRITICAL finding for the session that names the
+    ceiling reached (`Supervisor token-budget ceiling (N tokens)` or
+    `Supervisor dollar-budget ceiling ($N)`). A budget is off only when it has
+    no limit of either kind: a token-only budget (a dollar limit of 0, the usual
+    case for a subscription) is gated at 1x and at 2x its tokens, and turning
+    off only the dollar limit leaves the supervisor's built-in token limit on.
+    Each message names one unit, tokens first: at the limit, tokens when the
+    token limit itself has been reached, else dollars; at the warning level, the
+    unit with the larger share of its limit (a tie goes to tokens); at the 2x
+    ceiling, the unit that is past its own stop. A dollar record and its stderr
+    line are the ones they always were; a token record has the same shape with
+    `spent_tokens`, `limit_tokens` and `ceiling_tokens` (whole numbers) in
+    place of the dollar fields. A budget that cannot be read still fails open,
+    with one WARN naming the cause, and is tested before any limit, so a zero
+    limit never turns a failed read into "off".
   - **A project `.yakos.yml` can only make supervision STRICTER**: raise the
     cap (or 0), lower the interval, lengthen the deadline, lower the
     backoff. The reverse is ignored with a WARN, because it would cut
