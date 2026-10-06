@@ -1670,6 +1670,9 @@ type SendRequest struct {
 //   - 403 Forbidden: caller is not the session owner.
 //   - 404 Not Found: no live interactive session for this conversationId.
 //   - 409 Conflict: a turn is already in flight on this session.
+//   - 429 Too Many Requests: the session's agent is at its budget hard stop
+//     (K-136); the body is the one-shot turn's refusal text. Only the session's
+//     owner gets it; another operator gets the 403 above.
 //   - 503 Service Unavailable: interactive mode not configured.
 func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
