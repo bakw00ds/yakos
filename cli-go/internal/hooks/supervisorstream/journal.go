@@ -21,11 +21,11 @@ import (
 // whose lock wait expired therefore leaves a small owner-only record that the
 // next lock holder folds in (docs/supervisor-mode.md, "Lock protocol"):
 //
-//	<counter>.add.<pid>.<n>  "1": one increment owed to the counter. The holder
+//	<counter>.add.<pid>.<id> "1": one increment owed to the counter. The holder
 //	                         that folds it counts it and, if that moves the
 //	                         counter past a score-every multiple, covers the
 //	                         crossing (the hook that owed it is long gone).
-//	<state>.add.<pid>.<n>    "high=<0|1>", then the event preview: one trigger
+//	<state>.add.<pid>.<id>   "high=<0|1>", then the event preview: one trigger
 //	                         owed to the session's run state (pending +1, high +1
 //	                         when flagged, preview appended to the pending file).
 //	                         Folded by the next gate holder of the session.

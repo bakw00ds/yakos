@@ -3,6 +3,7 @@ package supervisorstream
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -137,5 +138,53 @@ func TestLockStatsSeam(t *testing.T) {
 	}
 	if hold < 20000 {
 		t.Errorf("hold_us = %d, want >= 20000 (the lock was held 20ms)", hold)
+	}
+}
+
+// A project can reach the seam through its env block (K-129), so the stats file is
+// never written through a link planted in its place: the target stays untouched.
+func TestLockStatsSeamNeverFollowsASymlink(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating a symlink needs a privilege on windows")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(target, []byte("keep\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, ".supervisor-lock-stats")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("YAKOS_TEST_SEAMS", "1")
+	t.Setenv("YAKOS_TEST_LOCK_STATS", "1")
+	rel, ok := acquireLockAs(filepath.Join(dir, "a.lock"), "x", time.Second)
+	if !ok {
+		t.Fatal("lock not taken")
+	}
+	rel()
+	if b, _ := os.ReadFile(target); string(b) != "keep\n" {
+		t.Errorf("the stats seam wrote through a planted symlink: %q", b)
+	}
+}
+
+// Without a link the seam creates its file owner-only.
+func TestLockStatsSeamFileIsOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits are not modelled on windows")
+	}
+	dir := t.TempDir()
+	t.Setenv("YAKOS_TEST_SEAMS", "1")
+	t.Setenv("YAKOS_TEST_LOCK_STATS", "1")
+	rel, ok := acquireLockAs(filepath.Join(dir, "a.lock"), "x", time.Second)
+	if !ok {
+		t.Fatal("lock not taken")
+	}
+	rel()
+	fi, err := os.Stat(filepath.Join(dir, ".supervisor-lock-stats"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("stats file mode = %v, want 0600", fi.Mode().Perm())
 	}
 }

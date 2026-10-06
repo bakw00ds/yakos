@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -81,25 +82,47 @@ func TestLockTenConcurrentHooksStayWithinTarget(t *testing.T) {
 		t.Fatal(err)
 	}
 	var oks, fails int
+	holds := map[string][]int{} // hold_us by lock label
 	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
 		if strings.Contains(line, " FAIL ") {
 			fails++
 			continue
 		}
 		oks++
-		for _, kv := range strings.Fields(line)[4:] {
+		fields := strings.Fields(line)
+		for _, kv := range fields[4:] {
 			k, v, _ := strings.Cut(kv, "=")
 			n := 0
 			for _, c := range v {
 				n = n*10 + int(c-'0')
 			}
-			if k == "hold_us" && n > 1_500_000 {
-				t.Errorf("a hold took %d us: %s", n, line)
+			if k == "hold_us" {
+				holds[fields[2]] = append(holds[fields[2]], n)
+				if n > 1_500_000 {
+					t.Errorf("a hold took %d us: %s", n, line)
+				}
 			}
 		}
 	}
 	if fails != 0 || oks != 20 {
 		t.Errorf("lock takes: %d ok, %d failed; want 20 (10 counter + 10 gate) and 0", oks, fails)
+	}
+	// Nothing slow runs under a lock (the Go twin forks nothing). A single hold can be
+	// stretched by a descheduled holder on a shared runner, but the MEDIAN of ten
+	// cannot, so it is what pins the property: a gate hold is the 20 ms seam plus a
+	// state write, a counter hold a counter write. 60 ms of extra work under either
+	// lock moves the median past these bounds (the measured medians are 21 ms and 0.4 ms).
+	t.Logf("lock holds (us) by label: %v", holds)
+	for label, limitUS := range map[string]int{"gate": 80_000, "counter": 40_000} {
+		hs := holds[label]
+		if len(hs) != 10 {
+			t.Errorf("%s holds recorded: %d, want 10", label, len(hs))
+			continue
+		}
+		sort.Ints(hs)
+		if med := hs[len(hs)/2]; med > limitUS {
+			t.Errorf("median %s lock hold is %d us, want <= %d: work is running under the lock (%v)", label, med, limitUS, hs)
+		}
 	}
 }
 
@@ -225,5 +248,25 @@ func TestWrapperFollowUpForATriggerJournaledMidRun(t *testing.T) {
 	}
 	if _, err := os.Stat(rec); err == nil {
 		t.Error("the record was not removed after the fold")
+	}
+}
+
+// A counter that cannot be written (a directory in its place) must not make the
+// hook drop its tick without a word (K-128 security review S2), and a high-risk
+// trigger still reaches the session's run state. Bash twin: (k13).
+func TestCounterNotWritableWarnsAndStillRecordsAHighRiskTrigger(t *testing.T) {
+	h, _, work, env := gateHook(t, "min_launch_interval_s: 0\n", "")
+	if err := os.Mkdir(filepath.Join(work, ".supervisor-counter"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	riskEdit(t, h, env)
+	if all := allLogs(t, work); !strings.Contains(all, "counter not writable; skipping this escalation tick") {
+		t.Errorf("no WARN for the unwritable counter:\n%s", all)
+	}
+	if got := stateField(t, work, "pending"); got != "1" {
+		t.Errorf("pending = %q, want 1: the high-risk trigger was not recorded", got)
+	}
+	if got := stateField(t, work, "high"); got != "1" {
+		t.Errorf("high = %q, want 1", got)
 	}
 }

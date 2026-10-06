@@ -128,12 +128,15 @@ func lockStat(lock, label string, ok bool, wait time.Duration, tries int, hold t
 		return
 	}
 	path := filepath.Join(filepath.Dir(lock), ".supervisor-lock-stats")
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return // a planted link is never followed
+	}
 	line := fmt.Sprintf("H %d %s FAIL wait_us=%d tries=%d\n", os.Getpid(), label, wait.Microseconds(), tries)
 	if ok {
 		line = fmt.Sprintf("H %d %s OK wait_us=%d tries=%d hold_us=%d got_us=%d\n",
 			os.Getpid(), label, wait.Microseconds(), tries, hold.Microseconds(), got.UnixMicro())
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644) //nolint:gosec
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec
 	if err != nil {
 		return
 	}

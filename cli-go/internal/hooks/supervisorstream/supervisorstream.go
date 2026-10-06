@@ -386,7 +386,16 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 			map[string]any{"lock": counterFile + ".lock"})
 		return out, nil
 	case counterWriteFailed:
-		return out, nil // bash: exit 0
+		// The counter cannot be written (a directory in its place, say), so this
+		// tick cannot be counted. Say so, and still record a high-risk trigger
+		// in the session's run state. Bash twin: _ss_counter_unwritable.
+		h.appendLog(&out, in, logFile, "WARN", "pass",
+			"counter not writable; skipping this escalation tick",
+			map[string]any{"counter": counterFile})
+		if triggerHigh {
+			h.gateNote(&out, in, cfg, logFile, event)
+		}
+		return out, nil
 	}
 
 	// ---- 4. Every N escalations → write dispatch-ready marker ----
