@@ -162,6 +162,9 @@ func shQuote(s string) string {
 // newFakeSDKEngine builds an SDKEngine using a fake sidecar cmdProvider.
 func newFakeSDKEngine(t *testing.T, provider func() *exec.Cmd, onChunk func(dispatch.StreamChunk)) *interactive.SDKEngine {
 	t.Helper()
+	// K-137: Start refuses without an API key, even for a fake sidecar. The
+	// value is made up; nothing here talks to Anthropic.
+	t.Setenv("ANTHROPIC_API_KEY", "sk-ant-api03-fake-sidecar-test-key")
 	eng, err := interactive.NewSDKEngineWithProvider(
 		interactive.SDKEngineParams{
 			ConversationID:  "conv-sdk-test",

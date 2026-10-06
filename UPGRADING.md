@@ -185,6 +185,66 @@ Other changes in this release for codex and agy:
   persona is escaped for the command line, which grows quotes, backslashes,
   newlines and control characters).
 
+## Unreleased: the SDK sidecar needs `ANTHROPIC_API_KEY` (K-137)
+
+`yakos serve --console-structured-questions` runs a Node sidecar built on the
+Anthropic Agent SDK so the console can show `AskUserQuestion` as an answerable
+widget. Anthropic's terms of 2026-02-19 allow a Pro or Max subscription's login
+only in Claude Code and claude.ai, not in the Agent SDK, and until now the
+sidecar fell back to your claude.ai login when no API key was set.
+
+It no longer does. The sidecar starts only when `ANTHROPIC_API_KEY` is set to an
+API key in the daemon's environment (Anthropic Console billing applies). With no
+key, a blank one, or an OAuth token (`sk-ant-oat...`) in the variable, a chat
+dispatch with `structuredQuestions: true` fails at once and the pane shows an
+error that begins like this:
+
+```text
+interactive: SDK start failed: ... ANTHROPIC_API_KEY is not set: the Agent SDK engine does not run on a claude.ai subscription login ...
+```
+
+Nothing falls back to another engine, and the daemon itself starts as before.
+
+What to do:
+
+- **Subscription login only:** use the CLI engine, which is interactive chat
+  without structured questions. It runs the `claude` CLI, Claude Code itself,
+  under your own login and does not change. `AskUserQuestion` shows as text.
+- **You have an API key:** export `ANTHROPIC_API_KEY` in the shell that starts
+  `yakos serve`.
+- **Bedrock or Vertex:** the sidecar checks `ANTHROPIC_API_KEY` only, so those
+  deployments use the CLI engine too.
+
+The sidecar's environment also drops every `CLAUDE_CODE_OAUTH*` variable and any
+value that holds an OAuth token, except variables named `YAKOS_*`: those are
+yakOS's own and are never dropped for what they contain, so never put a
+credential in a `YAKOS_*` variable; it is passed through unchanged. Runs of the
+`claude` CLI are unaffected.
+
+The bash `claude-sdk` runtime, which runs the Python Agent SDK, has the same
+rule. `yakos dispatch --runtime claude-sdk` on the bash CLI now stops with one
+line (`claude-sdk: refusing to run: ANTHROPIC_API_KEY is not set; ...`) unless
+`ANTHROPIC_API_KEY` holds an API key, and the python it starts gets no
+`CLAUDE_CODE_OAUTH*` or OAuth-token variables. Export a key, or use
+`--runtime claude`, which is Claude Code itself. `yakos start --runtime
+claude-sdk` is unchanged: it launches Claude Code.
+
+**Known limit on Linux:** the bash `claude-sdk` runtime cannot yet dispatch the
+full framework roster there. It hands the roster to python in one environment
+string, which is over the 128 KiB Linux allows for a single string, so the exec
+fails with `Argument list too long`. This is tracked on K-144; a key alone is not
+enough on Linux until it is fixed.
+
+`yakos auth` follows: `yakos auth status claude-sdk` reports whether
+`ANTHROPIC_API_KEY` is set (never its value) and says the claude login is not
+used by the SDK engine, `yakos auth login claude-sdk` prints how to set the key
+instead of routing through the claude login flow, and `yakos auth logout
+claude-sdk` no longer removes `~/.claude/auth.json`; use `yakos auth logout
+claude` for that. The bash and Go CLIs print the same text.
+
+`yakos doctor --policy` mentions an SDK sidecar that is installed without a key
+as a low heads-up, along with the other risky settings it finds (see CHANGELOG).
+
 ## Upgrading to v0.61.0.0
 
 v0.61.0.0 is a minor release. A v0.60.1.0 binary upgrades in place with

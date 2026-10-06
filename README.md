@@ -82,8 +82,9 @@ Full list: `yakos --help` (43 subcommands ported to Go).
   support interactive multi-turn mode and an effort selector. When an agent
   calls `AskUserQuestion`, the Chat and IDE panes render it as an interactive
   widget the operator can answer in-browser — opt in with
-  `--console-structured-questions` (requires Node.js ≥18 on PATH). Share a
-  pane with `POST /api/chat/share`; sharing is keyed on the stable
+  `--console-structured-questions` (requires Node.js ≥18 on PATH and an API key
+  in `ANTHROPIC_API_KEY`; a subscription login uses the CLI engine instead).
+  Share a pane with `POST /api/chat/share`; sharing is keyed on the stable
   `conversationId` so it works whether or not the agent is mid-turn. See
   [docs/unified-console.md](docs/unified-console.md).
 - **Flows DAG orchestration.** Define multi-agent workflows as YAML files;

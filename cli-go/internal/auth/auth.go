@@ -156,10 +156,14 @@ Subcommands:
                                      profile, ~/.yakos-state/codex-home (your own
                                      ~/.codex login is left alone)
                           - gemini:  prints OAuth / API key options
+                          - claude-sdk: prints how to set ANTHROPIC_API_KEY (the
+                                     SDK engine does not use the claude login)
                           With --as-default, also persist the runtime as the
                           yakos start default.
   logout <runtime>        Best-effort credential removal:
                           - claude:  unset ANTHROPIC_API_KEY hint; remove ~/.claude/auth.json
+                          - claude-sdk: unset ANTHROPIC_API_KEY hint; the claude
+                                     login is left alone
                           - codex:   exec 'codex logout' (against the yakOS profile
                                      when one exists) and remove its auth.json
                           - gemini:  point at gemini's logout flow
@@ -185,6 +189,7 @@ type RuntimeStatus struct {
 	IsDefault   bool
 	AdapterNote string // printed when adapter not shipped yet
 	Caps        string
+	Note        string // an extra "note:" line; set for claude-sdk only (claude_sdk.go)
 }
 
 // runStatus prints runtime auth state for all or one runtime.
@@ -219,12 +224,22 @@ func checkRuntime(id, defaultRuntime string, cfg Config) RuntimeStatus {
 		Caps:      runtimeCaps(id),
 	}
 
+	if id == "claude-sdk" {
+		// The SDK engine runs on ANTHROPIC_API_KEY, never the claude login, so its
+		// auth is reported whatever the CLI state (claude_sdk.go).
+		s.AuthState, s.AuthHint = claudeSDKAuth()
+		s.Note = claudeSDKNote
+	}
+
 	if !cliPresent(id) {
 		s.CLIHint = cliInstallHint(id)
 		return s
 	}
 	s.CLIState = "OK"
 
+	if id == "claude-sdk" {
+		return s
+	}
 	if checkAuth(id, cfg) {
 		s.AuthState = "OK"
 		if id == "codex" {
@@ -255,6 +270,9 @@ func printRuntimeStatus(w io.Writer, s RuntimeStatus) {
 	_, _ = fmt.Fprintf(w, "    cli:    %-15s %s\n", s.CLIState, s.CLIHint)
 	_, _ = fmt.Fprintf(w, "    auth:   %-15s %s\n", s.AuthState, s.AuthHint)
 	_, _ = fmt.Fprintf(w, "    caps:   %s\n", s.Caps)
+	if s.Note != "" {
+		_, _ = fmt.Fprintf(w, "    note:   %s\n", s.Note)
+	}
 	_, _ = fmt.Fprintln(w)
 }
 
@@ -272,12 +290,22 @@ func runLogin(cfg Config) (*Result, error) {
 		return nil, fmt.Errorf("auth login: unknown runtime %q", cfg.Target)
 	}
 
-	// SDK adapters delegate their login UX to the underlying CLI.
+	// claude-sdk is the Agent SDK: it needs an API key and does not use the claude
+	// login, so it has guidance of its own and needs no CLI installed (K-137).
+	if cfg.Target == "claude-sdk" {
+		_, _ = fmt.Fprint(cfg.Writer, claudeSDKLoginText)
+		if cfg.AsDefault {
+			if err := writeDefaultRuntime(cfg, cfg.Target); err != nil {
+				return nil, err
+			}
+			_, _ = fmt.Fprintf(cfg.Writer, "\ndefault runtime set to: %s\n", cfg.Target)
+		}
+		return &Result{Subcommand: "login", Runtime: cfg.Target}, nil
+	}
+
+	// The other SDK adapter delegates its login UX to the underlying CLI.
 	targetForLogin := cfg.Target
 	switch cfg.Target {
-	case "claude-sdk":
-		logLine(cfg.ErrWriter, "claude-sdk: bundles Claude Code CLI; using claude auth flow")
-		targetForLogin = "claude"
 	case "antigravity-sdk":
 		logLine(cfg.ErrWriter, "antigravity-sdk: shares Google auth posture; using agy auth flow")
 		logLine(cfg.ErrWriter, "antigravity-sdk: SDK additionally reads GEMINI_API_KEY directly")
@@ -322,7 +350,11 @@ func runLoginAll(cfg Config) (*Result, error) {
 	nOK, nFail, nSkip := 0, 0, 0
 	for _, id := range KnownRuntimes {
 		switch id {
-		case "claude-sdk", "antigravity-sdk":
+		case "claude-sdk":
+			_, _ = fmt.Fprintf(cfg.Writer, "  %s: %s\n", id, claudeSDKLoginAllSkip)
+			nSkip++
+			continue
+		case "antigravity-sdk":
 			_, _ = fmt.Fprintf(cfg.Writer, "  %s: skip (shares credentials with bundled CLI; covered by sibling)\n", id)
 			nSkip++
 			continue
@@ -432,8 +464,12 @@ func runLogout(cfg Config) (*Result, error) {
 
 	var err error
 	switch cfg.Target {
-	case "claude", "claude-sdk":
+	case "claude":
 		err = logoutClaude(cfg)
+	case "claude-sdk":
+		// The SDK engine never used the claude login, so there is nothing of its own
+		// to remove and the claude login is left alone (claude_sdk.go).
+		_, _ = fmt.Fprint(cfg.Writer, claudeSDKLogoutText)
 	case "codex":
 		err = logoutCodex(cfg)
 	case "gemini":
@@ -448,9 +484,6 @@ func runLogout(cfg Config) (*Result, error) {
 }
 
 func logoutClaude(cfg Config) error {
-	if cfg.Target == "claude-sdk" {
-		logLine(cfg.ErrWriter, "claude-sdk: shares credentials with claude (bundled CLI); routing logout to claude")
-	}
 	authFile := filepath.Join(cfg.HomeDir, ".claude", "auth.json")
 	if _, err := os.Stat(authFile); err == nil {
 		if err2 := os.Remove(authFile); err2 != nil {
