@@ -199,6 +199,24 @@ The budget is a cost guard, not a security control, so it fails open: an
 unreadable log, an untrusted policy file or a failed cache write prints a notice
 and the dispatch proceeds. Only a computed `hard_stop` refuses.
 
+The supervisor hook (bash and Go twin) fails open the same way when it cannot
+read the budget at a launch decision, and says so: one WARN record in the hook
+log, `supervisor budget unavailable (cause: <cause>)`, with `budget_reason:
+budget_unavailable` and a `cause` that names what failed. It comes ahead of the
+launch's own record, goes to the hook log only (nothing on stderr), and does not
+change the decision.
+
+| `cause` | Meaning | Twin |
+|---|---|---|
+| `timeout` | the `yakos budget check` child outlived its 2 s wall-clock bound and was killed | bash |
+| `no_output` | it printed nothing and exited non-zero, or could not run (a CLI too old to have `budget`, one that crashed, a missing binary) | bash |
+| `parse` | what it printed is not a budget: not JSON, JSON without a numeric `limit_usd`, or a failing `jq` | bash |
+| `read_error` | the spend log could not be read: the CLI prints "ok, nothing spent" and says `(failing open)` on stderr, which the bash hook reads | both |
+
+The Go twin evaluates in-process, so only `read_error` exists there. A budget
+that is switched off (a limit of 0) is not a failure and logs nothing, and neither
+is a CLI that prints nothing and exits 0: it has no budget to report.
+
 ## Where it is enforced
 
 - `dispatch.Run` (the Go dispatch, also used by the daemon and MCP paths).
@@ -229,7 +247,8 @@ evaluates the budget in-process. The bash twin cannot, so at each launch
 decision (never per event) it runs `yakos budget check supervisor --json`, and
 fails open if the CLI is missing or too old to have `budget`. A project's
 `agent_budgets:` can only lower the limit, never loosen it. Log records carry a
-stable `budget_reason` (`budget_warning` or `budget_exhausted`).
+stable `budget_reason` (`budget_warning`, `budget_exhausted` or, when the
+budget could not be read, `budget_unavailable`).
 
 Because `yakos dispatch` refuses the supervisor only at 2x, any same-user caller
 can run `yakos dispatch supervisor` between 1x and 2x, so routine supervisor

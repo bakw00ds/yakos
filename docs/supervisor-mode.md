@@ -273,7 +273,10 @@ both wrappers speak the same protocol, so a mixed fleet still serialises.
 
 - **The lock is a path.** It is created exclusively (an `O_EXCL` file create in
   current hooks, `mkdir` in older ones: both are atomic on a local disk and
-  exclude each other) and removed by its creator. A lock older than one minute is
+  exclude each other) and removed by its creator. Every writer creates the file
+  owner-only (0600) whatever the caller's umask: the bash hook and its wrapper
+  set the mask with builtins around the create and put the caller's back, so
+  taking the lock still forks nothing. A lock older than one minute is
   a crashed holder's: a waiter renames it aside (one winner), re-checks the age of
   what it moved and deletes it, so a lock another hook has just created is never
   taken. Keep `work/current/` on a local disk: `O_EXCL` is not reliable on NFSv2
@@ -295,6 +298,9 @@ both wrappers speak the same protocol, so a mixed fleet still serialises.
   again under the lock, as it was before K-128, so a launch decision never rests
   on a read older than the lock. That re-read is the one time the budget CLI
   runs under it; the check itself costs one `wc -c` in bash and a `stat` in Go.
+  A read that fails (see "Failure posture" in `docs/budgets.md`) leaves the budget
+  off, as it always did, but is no longer silent: one WARN, written after the lock
+  is dropped, names the cause.
 - **Waiters back off.** A hook that finds the lock held sleeps 5 ms, then 10,
   20 ... up to 160 ms, each with +-50 % jitter, and polls with a builtin test
   rather than forking a doomed create. It checks the lock's age on its fifth
@@ -324,7 +330,8 @@ both wrappers speak the same protocol, so a mixed fleet still serialises.
   lock (it creates `.supervisor-test-reached` and waits, 20 s at most, for the
   pause file to go), so a test can change the world between the budget read and
   the lock. Both seams use fixed names in `work/current/`, never a path from the
-  environment, and never follow a link. Leftover `.add.` files mean the
+  environment, and never follow a link (the Go twin opens the stats file with
+  `O_NOFOLLOW`, so a link planted after its check is refused too). Leftover `.add.` files mean the
   wait expired and nothing has folded them yet; `yakos supervise clear` removes
   the counter's with the counter.
 

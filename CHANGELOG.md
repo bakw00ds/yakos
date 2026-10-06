@@ -310,6 +310,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   were barely wider than a slow bash hook, and the budget suite compared the
   detached wrapper's records by position and duration. Each is now independent
   of speed.
+- **supervisor-stream says when it could not read the dollar budget (K-128).** A
+  launch decision whose budget read failed (the bash hook's `yakos budget check`
+  hung past its 2 s bound, printed nothing and failed, or printed something that
+  is not a budget, or `jq` failed on it; or, in either twin, the spend log could
+  not be read) already failed open, as documented, but left only the ordinary
+  "forked async" record, so nothing told the operator the dollar budget had gone
+  unenforced. Both twins now write one WARN to the hook log, ahead of the
+  launch's own record: `supervisor budget unavailable (cause:
+  timeout|no_output|parse|read_error)`, with `budget_reason: budget_unavailable`
+  and a `cause` field. The decision is unchanged and nothing goes to stderr. A
+  budget that is switched off (a limit of 0) and a CLI that prints nothing and
+  exits 0 are not failures and stay silent. The bash hook learns of an unreadable
+  spend log from the `(failing open)` notice the CLI prints on stderr, because
+  the CLI's JSON then reads "ok, nothing spent". See `docs/budgets.md`, "Failure
+  posture".
+- **supervisor-stream lock files are owner-only in both twins (K-128).** The bash
+  hook and its wrapper created the lock with the caller's umask (0644, or 0666
+  under umask 0) where the Go twin's is 0600; both now create it 0600 whatever
+  the umask, setting the mask with builtins around the create so taking the lock
+  still forks nothing. The pending-preview file was already created 0600 under
+  any umask by every writer; a test now pins that under umask 0. The Go twin also
+  opens its test-only lock-stats file with `O_NOFOLLOW`, closing the gap between
+  its symlink check and the open.
+- **A cleanup race in the supervisor shell suites (closes K-130).** The prefilter
+  suite passed every check and still exited 1 about once in 20 runs (3 of 60 local
+  runs on the base commit, and one CI rerun of the K-128 PR): the detached wrapper
+  of its test (h) writes its end-of-run state, log and lock a few milliseconds
+  after its dispatch returns, and the bare removal of the sandbox in the EXIT trap
+  ran into it ("Directory not empty"). The prefilter suite now waits for that
+  wrapper to go idle and retries the removal. The stream and coalesce suites, which
+  also leave detached wrappers behind, wait (10 s at most) for the wrappers of their
+  own run and retry the removal too. All three keep the suite's own exit status.
 
 ## [0.61.0.0] — 2026-10-03
 
