@@ -321,10 +321,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeout|no_output|parse|read_error)`, with `budget_reason: budget_unavailable`
   and a `cause` field. The decision is unchanged and nothing goes to stderr. A
   budget that is switched off (a limit of 0) and a CLI that prints nothing and
-  exits 0 are not failures and stay silent. The bash hook learns of an unreadable
-  spend log from the `(failing open)` notice the CLI prints on stderr, because
-  the CLI's JSON then reads "ok, nothing spent". See `docs/budgets.md`, "Failure
-  posture".
+  exits 0 are not failures and stay silent. `yakos budget check --json` now
+  carries `"read_failed": true` when the spend could not be read (its numbers
+  then read "ok, nothing spent"), set from the error itself, and the bash hook
+  uses that field. It never reads the CLI's stderr, which carries text a project
+  controls: a repeated `agent_budgets` key in `.yakos.yml` is echoed back there
+  by the YAML error. See `docs/budgets.md`, "Failure posture".
 - **supervisor-stream lock files are owner-only in both twins (K-128).** The bash
   hook and its wrapper created the lock with the caller's umask (0644, or 0666
   under umask 0) where the Go twin's is 0600; both now create it 0600 whatever

@@ -56,7 +56,13 @@ yakos budget check <agent> [--project <path>] [--json]
   machine-readable and stable:
   `reason=<code> state=<state> agent=<agent> spent_usd=... limit_usd=... window=...`
   with `reason` one of `budget_off`, `budget_ok`, `budget_warning`,
-  `budget_exhausted` (`--json` has the same `reason` field).
+  `budget_exhausted` (`--json` has the same `reason` field). `--json` also
+  carries `"read_failed": true`, and only then, when the spend could not be read
+  (an unreadable dispatch log, or an internal error): the other numbers then
+  describe an empty ledger, not a measurement, and the exit stays 0 (it fails
+  open). The field is set from the error itself. A hook relies on it and never on
+  the words on stderr or in `warnings`, which carry text a project controls (a
+  repeated `agent_budgets` key in `.yakos.yml` is echoed back in the YAML error).
 - `yakos doctor` lists agents in `warning` or `hard_stop`, and prints nothing
   about budgets when every agent is healthy. The supervisor is special: at
   `hard_stop` doctor reports an **error**, "LLM supervision disabled: supervisor
@@ -211,9 +217,11 @@ change the decision.
 | `timeout` | the `yakos budget check` child outlived its 2 s wall-clock bound and was killed | bash |
 | `no_output` | it printed nothing and exited non-zero, or could not run (a CLI too old to have `budget`, one that crashed, a missing binary) | bash |
 | `parse` | what it printed is not a budget: not JSON, JSON without a numeric `limit_usd`, or a failing `jq` | bash |
-| `read_error` | the spend log could not be read: the CLI prints "ok, nothing spent" and says `(failing open)` on stderr, which the bash hook reads | both |
+| `read_error` | the spend could not be read: the CLI's JSON says `read_failed: true` (its numbers then read "ok, nothing spent"), also when it failed inside; the Go twin sees the same error in-process | both |
 
-The Go twin evaluates in-process, so only `read_error` exists there. A budget
+The bash hook never reads the CLI's stderr: it carries text a project controls,
+and a hook that took it for evidence could be made to fail open by a project's own
+config. The Go twin evaluates in-process, so only `read_error` exists there. A budget
 that is switched off (a limit of 0) is not a failure and logs nothing, and neither
 is a CLI that prints nothing and exits 0: it has no budget to report.
 
