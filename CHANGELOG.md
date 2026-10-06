@@ -485,8 +485,9 @@ below lists them); see UPGRADING.md.
   supervisor's, combined into one limit on the agent's one spend counter: per
   unit (dollars, tokens) the smaller amount, per unit the smaller dispatch stop
   in absolute terms (not the stop of the side with the smaller amount), a
-  lifetime window if either side is lifetime, and a limit that is unset or off
-  on one side counts as unlimited there. Naming an agent the supervisor never
+  lifetime window if a side that has a limit is lifetime (a side with no limit
+  in either unit contributes no window), and a limit that is unset or off on one
+  side counts as unlimited there. Naming an agent the supervisor never
   loosens its budget: an agent with no limit gains the supervisor's, one with a
   limit keeps it when it is the smaller, and the result is never looser than
   checking both separately (it can be stricter in the mixed case: an own $200
@@ -509,11 +510,18 @@ below lists them); see UPGRADING.md.
   the supervisor's or the librarian's built-in limit, the one a subscription
   operator relies on. Such a value is now ignored with a warning and the limit it
   would have replaced, the built-in or the global default's, stays. Out of range is
-  a `limit_usd` that is negative, NaN, infinite or above $1,000,000,000, and a
+  a `limit_usd` that is negative, NaN, infinite, above $1,000,000,000 or positive
+  and below $0.01 (a tiny limit made the share used overflow, which `budget check
+  --json` could not print, so the bash hook read nothing and failed open), and a
   `limit_tokens` that is negative, not a whole number (`1500000.5` used to be read
-  as 1,500,000), not a number, too large for 64 bits or above 2^50. `0` still turns
-  a limit off on purpose, a value at the bound is accepted, and `yakos budget set`
-  refuses the same dollar values.
+  as 1,500,000), not a number, too large for 64 bits or above 2^50. A project's
+  `agent_budgets:` values get the same check: an unbounded one (`.inf`, `1e308`)
+  used to be applied to an agent whose dollar limit was off and switched the bash
+  gate off while the Go twin refused. `0` still turns a limit off on purpose, a
+  value at a bound is accepted, and `yakos budget set` refuses the same dollar
+  values. `budget check --json` prints only finite numbers (the share used is
+  clamped, an off unit prints 0) and, if the status ever cannot be encoded,
+  `{"agent": ..., "read_failed": true}` instead of an empty line.
 
 - **A summary that arrives as an interactive session closes no longer races the
   dispatch (K-136).** The chunk callback of an interactive chat dispatch runs on

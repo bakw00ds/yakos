@@ -135,7 +135,9 @@ yakos budget check <agent> [--project <path>] [--json]
   (it fails open). The field is set from the error itself. A hook relies on it and
   never on the words on stderr or in `warnings`, which carry text a project
   controls (a repeated `agent_budgets` key in `.yakos.yml` is echoed back in the
-  YAML error).
+  YAML error). Every number in the JSON is finite (the share used is clamped, an
+  off unit prints 0), so it always parses, and a status that could not be encoded
+  anyway prints `{"agent": ..., "read_failed": true}`, never an empty line.
 - `yakos doctor` lists agents in `warning` or `hard_stop`, and prints nothing
   about budgets when every agent is healthy. An agent with a token limit is
   described in tokens first, with the limit that was reached named (token, dollar
@@ -221,19 +223,20 @@ an entry may set one and inherit the other. A project cannot set a token limit
 
 A value in the file that is out of range is ignored with a warning, and the limit
 it would have replaced stays (the built-in one, or the `default:` entry's), so a
-typo or a corrupt edit can neither switch a built-in budget off nor make a limit or
-its stop infinite. Out of range is:
+typo or a corrupt edit can neither switch a built-in budget off nor make a limit,
+its stop or its percentage infinite. Out of range is:
 
-- a dollar limit that is negative, NaN, positive or negative infinity, or above
-  $1,000,000,000 (so the stop of twice the limit stays a finite number);
+- a dollar limit that is negative, NaN, positive or negative infinity, above
+  $1,000,000,000 (so the stop of twice the limit stays a finite number), or positive
+  and below $0.01 (so the share used stays a finite number);
 - a token limit that is negative, not a whole number (`1500000.5`), not a number at
   all (`5m`, a list), too large for 64 bits, or above 2^50 (about 10^15).
 
-`0` is how you turn a limit off, on purpose, and a limit exactly at the bound is
-accepted. A bad value costs only itself: the rest of its entry and of the file is
-read as usual. The warning is printed by `yakos budget check` and on stderr before
-a dispatch, and `status --json` carries it in `warnings`. `yakos budget set` refuses
-the same dollar values.
+`0` is how you turn a limit off, on purpose, and a limit exactly at a bound ($0.01,
+$1,000,000,000, 2^50 tokens) is accepted. A bad value costs only itself: the rest
+of its entry and of the file is read as usual. The warning is printed by
+`yakos budget check` and on stderr before a dispatch, and `status --json` carries
+it in `warnings`. `yakos budget set` refuses the same dollar values.
 
 ## Projects may only lower a limit
 
@@ -247,9 +250,11 @@ agent_budgets:
 This follows the trust rule of the decision provider policy (ADR-0009). A project
 value below the user-level limit applies, and so does one for an agent that has
 no user-level limit (off becomes limited). A value above the user-level limit, or
-zero or negative, is ignored with a warning. A project cannot change the window
-or the warning percentage. The user-level file is the only place to raise or
-disable a limit.
+zero, is ignored with a warning, and so is one outside the range a policy value may
+have (negative, NaN, infinite, above $1,000,000,000 or below $0.01): it is never
+applied, so a project can lower a limit or give an unlimited agent one, never an
+unbounded one. A project cannot change the window or the warning percentage. The
+user-level file is the only place to raise or disable a limit.
 
 A project can also name the agent its supervisor runs as:
 
@@ -274,7 +279,9 @@ limit on the agent's one spend counter, unit by unit:
   every other agent). It is not the stop of whichever side has the smaller amount: an
   agent with its own 50,000,000 tokens (stop 50,000,000) named as the supervisor gets
   33,000,000 tokens with a stop of 50,000,000, not the supervisor's 66,000,000.
-- **Window:** lifetime if either side is lifetime, monthly only when both are.
+- **Window:** lifetime if a side that has a limit is lifetime, monthly otherwise. A
+  side with no limit in either unit contributes no window, so an agent with no limit
+  of its own takes the supervisor's window, even under a lifetime `default:`.
 - **Warning level:** the earlier of the two.
 
 The result is never looser than checking the agent's own limit and the supervisor's
@@ -284,7 +291,8 @@ monthly one becomes $100 lifetime. For example, a project that names `backend`
 changes nothing for an operator who gave `backend` a limit of $5 (it stays $5 with a
 $5 stop), nothing for the librarian (it stays $40 and 13,000,000 tokens, with no
 doubled stop), and gives an agent that had no limit the supervisor's $100 and
-33,000,000 tokens with the supervisor's stop. `yakos budget check`, `status`,
+33,000,000 tokens with the supervisor's stop and its monthly window, even when a
+`default:` entry names a lifetime one. `yakos budget check`, `status`,
 `doctor` and `reset` all use the combined limit, and `check --json` prints it, so the
 two hooks, the console and `dispatch` agree. Both hooks read the name (the Go hook as
 YAML, the bash hook with a line scan), and every name either of them arrives at is
@@ -397,7 +405,7 @@ change the decision.
 | `timeout` | the `yakos budget check` child outlived its 2 s wall-clock bound and was killed | bash |
 | `no_output` | it printed nothing and exited non-zero, or could not run (a CLI too old to have `budget`, one that crashed, a missing binary) | bash |
 | `parse` | what it printed is not a budget: not JSON, JSON without a numeric `limit_usd`, `spent_usd` and `stop_usd` and a string `state` (the token fields are optional: one that is absent or not a number reads as 0, except `stop_tokens`, which then reads as the token limit), or a failing `jq` | bash |
-| `read_error` | the spend could not be read: the CLI's JSON says `read_failed: true` (its numbers then read "ok, nothing spent"), also when it failed inside; the Go twin sees the same error in-process | both |
+| `read_error` | the spend could not be read: the CLI's JSON says `read_failed: true` (its numbers then read "ok, nothing spent"), also when it failed inside, an unencodable status included; the Go twin sees the same error in-process | both |
 
 The bash hook never reads the CLI's stderr: it carries text a project controls,
 and a hook that took it for evidence could be made to fail open by a project's own

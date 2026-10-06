@@ -145,18 +145,20 @@ What changes for you:
   negative or NaN `limit_usd`, or a negative `limit_tokens`, used to switch the
   limit off, including a built-in one, and an infinite or huge value gave a limit
   or a stop that could never be reached. Out of range is now a `limit_usd` that is
-  negative, NaN, infinite or above $1,000,000,000, and a `limit_tokens` that is
-  negative, not a whole number, not a number or above 2^50. Such a value is
-  ignored with a warning and the limit it would have replaced stays. To turn a
+  negative, NaN, infinite, above $1,000,000,000 or positive and below $0.01, and a
+  `limit_tokens` that is negative, not a whole number, not a number or above 2^50.
+  Such a value is ignored with a warning and the limit it would have replaced
+  stays, and a project's `agent_budgets:` value gets the same check. To turn a
   limit off, set it to `0`.
 - **A project can rename its supervisor and keep its budget, never a looser
   one.** The agent a project names as its supervisor (`supervisor: agent:` in
   `.yakos.yml`) is now budgeted at the stricter of its own limits and the
   supervisor's, whatever you set for `supervisor` in your own policy file
   included: per unit the smaller amount and the smaller stop, a lifetime window if
-  either side is lifetime. An agent with no limits of its own gets the
-  supervisor's (before, a renamed agent had no budget), and one with a limit keeps
-  it when it is the smaller. The result is never looser than checking both
+  a side that has a limit is lifetime (a side with no limit contributes no
+  window). An agent with no limits of its own gets the supervisor's, window
+  included (before, a renamed agent had no budget), and one with a limit keeps it
+  when it is the smaller. The result is never looser than checking both
   separately, and can be stricter in the mixed case (an own $200 lifetime limit
   beside the supervisor's $100 monthly one is $100 lifetime). `yakos budget
   status`, `yakos doctor` and `yakos budget reset` take the project into account
