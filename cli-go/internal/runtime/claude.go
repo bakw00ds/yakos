@@ -210,9 +210,21 @@ func claudeModelFlag(agent, model string) string {
 //   - PR #31: --exclude-dynamic-system-prompt-sections on every call.
 //   - PR #17: IS_SANDBOX=1 in env when AllowRoot is set.
 //   - Does NOT pass --agents (no Agent-tool framing).
-//   - Does NOT pass --resume (chat sessions are new per-call; conversation
-//     continuity is managed at the SSE/gRPC layer, not here).
+//   - Passes --resume <id> only when the caller supplies a ResumeSessionID (the
+//     claude session_id captured from the previous turn's result frame), so a
+//     follow-up turn continues the conversation. The first turn has none.
+//   - Runs in the project directory (cmd.Dir) so project settings, hooks and
+//     CLAUDE.md load as they do in a terminal and a resumed session is found:
+//     claude keys saved sessions by working directory.
+//   - Refuses a persona over MaxPersonaBytes before building argv (see below).
 func (a *ClaudeAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *exec.Cmd {
+	// The persona travels in argv (--append-system-prompt), so one over
+	// MaxPersonaBytes is refused before any argv is built: the returned command
+	// fails in Start with ErrPersonaTooLarge instead of the operating system's
+	// bare "argument list too long". codex and agy chat have the same cap.
+	if err := checkPersonaSize(req.AgentSystemPrompt); err != nil {
+		return rejectedCmd(ctx, "claude", err)
+	}
 	args := []string{
 		"--permission-mode", "bypassPermissions",
 		"--add-dir", req.Project,
@@ -239,6 +251,13 @@ func (a *ClaudeAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest
 	if req.Effort != "" {
 		args = append(args, "--effort", req.Effort)
 	}
+	// Continuity: resume the previous turn's claude session. The id came from
+	// claude's own output via the transcript store; it is re-checked here
+	// because it lands on argv, and an id that fails the check is dropped (the
+	// turn then simply starts a fresh session).
+	if req.ResumeSessionID != "" && ValidSessionID(req.ResumeSessionID) {
+		args = append(args, "--resume", req.ResumeSessionID)
+	}
 	// SECURITY (H1): claude's -p is a boolean flag — the prompt is a bare
 	// positional, not -p's value — so commander would otherwise parse a
 	// UserText beginning with '-' (e.g. "--settings /tmp/evil.json") as
@@ -249,8 +268,14 @@ func (a *ClaudeAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest
 
 	cmd := exec.CommandContext(ctx, "claude", args...) //nolint:gosec
 	cmd.Env = buildEnvChat(req)
-	if req.WorkDirOverride != "" {
+	switch {
+	case req.WorkDirOverride != "":
 		cmd.Dir = req.WorkDirOverride
+	case req.Project != "":
+		// Without this the subprocess inherits the daemon's cwd, so project
+		// hooks and CLAUDE.md differ between chat and a terminal session and
+		// --resume cannot find a session saved under the project directory.
+		cmd.Dir = req.Project
 	}
 	return cmd
 }
@@ -812,6 +837,12 @@ type ChatDispatchRequest struct {
 	// At high+ the claude CLI enables extended thinking automatically.
 	// This field is claude-only; other adapters ignore it.
 	Effort string
+
+	// ResumeSessionID is the native claude session id of the conversation this
+	// turn continues (the session_id of the previous turn's result frame).
+	// ChatExecCmd passes it as --resume when it passes ValidSessionID. Empty
+	// means a fresh session. claude-only; other adapters ignore it.
+	ResumeSessionID string
 }
 
 // buildEnvChat constructs the subprocess environment for unframed chat

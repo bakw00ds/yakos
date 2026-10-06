@@ -25,12 +25,40 @@ type Request struct {
 	// Project is the absolute path to the project repository. Required.
 	Project string
 
-	// Runtime is the explicit runtime override (e.g. "codex"). Empty means
-	// resolve from agent frontmatter → project config → default.
+	// Runtime is the explicit runtime override (e.g. "codex"). Empty (or "auto")
+	// means resolve from agent frontmatter → project config → default; see
+	// resolve.go for the full order.
 	Runtime string
 
-	// Model is the model tier override from --model flag (haiku|sonnet|opus|fable).
-	// Empty means resolve from agent frontmatter.
+	// RuntimeEnvDefault is an ambient runtime preference taken from YAKOS_RUNTIME.
+	// Only the CLI one-shot path (cmd/yakos) sets it. It ranks below the
+	// agent's pin and the project's .yakos.yml and above
+	// ~/.yakos-state/default-runtime, exactly where cli/lib/dispatch.sh reads
+	// the variable. Daemon transports never set it: Service.Run builds its
+	// Request without it, so an environment variable on the daemon cannot
+	// steer remote callers.
+	RuntimeEnvDefault string
+
+	// RuntimeFallbackOptIn are the runtimes the operator listed to fall back to
+	// when the chosen runtime cannot run (the CLI's --runtime-fallback). A
+	// runtime the operator named (Runtime, or a bare runtime name as the agent)
+	// does not fall back at all unless this lists somewhere to go; for any other
+	// choice the list is tried after the agent's runtime-fallback and the
+	// project's default-fallback. Only the CLI sets it, as Service.Run builds its
+	// Request without it: no API caller can widen where a task is sent.
+	RuntimeFallbackOptIn []string
+
+	// RuntimeChosenBy and FallbackFrom are populated by the orchestrator after
+	// runtime resolution (see the RuntimeBy* constants). Not caller inputs.
+	// FallbackFrom names the preferred runtime that could not be used and is
+	// set only when RuntimeChosenBy is RuntimeByFallback.
+	RuntimeChosenBy string
+	FallbackFrom    string
+
+	// Model is the model override from --model: a Claude tier
+	// (haiku|sonnet|opus|fable) or alias for claude, an alias or model id for
+	// codex and agy. Validated per resolved runtime. Empty means resolve from
+	// agent frontmatter, then the runtime's default.
 	Model string
 
 	// ModelChosenBy is populated by the orchestrator after model resolution.

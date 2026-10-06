@@ -311,6 +311,51 @@ func TestDispatchParity_HappyPath(t *testing.T) {
 	// (omitempty on the field; absence is correct here)
 }
 
+// ---- (a2) DELIBERATE DIVERGENCE from bash: a named runtime does not fall back -
+
+// TestDispatchParity_ExplicitRuntimeDivergesFromBash records a place where the
+// Go dispatcher intentionally does NOT match cli/lib/dispatch.sh (K-132, decided
+// by the operator).
+//
+// bash (dispatch.sh 278-331) walks the agent's runtime-fallback and the
+// project's default-fallback for an explicit `--runtime` as well: with codex
+// signed out and `default-fallback: [claude]`, `yakos dispatch backend "..."
+// --runtime codex` prints "falling back" and answers from claude. Go refuses:
+// a runtime the operator names is operator intent, including intent about where
+// the task is sent, so answering from another vendor is the silent switch the
+// operator reported. The Go CLI's --runtime-fallback is the opt-in.
+//
+// K-143 (the bash/Go parity matrix) must list this row as INTENDED, not as a
+// bug to fix by porting the bash behavior back. Pins and project defaults still
+// fall back in both implementations; only a runtime that was named differs.
+func TestDispatchParity_ExplicitRuntimeDivergesFromBash(t *testing.T) {
+	yakosRoot, projectRoot, _ := buildDispatchFixture(t, []string{"backend.md"}, nil)
+	mockDir := mockClaudeRuntime(t, 0, "answered by claude")
+	t.Setenv("PATH", mockDir) // claude only: codex is not installed
+	if err := os.WriteFile(filepath.Join(projectRoot, ".yakos.yml"), []byte("default-fallback: [claude]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, _, err := dispatch.Run(context.Background(), dispatch.Request{
+		AgentName: "backend", Task: "t", Project: projectRoot, YakosRoot: yakosRoot, Runtime: "codex",
+	})
+	if _, ok := dispatch.AsExplicitRuntimeError(err); !ok {
+		t.Fatalf("err = %v; Go must refuse an unavailable explicit runtime (bash would fall back to claude)", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(mockDir, "claude.argv")); statErr == nil {
+		t.Error("claude ran: the Go dispatcher fell back for a runtime the operator named")
+	}
+
+	// The opt-in restores the bash behavior, explicitly.
+	_, res, err := dispatch.Run(context.Background(), dispatch.Request{
+		AgentName: "backend", Task: "t", Project: projectRoot, YakosRoot: yakosRoot,
+		Runtime: "codex", RuntimeFallbackOptIn: []string{"claude"},
+	})
+	if err != nil || res.RuntimeChosenBy != dispatch.RuntimeByFallback || res.FallbackFrom != "codex" {
+		t.Errorf("with --runtime-fallback claude: %+v, %v; want claude by fallback from codex", res, err)
+	}
+}
+
 // ---- (b) non-zero exit: stderr_tail populated, ANSI stripped (PR #34) -------
 
 // TestDispatchParity_NonZeroExit verifies that on exit_code != 0, stderr_tail

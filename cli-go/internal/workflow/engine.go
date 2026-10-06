@@ -18,7 +18,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
-	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 )
 
@@ -734,11 +733,12 @@ func (e *Engine) runNode(
 		return
 	}
 
-	// Resolve model alias.
+	// The node's model goes to dispatch verbatim. An alias (balanced) means a
+	// different model on each runtime, and the runtime is only settled inside
+	// dispatch (the agent's pin, the project config, fallbacks), so dispatch
+	// resolves it against the runtime that actually runs. Resolving it here to a
+	// Claude tier would hand "sonnet" to a codex node.
 	model := node.Model
-	if model != "" {
-		model = runtime.ResolveAlias(model)
-	}
 
 	// Build dispatch.Params with Project pinned to Engine.Project.
 	// ResolvedIdentity is forwarded from the triggering HTTP request so the

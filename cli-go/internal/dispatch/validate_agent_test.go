@@ -28,10 +28,14 @@ func TestValidateAgentName_UnknownAgent_Errors(t *testing.T) {
 
 func TestValidateAgentName_KnownRuntimes_Nil(t *testing.T) {
 	yakosRoot := buildMinimalYakosRoot(t)
-	for _, name := range []string{"claude", "codex", "agy", "gemini"} {
+	for _, name := range []string{"claude", "codex", "agy"} {
 		if err := ValidateAgentName(name, yakosRoot, ""); err != nil {
 			t.Errorf("ValidateAgentName(%q) with yakosRoot: unexpected error: %v", name, err)
 		}
+	}
+	// gemini is retired (K-132): no longer a catch-all.
+	if err := ValidateAgentName("gemini", yakosRoot, ""); err == nil {
+		t.Error("ValidateAgentName(gemini): expected an unknown-agent error, got nil")
 	}
 }
 
@@ -44,7 +48,7 @@ func TestValidateAgentName_SpecialistInRoster_Nil(t *testing.T) {
 
 func TestValidateAgentName_EmptyYakosRoot_KnownRuntime_Nil(t *testing.T) {
 	// When yakosRoot is empty, only the known-runtime check fires.
-	for _, name := range []string{"claude", "codex", "agy", "gemini"} {
+	for _, name := range []string{"claude", "codex", "agy"} {
 		if err := ValidateAgentName(name, "", ""); err != nil {
 			t.Errorf("ValidateAgentName(%q) empty yakosRoot: unexpected error: %v", name, err)
 		}

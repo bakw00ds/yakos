@@ -7,48 +7,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Security
-
-- **codex dispatch is sandboxed by default; agy gets `--sandbox` but is not
-  contained (K-133, K-158).** The Go dispatcher (console, MCP, Flows, JSON-RPC,
-  `YAKOS_IMPL=go yakos dispatch`) ran both harnesses with approvals and sandbox
-  switched off, so any task text or file the model read could drive arbitrary
-  commands as the operator. codex now runs `exec --sandbox workspace-write -c
-  approval_policy="never"`, an OS sandbox with the network off by default whose
-  policy the model cannot change (`exec resume`, which has no `--sandbox`, takes
-  `-c sandbox_mode="workspace-write"`). agy still gets `--sandbox`, because it
-  blocks the default write path.
-  Under `--sandbox --dangerously-skip-permissions`, agy's macOS Seatbelt sandbox
-  blocks writes outside the workspace by default but leaves file reads and
-  outbound network unrestricted, and the model can escalate out of the sandbox
-  at will via `run_command(BypassSandbox=true)`, which
-  `--dangerously-skip-permissions` auto-approves; agy dispatch is therefore not
-  a containment boundary for reads, network or writes and must only receive
-  non-sensitive work or run inside an external OS sandbox (K-159).
-  The old bypass returns only when
-  `~/.yakos-state/router-policy.yml` lists the runtime in
-  `allow_unsandboxed_runtimes`. That file is read from `$HOME/.yakos-state` only
-  (not `YAKOS_DISPATCH_LOG`, K-129), must be a regular file you own that is not
-  group or world writable and not a symlink, and cannot be enabled from a
-  project `.yakos.yml`; an ignored file is explained on stderr and in `yakos
-  doctor`, and an active bypass prints one stderr line per process and a doctor
-  warning. Inside codex's sandbox writes outside the project fail, `.git` is
-  read-only (no `git commit`) and the network is off. See
-  `docs/runtime-matrix.md` and UPGRADING.md. The bash adapters used by the bash
-  `yakos dispatch` path are unchanged until K-143.
-- **yakOS-owned `CODEX_HOME` (K-133).** `yakos auth login codex` (Go and bash)
-  now signs codex in to `~/.yakos-state/codex-home` (0700) instead of the
-  operator's `~/.codex`. Once that profile holds a login, dispatch (Go and bash),
-  Go chat and the bash `yakos start` run codex under it (an inherited
-  `CODEX_HOME` is replaced, with a stderr note), so they never share one
-  `auth.json` with your own codex (openai/codex#48465). Go `yakos start` does
-  not use the profile yet: it launches the interactive codex with your own
-  `CODEX_HOME`. Until the command is run nothing changes. `yakos auth status`
-  says which login dispatch will use, `yakos auth logout codex` signs out of the
-  profile only, and yakOS never calls the codex app-server `account/login`
-  method.
+Routing P0a (K-132): the Go dispatcher now honors agent runtime pins, picks a
+runtime that is installed and signed in, and resolves models per runtime.
+Agents that declare `runtime:` (`general-codex`, `general-agy` and any project
+agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
 
 ### Changed
+
+- **Go dispatch honors agent `runtime:` and `runtime-fallback:` (K-127,
+  K-132 P0a).** Frontmatter `runtime:` and `runtime-fallback:` now select the
+  runtime adapter on every Go transport: the daemon (REST, JSON-RPC, gRPC),
+  MCP, console chat, Flows and the `YAKOS_IMPL=go` CLI. Before, the Go
+  dispatcher ignored them and ran everything on claude, so `general-codex`
+  now really runs on codex and `general-agy` on agy. Resolution order (the
+  same as `cli/lib/dispatch.sh`), highest first: an explicit runtime
+  (`yakos dispatch --runtime`, `Params.Runtime`, a console pane set to a
+  specific runtime), the agent's `runtime:`, `.yakos.yml`
+  `per-domain.<agent domain>`, `.yakos.yml` `default-runtime`,
+  `YAKOS_RUNTIME` (read by the CLI one-shot path only, never by the daemon),
+  `~/.yakos-state/default-runtime`, then claude. A bare agent name that is
+  itself a runtime (`yakos dispatch codex "..."`) selects that runtime when
+  the agent has no pin of its own. **Behavior change:** see UPGRADING.md.
+  Reference: `docs/runtime-matrix.md`.
+
+- **Dispatch picks the first runtime that is installed and signed in
+  (K-132 P0a).** The candidate chain is the chosen runtime, then the agent's
+  `runtime-fallback`, then `.yakos.yml` `default-fallback`. The first
+  candidate whose CLI is on PATH and that looks signed in wins. Signed in
+  means: for codex, `OPENAI_API_KEY` or `$CODEX_HOME/auth.json`; for agy,
+  `ANTIGRAVITY_API_KEY` or `GEMINI_API_KEY`, a yakos keyring entry, or
+  `~/.gemini/antigravity-cli/`; for claude, only that the CLI is installed
+  (its credentials can live in the keychain or env, so they cannot be
+  probed). If nothing in the chain passes, dispatch fails fast naming each
+  runtime it skipped and why, for example
+  `agy: not signed in; run: yakos auth login agy`. A fallback prints one
+  line on stderr and is recorded in the dispatch-log (see
+  `runtime_chosen_by` under Added).
+  **A runtime you name does not fall back.** `--runtime`, a console pane set
+  to a runtime, the `runtime` parameter of an MCP, JSON-RPC or REST call, and
+  a runtime name used as the agent (`yakos dispatch codex "..."`) are
+  operator intent, including intent about where the task goes. If that
+  runtime cannot run, dispatch fails naming the runtime, why, and the
+  fallbacks it did not use; only the CLI can opt in, with the new
+  `--runtime-fallback <list>` (the hint it prints names only runtimes the flag
+  accepts, not a bash-only one such as `claude-sdk`). Pins and `.yakos.yml`
+  defaults keep walking the
+  fallback lists. This deliberately differs from `cli/lib/dispatch.sh`, which
+  falls back for an explicit `--runtime` too (recorded for K-143). The probe
+  now ends when the dispatch is cancelled, bounds the agy keyring lookup to
+  two seconds, and a daemon reuses its answer for 30 seconds (5 seconds for a
+  runtime that could not run, so a retry right after `codex login` is not told
+  the old answer for long).
+
+- **Models are resolved per runtime; non-Claude model ids survive (K-132
+  P0a).** The default model is no longer the literal `sonnet` for every
+  runtime. claude keeps `sonnet`. codex and agy have no default: an unpinned
+  dispatch carries no model, so the adapter sends no model flag and the
+  harness picks its own (a static table cannot know which ids exist in your
+  account). Only a pin puts a model on a codex or agy command line: the
+  `--model` flag, a console pane choice, or the agent's frontmatter
+  `model:`. Non-Claude ids in agent frontmatter (`model: gpt-5.5`), in
+  `--model` and in console chat requests now survive and are validated per
+  runtime: claude accepts only `haiku|sonnet|opus|fable` (aliases resolve
+  first); codex and agy accept an alias or an id matching
+  `^[a-z0-9][a-z0-9._:-]{0,63}$`. An alias resolves through that runtime's
+  column of `lib/settings/model-aliases.json`; an alias with no mapping
+  (codex has none) means the harness default and prints one
+  `WARN: alias <x> has no <runtime> mapping; using harness default` line. A
+  Claude tier is never sent to codex or agy: in frontmatter it is ignored, and
+  as an explicit `--model` or pane choice it is refused. A non-Claude id on an
+  agent that resolves to claude is ignored, as before. The resolved id
+  reaches the runtime request; the `-m`/`--model` flags themselves are wired
+  in the codex and agy adapters by a separate change. The alias table now
+  maps every codex alias to nothing (the ChatGPT-login catalog changes faster
+  than a table can track, and codex rejects an id outside it) and agy to the
+  ids `agy models` lists.
+
+- **Flows nodes: the model is checked against the node's runtime and passed
+  to dispatch as written (K-132 P0a).** Before, the engine turned an alias
+  into a Claude tier (`balanced` became `sonnet`) before dispatch, so a codex
+  or agy node was handed a model it cannot run, and validation rejected any
+  model id. Now `yakos workflow validate` accepts a tier or alias on claude and
+  an alias or a model id on codex and agy (never a bare Claude tier), and a
+  node with no runtime needs a model that is valid on at least one runtime.
+  Dispatch resolves an alias for the runtime that actually runs the node.
+
+- **Console Chat pane: `auto` runtime and model tiers for non-Claude
+  runtimes (K-132 P0a).** The runtime select gains `auto`, the default for
+  new panes, which resolves from the agent's pin. The model select gains a
+  `default` entry and the five aliases (cheap, balanced, best, reasoning,
+  frontier), so non-Claude panes can pick a tier. `/api/chat/dispatch`
+  accepts an empty runtime or `auto` and validates the model after the
+  runtime is resolved. `/api/skills` reports each agent's real runtime.
+  Interactive chat on a pane that resolves to a non-claude runtime is refused
+  with a clear 400 instead of silently starting claude.
 
 - **codex adapter rewritten against codex-cli 0.154.0 (K-133).** Framed dispatch
   runs `codex exec --json [-m id] [-c model_reasoning_effort=...]` and resumes
@@ -98,14 +150,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   old and new rows.
 - `output_bytes` of a streamed codex or agy chat turn now measures the text the
   console received, not the raw JSONL.
-- **MCP `yakos.dispatch` no longer offers `gemini`, and lists all four model
-  tiers.** The runtime is retired, and the `model` list now names every tier
-  dispatch accepts (`haiku`, `sonnet`, `opus`, `fable`; it omitted `fable`). A
-  test ties the list to dispatch's own validation so the two cannot drift.
-  Widening `model` to other runtimes' ids waits for per-runtime validation
-  (K-132).
+- **MCP `yakos.dispatch` takes a model for any runtime, and says a named
+  runtime is used as named (K-132 P0a).** The tool no longer offers `gemini`
+  (retired). `model` was an enum of the four Claude tiers, so a client could
+  not name a codex or agy model. It is now the id pattern dispatch enforces
+  (`^[a-z0-9][a-z0-9._:-]{0,63}$`), with a description that lists the aliases
+  and what each runtime accepts. The value is checked against the runtime the
+  call resolves to: an alias or a model id from the harness's own catalog goes
+  through on codex and agy, a Claude tier is refused there, and claude takes
+  only a tier. The `runtime` description now says a runtime named in the call
+  is used as named, and that the call fails instead of falling back when it
+  cannot run. JSON-RPC `yakos.dispatch.run` applies the same check. A test ties
+  the schema pattern to dispatch's own validation so the two cannot drift.
 
 ### Added
+
+- **The dispatch-log records why a runtime was chosen (K-132 P0a).**
+  `dispatch_finished` events gain two additive fields, both omitted when
+  empty: `runtime_chosen_by` (one of `override`, `agent-name`, `frontmatter`,
+  `per-domain`, `project-default`, `env`, `state-default`, `default`,
+  `fallback`) and `fallback_from` (the preferred runtime that was skipped,
+  set only when `runtime_chosen_by` is `fallback`). Older readers ignore
+  them.
+
+- **`yakos dispatch --runtime-fallback <list>` (K-132 P0a).** A comma
+  separated list of runtimes to try, in order, when the chosen one cannot
+  run. For a runtime you named it replaces the unused fallback lists; for any
+  other choice it is tried after them.
+
+- **Go dispatch reads the `.yakos.yml` routing keys (K-132 P0a).**
+  `default-runtime`, `default-fallback` (inline or block list) and
+  `per-domain` are read by a new tolerant reader (`internal/projectcfg`). A
+  malformed file is ignored with a warning rather than failing dispatch.
 
 - **Go materializers for codex and agy agent files (K-134).**
   `agentscompose.MaterializeCodexAgent` and `MaterializeAgyAgent` write
@@ -237,7 +313,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `docs/mcp-integration.md`, `docs/unified-console.md` and both package
     READMEs document the new results.
 
+### Removed
+
+- **`gemini` is gone from the Go runtime registry (K-132 P0a).** It is also
+  gone from the console runtime selector and the known runtimes of
+  `yakos start`; its deprecation shim was past its 2026-09-01 removal date.
+  Use `agy`. `yakos validate` still accepts `runtime: gemini` in agent
+  frontmatter, as a warning, for one more release. A dispatch to gemini, or
+  to an agent still pinned to it, fails with `gemini was removed; use agy`.
+
 ### Fixed
+
+- **Claude chat runs in the project and remembers the conversation (K-132
+  P0a).** One-shot chat now runs in the project directory, and the first
+  turn's claude `session_id` is stored with the conversation so later turns
+  pass `--resume` (not in IDE review mode, where each turn gets its own
+  worktree). A saved session that claude no longer has is forgotten, so the
+  next turn starts fresh. Interactive chat sessions now pass `--model`
+  instead of relying on an env var the claude CLI ignores. A stored session
+  is forgotten when a failed resume says the session is gone (any wording
+  that calls a conversation or session "not found", not only claude's own),
+  and always after two failed resumes in a row, so a reworded message cannot
+  leave a dead id failing every follow-up. A single unrelated failure keeps it.
+
+- **A console turn sent right after a cancel can still be cancelled (K-132
+  follow-up).** A cancel frees the session's slot at once so the pane can
+  resend on the same session id, but the cancelled turn's goroutine freed "its"
+  slot again when it ended, and keyed by session id that was the new turn's.
+  The new turn could then no longer be cancelled, and a third turn was accepted
+  while it ran. Slots are now keyed by generation. The hub's own `CloseSession`
+  has the same shape (the old goroutine closes the new turn's hub entry) and is
+  left alone here; it is tracked on K-148.
+
+- **CLI errors and the REST 502 body carry one `dispatch:` prefix.** New errors
+  from the dispatch package already begin with it, which printed
+  `dispatch: dispatch: ...` from `yakos dispatch` and from `POST /v1/dispatches`.
+
+- **An agent or skill file with a very long line is no longer silently cut
+  off (K-132 follow-up).** The roster reader used a line scanner whose default
+  limit is 64 KiB, so a line over it stopped the scan without a word and
+  everything after it, in practice the rest of the agent's persona, vanished
+  from the prompt. Lines up to 1 MiB are now read whole. An agent file with a
+  longer line is skipped with one warning that names the file and the line, so
+  the other agents still dispatch (a cloned repository controls the project's
+  agent files, and one bad file must not stop them all). An agent that extends a
+  template with such a line still fails with an error that names the file. A
+  skill file with such a line is skipped with a warning and the skills listing
+  goes on.
+
+- **claude chat refuses an agent persona over 64 KiB before it starts
+  (K-132 follow-up).** The persona is an argument of the claude command
+  (`--append-system-prompt`), and past the operating system's limit the exec
+  failed with a bare "argument list too long". codex and agy chat already
+  refused a persona over 64 KiB with a clear error. The console's claude chat
+  and an interactive claude session now do the same, before any process
+  starts. Only a persona over the limit is affected.
 
 - **Model aliases and the two general agents named models that do not exist.**
   `lib/settings/model-aliases.json`: the agy and antigravity-sdk columns now map to
@@ -271,6 +401,191 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regardless of locale. A control character, DEL or a lone carriage return in an
   agent's text is invalid TOML (and invalid in a YAML double-quoted scalar), so
   both emitters now write it as `\u00XX`, as the chat path already did.
+
+### Security
+
+- **A conversation, and the claude session its follow-ups resume, belong to
+  the operator who started it (K-132 P0a, sec-324 F1).** After the owner's turn
+  ended, any operator who knew the `conversationId` (a shared pane hands it
+  out, and unsharing does not take it back) could dispatch into it, run
+  `claude --resume` on the owner's session, and read everything in it. The
+  console now refuses a dispatch into a conversation whose first user turn is
+  another operator's (403, like the transcript and share endpoints), and the
+  stored native session is handed out and replaced only for the operator whose
+  turn produced it. The gate fails closed: a transcript that exists but cannot
+  be read refuses the dispatch (500, reason logged) instead of passing it, and
+  so does the share endpoint's check of who owns a conversation that has no
+  live session.
+
+- **The state-file default runtime is trusted only when no one else could have
+  written it (K-132 P0a, sec-324 F2).** `~/.yakos-state/default-runtime` steers
+  every unpinned dispatch to a vendor. It is now read only as a regular file
+  owned by you, not group or world writable, in a directory with the same
+  properties and not a symlink; otherwise it is reported and ignored. Matters
+  where the state directory falls back to the shared temp directory. Both
+  writers of the file (`yakos auth set-default` in bash and in Go) now create
+  it 0600 whatever the umask and repair a group-writable one, so a umask of 002
+  no longer produces a file the dispatcher refuses.
+
+- **The sign-in probe cannot hang a dispatch (K-132 P0a, sec-324 F3).** The agy
+  OS-keyring lookup (a process spawn on macOS, a possible unlock prompt on
+  Linux) is bounded to two seconds, ends when the dispatch is cancelled, and
+  is shared among concurrent probes.
+
+- **A project cannot hijack the default pane with an agent named after a
+  runtime (K-132 P0a, sec-324 F4).** A cloned repository's
+  `.claude/agents/claude.md` with `runtime: codex` sent the console's default
+  pane (agent claude, runtime auto) to another vendor while the pane still said
+  claude. Agent files named `claude`, `codex` or `agy` are now skipped with a
+  warning and rejected by `yakos validate`. The chat summary event also
+  carries `runtime_resolved`, the runtime that actually ran the turn.
+
+- **Compose follows a symlink only to a file inside the agent directories,
+  never to a directory, and no longer blocks or exhausts memory on a special
+  file (K-132 follow-up, sec-324, rev-324).** A cloned repository controls the
+  project's `.claude/agents`, and the roster reader followed whatever a link
+  there pointed at. A link to a file such as `~/.aws/credentials` became an
+  agent's persona: its first line was the description `/api/skills` returns to
+  every reader of the endpoint, and the daemon sent the whole file to the model
+  vendor as the system prompt. A dangling link or a link to a directory emptied
+  the roster, a link to a FIFO blocked it for good, and a link to `/dev/zero`
+  would have used up the daemon's memory. A symlinked agent file is now
+  followed only to a regular file inside the framework's `lib/agents` or the
+  project's `.claude/agents`, so the per-file links an install makes into
+  `lib/agents` keep working. Those two directories are the containment roots
+  for agent files, and `lib/skills` and the project's `.claude/skills` are the
+  roots for skills. The roots are not the project or `lib/` around them,
+  because the project holds files that are not agents: a link to the project's
+  own `.env` or `.git/config` would otherwise have become the persona and gone
+  to the vendor (rev-324). The directories are checked themselves too, because
+  a file seen through a linked directory is a regular file and never reaches
+  the rule for files. A project `.claude/agents` or `.claude/skills` that is a
+  symlink, or sits under a symlinked `.claude`, is skipped whole, once, with
+  one warning that names it, wherever the link leads: outside the project, to
+  another directory of the project, to nothing or to a file. Only the project's
+  directories are looked at. The framework's own root, `lib/agents` and
+  `lib/skills` may be links, as a bare install or a re-pointed upgrade can
+  leave them, and still compose. Anything else that is not a regular file is
+  skipped without being opened, a file over 4 MiB is skipped, and the read
+  itself is bounded. Each is skipped with the same once-per-file warning that
+  names the file, and so is any failure to read a file in the project
+  directory, so one bad file no longer stops the other agents. A framework file
+  that cannot be read is still an error. What is checked is what is read: the
+  file is opened by the path the check resolved, without following a link and
+  without blocking, and the open file must be a regular file and the same file
+  that was checked. In Go, a link retargeted to an outside file, a directory
+  swapped for a link, or a file swapped for a FIFO between the check and the
+  read is a skip, not a leak or a hang (rev-324). The bash composer still
+  checks and then reads: the open by descriptor that closes the race has no
+  bash equivalent, so a link retargeted between the check and the read can
+  still be followed there (rev-324 saw the retargeting link win in 3 of 17 runs
+  of a tight loop). The bash composer is the parity oracle that K-143 retires,
+  and the race is not closed in it. If you linked an agent or skill file to
+  another file of the project, move that file into `.claude/agents` or
+  `.claude/skills` (a subdirectory is fine). If you linked `.claude/agents`,
+  `.claude/skills` or `.claude` itself, make it a real directory. Links into
+  `lib/agents` and `lib/skills` keep working.
+
+- **The skills listing skips a `SKILL.md` it may not read instead of failing
+  (K-132 follow-up, sec-324).** `ComposeSkills`, behind `GET /api/skills`, read
+  a symlinked `SKILL.md` wherever it led, and one that pointed at a directory
+  failed the whole listing, which the console served as an empty one. A
+  `SKILL.md` is now read under the rules for an agent file: a symlink only to a
+  regular file inside the framework's `lib/skills` or the project's
+  `.claude/skills`, nothing that is not a regular file, nothing over 4 MiB, no
+  line of 1 MiB or more, and a failure to read a file in the project directory
+  is a skip. The project's `.claude/skills` is checked itself, like
+  `.claude/agents`: a symlink there, or a symlinked `.claude` above it, skips
+  the whole directory, with the same one warning, wherever the link leads. Each
+  is skipped with a once-per-file warning that names the file, and the rest of
+  the listing is served. A framework skill that cannot be read is still an
+  error. A skill directory without a `SKILL.md` is skipped silently, as before.
+
+- **`extends:` names a framework template and nothing else (K-132 follow-up,
+  sec-324, rev-324).** The value came from the agent's own file and went into a
+  path as it stood, so a project agent could extend any `.md` file the daemon
+  could read (a file outside `lib/agents` put its text into claude's command
+  line) or point the extends step at a huge file to fail every dispatch. The
+  value must now be a bare agent id: 1 to 128 of letters, digits, `.`, `_` and
+  `-`, starting with a letter or digit, with no `..`. The template is read from
+  `lib/agents` under the same rules as an agent file, so one that is a symlink
+  out of `lib/agents` and the project's `.claude/agents`, or not a regular
+  file, is refused. A bad value or an unsafe template skips that agent with a
+  once-per-file warning that names the file and the value, and does not fail the
+  roster. A missing template still means the agent's own body alone, and a
+  template with a line over 1 MiB stays an error: it is the framework's own
+  file, which a clone cannot change. The bash composer
+  (`cli/lib/agents-compose.sh`, behind `yakos start`, `yakos doctor` and the
+  bash dispatchers) had the same hole, for `extends:` and for a symlinked agent
+  file, and now applies the same rules, the directory rule included, and prints
+  the same warning text. A Go test runs both composers on one fixture, under
+  bash 3.2 and bash 5.
+
+- **`yakos validate` rejects the agent files and directories the Go dispatcher
+  skips (K-132 follow-up, sec-324, rev-324).** A skipped project file that
+  overrides a framework agent leaves the framework's version in place with only
+  a warning on stderr, so CI could not see it. The bash and the Go validator
+  now both report, with the same text, an agent file with a line of 1 MiB or
+  more, a file over 4 MiB, an entry that is not a regular file, a symlink that
+  does not end at a regular file inside the framework's `lib/agents` or the
+  project's `.claude/agents`, an `extends:` that is not a bare agent id, and a
+  project `.claude/agents` or `.claude/skills` that is a symlink, or sits under
+  a symlinked `.claude`, wherever it leads. No pass reads a directory it
+  reports, and none reads through a link the dispatcher refuses, an agent file
+  or a `SKILL.md`. The Go eval-case pass read an agent link and printed the
+  `model-policy` of the file it led to, and the Go passes over skills read a
+  `SKILL.md` link and printed what they found in it. Only the agent files are
+  reported. The framework's own directories are never reported for being links.
+  The bash validator also checks the `runtime` and `model-policy` of an agent
+  reached through a symlink it accepts, as the Go one always did. The Go
+  validator no longer reads a symlink to a FIFO or a device in any pass over
+  agent files, where it would have blocked or read without end, and leaves a
+  FIFO among the skills and rules alone, as the bash one does. The bash
+  validator's playbook-reference pass read every file in the agents, rules and
+  skills directories with a recursive `grep`, so a FIFO there blocked it for
+  good while the Go validator returned at once; it now reads regular files
+  only. The shell suite that runs both validators on the same fixtures and
+  compares their findings, `tests/run-agent-enums-test.sh`, now runs in CI on
+  Linux and macOS, under bash 5 and bash 3.2.
+
+- **codex dispatch is sandboxed by default; agy gets `--sandbox` but is not
+  contained (K-133, K-158).** The Go dispatcher (console, MCP, Flows, JSON-RPC,
+  `YAKOS_IMPL=go yakos dispatch`) ran both harnesses with approvals and sandbox
+  switched off, so any task text or file the model read could drive arbitrary
+  commands as the operator. codex now runs `exec --sandbox workspace-write -c
+  approval_policy="never"`, an OS sandbox with the network off by default whose
+  policy the model cannot change (`exec resume`, which has no `--sandbox`, takes
+  `-c sandbox_mode="workspace-write"`). agy still gets `--sandbox`, because it
+  blocks the default write path.
+  Under `--sandbox --dangerously-skip-permissions`, agy's macOS Seatbelt sandbox
+  blocks writes outside the workspace by default but leaves file reads and
+  outbound network unrestricted, and the model can escalate out of the sandbox
+  at will via `run_command(BypassSandbox=true)`, which
+  `--dangerously-skip-permissions` auto-approves; agy dispatch is therefore not
+  a containment boundary for reads, network or writes and must only receive
+  non-sensitive work or run inside an external OS sandbox (K-159).
+  The old bypass returns only when
+  `~/.yakos-state/router-policy.yml` lists the runtime in
+  `allow_unsandboxed_runtimes`. That file is read from `$HOME/.yakos-state` only
+  (not `YAKOS_DISPATCH_LOG`, K-129), must be a regular file you own that is not
+  group or world writable and not a symlink, and cannot be enabled from a
+  project `.yakos.yml`; an ignored file is explained on stderr and in `yakos
+  doctor`, and an active bypass prints one stderr line per process and a doctor
+  warning. Inside codex's sandbox writes outside the project fail, `.git` is
+  read-only (no `git commit`) and the network is off. See
+  `docs/runtime-matrix.md` and UPGRADING.md. The bash adapters used by the bash
+  `yakos dispatch` path are unchanged until K-143.
+- **yakOS-owned `CODEX_HOME` (K-133).** `yakos auth login codex` (Go and bash)
+  now signs codex in to `~/.yakos-state/codex-home` (0700) instead of the
+  operator's `~/.codex`. Once that profile holds a login, dispatch (Go and bash),
+  Go chat and the bash `yakos start` run codex under it (an inherited
+  `CODEX_HOME` is replaced, with a stderr note), so they never share one
+  `auth.json` with your own codex (openai/codex#48465). Go `yakos start` does
+  not use the profile yet: it launches the interactive codex with your own
+  `CODEX_HOME`. Until the command is run nothing changes. `yakos auth status`
+  says which login dispatch will use, `yakos auth logout codex` signs out of the
+  profile only, and yakOS never calls the codex app-server `account/login`
+  method.
 
 ## [0.61.0.0] — 2026-10-03
 

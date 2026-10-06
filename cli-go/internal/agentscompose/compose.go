@@ -15,11 +15,18 @@ package agentscompose
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/bakw00ds/yakos/internal/runtime"
 )
@@ -31,7 +38,7 @@ import (
 const genericAgentPrompt = "You are a helpful AI assistant. Answer the user's request clearly and concisely."
 
 // IsKnownRuntime reports whether name equals a known yakOS runtime identifier
-// (claude, codex, agy, gemini). Used by the dispatch layer to decide whether a
+// (claude, codex, agy). Used by the dispatch layer to decide whether a
 // missing agent name should resolve to a generic catch-all rather than error.
 func IsKnownRuntime(name string) bool {
 	for _, r := range runtime.Known {
@@ -47,10 +54,10 @@ func IsKnownRuntime(name string) bool {
 // requests a bare runtime name ("claude", "codex", etc.) that has no
 // corresponding agent .md file in the composed roster.
 //
-// The returned agent's ID equals name.  ComposedAgent has no Runtime field;
-// the runtime is inferred from the agent ID by the dispatch layer (dispatch.go
-// step 5: IsKnownRuntime check).  Model is left empty so the runtime picks its
-// default.
+// The returned agent's ID equals name.  Its Runtime is left empty on purpose:
+// the dispatch layer infers the runtime from the agent ID (an agent named
+// after a runtime runs on it unless the caller overrides), see
+// dispatch.resolve.go.  Model is left empty so the runtime picks its default.
 //
 // Callers must verify IsKnownRuntime(name) before calling this function; it
 // panics on an unknown name to surface programming errors early.
@@ -81,9 +88,50 @@ type ComposedAgent struct {
 	// Empty slice means no tool restriction.
 	Tools []string
 
-	// Model is the resolved concrete tier name (haiku|sonnet|opus|fable) or "".
-	// Empty means the runtime picks its default.
+	// Model is the resolved concrete Claude tier name (haiku|sonnet|opus|fable)
+	// or "". Empty means the runtime picks its default. It is "" for a model
+	// that is not a Claude tier (gpt-5, gemini-3.5); ModelRaw carries that id.
+	// AgentToJSON reads only this field, which keeps the claude --agents
+	// payload byte-stable (rule:cache-stability).
 	Model string
+
+	// ---- Routing fields (K-132) ---------------------------------------------
+	//
+	// Read from frontmatter so the dispatch layer can route on them. None of
+	// them is part of the claude --agents JSON (AgentToJSON ignores them), so
+	// adding or changing one never changes a cached prefix.
+
+	// Runtime is the agent's pinned runtime (frontmatter `runtime:`), or "".
+	// Only the id shape is checked here; whether the runtime exists and is
+	// usable is the dispatch layer's call (yakos validate reports bad values).
+	Runtime string
+
+	// RuntimeFallback is the ordered frontmatter `runtime-fallback:` list. Order
+	// is meaningful: the first available entry wins.
+	RuntimeFallback []string
+
+	// Domain is the frontmatter `domain:` tag, used for .yakos.yml per-domain
+	// runtime rules.
+	Domain string
+
+	// ModelRaw is the frontmatter `model:` scalar as written (quotes and a
+	// trailing comment removed), before alias expansion and tier validation. It
+	// is how a non-Claude model id survives composition: `model: gpt-5` leaves
+	// Model empty and ModelRaw "gpt-5".
+	ModelRaw string
+
+	// ModelPolicy is the frontmatter `model-policy:` value, unresolved. Parsed
+	// for the router; dispatch does not apply it yet.
+	ModelPolicy string
+
+	// MaxCostPerTask (USD), MaxTokensPerTask and MaxDurationS are the
+	// frontmatter `max-cost-per-task:`, `max-tokens-per-task:` and
+	// `max-duration-s:` ceilings. 0 means unset (also for an unparsable,
+	// negative or non-finite value). Parsed for the router; dispatch does not
+	// enforce them yet.
+	MaxCostPerTask   float64
+	MaxTokensPerTask int
+	MaxDurationS     int
 }
 
 // Compose walks lib/agents/*.md and <project>/.claude/agents/*.md, parses
@@ -93,12 +141,39 @@ type ComposedAgent struct {
 //
 // Skips README.md and lead-template.md (template files not addressable as
 // subagent_type).
+//
+// An agent file with a line over maxLineBytes is skipped with one warning that
+// names the file and the line, as a runtime-named file is. One broken file, and
+// a cloned repository controls the project's, must not stop every other agent
+// from composing. A template with a line over the bound is different: an agent
+// cannot be composed without the template it extends, so that stays an error,
+// and it is the framework's own file, which a clone cannot change.
+//
+// `extends:` must be a bare agent id (BareAgentID), and the template is the
+// framework's lib/agents/<id>.md read like an agent file. A bad value, or a
+// template that may not be read, skips that agent with the same warning, naming
+// the file and the value. A template that does not exist means the agent's own
+// body alone.
+//
+// The project's .claude/agents is not read at all when it is a symlink, or sits
+// under a symlinked .claude (InspectProjectDir): the directory is skipped whole,
+// once, with a warning, wherever the link leads. The framework's own root and its
+// lib/agents may be links and are not checked.
+//
+// Files are read by readAgentFile (see agentfile.go): a symlink is followed only
+// to a regular file inside the framework's lib/agents or the project's
+// .claude/agents, anything that is not a regular file is skipped unopened, and a
+// file over MaxAgentFileBytes is skipped. Each is a skip with the same
+// once-per-file warning, and so is any failure to read a file in the project
+// directory. Only a failure to read a framework file is an error.
 func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 	fwDir := filepath.Join(yakosRoot, "lib", "agents")
 	projDir := ""
 	if project != "" {
 		candidate := filepath.Join(project, ".claude", "agents")
-		if stat, err := os.Stat(candidate); err == nil && stat.IsDir() {
+		if p := InspectProjectDir(project, candidate); p != DirOK {
+			warnSkippedDir("agent", candidate, p.Reason())
+		} else if stat, err := os.Stat(candidate); err == nil && stat.IsDir() {
 			projDir = candidate
 		}
 	}
@@ -107,7 +182,9 @@ func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 	index := make(map[string]ComposedAgent)
 	var order []string // tracks insertion order for stable output
 
-	addDir := func(dir string) error {
+	rules := agentRules(yakosRoot, project)
+
+	addDir := func(dir string, fromProject bool) error {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -127,8 +204,41 @@ func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 			id := strings.TrimSuffix(base, ".md")
 			path := filepath.Join(dir, base)
 
-			agent, err := parseAgent(yakosRoot, id, path)
-			if err != nil {
+			// An agent named after a runtime would shadow the generic agent of
+			// that name, which is what `yakos dispatch codex` and the console's
+			// default pane (agent claude, runtime auto) resolve to. A cloned
+			// project could use it to send those to another vendor with a
+			// frontmatter runtime: pin (sec-324 F4), so it is skipped.
+			if IsKnownRuntime(id) {
+				warnRuntimeNamedAgent(path, id)
+				continue
+			}
+
+			data, skip, readErr := readAgentFile(path, rules)
+			switch {
+			case skip != "":
+				warnSkippedAgentFile(path, skip)
+				continue
+			case readErr != nil && fromProject:
+				// A cloned repository controls this file, so a failure to read it
+				// must not take the whole roster down.
+				warnSkippedAgentFile(path, "cannot be read: "+readErr.Error())
+				continue
+			case readErr != nil:
+				return fmt.Errorf("agentscompose: parse %s: read: %w", path, readErr)
+			}
+
+			agent, err := parseAgentContent(yakosRoot, id, string(data), rules)
+			var tooLong *lineTooLongError
+			var skipped *skipAgentError
+			switch {
+			case errors.As(err, &tooLong):
+				warnSkippedAgentFile(path, tooLong.Error())
+				continue
+			case errors.As(err, &skipped):
+				warnSkippedAgentFile(path, skipped.reason)
+				continue
+			case err != nil:
 				return fmt.Errorf("agentscompose: parse %s: %w", path, err)
 			}
 			if _, exists := index[id]; !exists {
@@ -139,11 +249,11 @@ func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 		return nil
 	}
 
-	if err := addDir(fwDir); err != nil {
+	if err := addDir(fwDir, false); err != nil {
 		return nil, err
 	}
 	if projDir != "" {
-		if err := addDir(projDir); err != nil {
+		if err := addDir(projDir, true); err != nil {
 			return nil, err
 		}
 	}
@@ -155,27 +265,81 @@ func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 	return result, nil
 }
 
-// parseAgent reads, parses, and resolves a single agent .md file.
-func parseAgent(yakosRoot, id, path string) (ComposedAgent, error) {
-	data, err := os.ReadFile(path) //nolint:gosec
-	if err != nil {
-		return ComposedAgent{}, fmt.Errorf("read: %w", err)
-	}
-	content := string(data)
+// WarnWriter receives the notices Compose prints. Tests replace it.
+var WarnWriter io.Writer = os.Stderr
 
-	fm, body := splitFrontmatter(content)
+// warnedPaths remembers which skipped files were already reported, so a daemon
+// that composes the roster on every request says it once per file, not once per
+// request.
+var warnedPaths sync.Map
+
+func warnRuntimeNamedAgent(path, id string) {
+	warnSkippedAgentFile(path, fmt.Sprintf("%q is a runtime name and would shadow the runtime's own agent; rename it", id))
+}
+
+// warnSkippedAgentFile says once per file why Compose left an agent file out.
+func warnSkippedAgentFile(path, reason string) { warnSkippedFile("agent", path, reason) }
+
+// warnSkippedFile says once per file why Compose or ComposeSkills left a file
+// out. kind is "agent" or "skill".
+func warnSkippedFile(kind, path, reason string) {
+	if _, seen := warnedPaths.LoadOrStore(path, struct{}{}); seen {
+		return
+	}
+	fmt.Fprintf(WarnWriter, "yakos: WARN: ignoring %s file %s: %s\n", kind, path, reason)
+}
+
+// warnSkippedDir says once per directory why a project's agent or skill directory
+// was left out whole. kind is "agent" or "skill".
+func warnSkippedDir(kind, path, reason string) {
+	if _, seen := warnedPaths.LoadOrStore(path, struct{}{}); seen {
+		return
+	}
+	fmt.Fprintf(WarnWriter, "yakos: WARN: ignoring %s directory %s: %s\n", kind, path, reason)
+}
+
+// parseAgentContent parses and resolves the content of a single agent .md file.
+// The file is read by readAgentFile, which is where what may be read is decided.
+func parseAgentContent(yakosRoot, id, content string, rules fileRules) (ComposedAgent, error) {
+	fm, body, err := splitFrontmatter(content)
+	if err != nil {
+		return ComposedAgent{}, err
+	}
 	fields := parseFrontmatter(fm)
 
 	// Resolve extends: inheritance — prepend framework template body.
+	//
+	// The value is a bare agent id and nothing else, and the template is the
+	// framework's lib/agents/<id>.md read under the same rules as an agent file
+	// (see agentfile.go). Anything else skips this agent, with a warning, and
+	// never fails the roster: a cloned repository controls the value.
 	if extendsName := fields["extends"]; extendsName != "" {
+		if !BareAgentID(extendsName) {
+			return ComposedAgent{}, &skipAgentError{reason: fmt.Sprintf("extends value %s is not a bare agent id (%s)", DisplayValue(extendsName), BareIDRule)}
+		}
 		fwFile := filepath.Join(yakosRoot, "lib", "agents", extendsName+".md")
-		fwData, err := os.ReadFile(fwFile) //nolint:gosec
-		if err == nil {
-			_, fwBody := splitFrontmatter(string(fwData))
+		template, skip, readErr := readAgentFile(fwFile, rules)
+		switch {
+		case errors.Is(readErr, fs.ErrNotExist):
+			// If the framework file doesn't exist, use the project body alone
+			// (matches agents-compose.sh:yk_agents_resolve_extends behavior).
+		case skip != "":
+			return ComposedAgent{}, &skipAgentError{reason: fmt.Sprintf("extends %s: %s", DisplayValue(extendsName), skip)}
+		case readErr != nil:
+			return ComposedAgent{}, &skipAgentError{reason: fmt.Sprintf("extends %s: cannot be read: %v", DisplayValue(extendsName), readErr)}
+		default:
+			_, fwBody, splitErr := splitFrontmatter(string(template))
+			if splitErr != nil {
+				// A refusal, not a skip: this agent cannot be composed without its
+				// template, and composing it without would drop part of the persona.
+				// %v and not %w on purpose. A *lineTooLongError found by errors.As
+				// means "skip this one file" in addDir, and the file at fault here is
+				// the template, not the agent. The template is the framework's own,
+				// which a clone cannot change.
+				return ComposedAgent{}, fmt.Errorf("extends %s: %v", fwFile, splitErr)
+			}
 			body = fwBody + "\n\n---\n\n" + body
 		}
-		// If the framework file doesn't exist, use the project body alone
-		// (matches agents-compose.sh:yk_agents_resolve_extends behavior).
 	}
 
 	// Model alias expansion (PR #32/#39): translate semantic aliases to concrete tiers.
@@ -200,22 +364,135 @@ func parseAgent(yakosRoot, id, path string) (ComposedAgent, error) {
 		Prompt:      strings.TrimSpace(body),
 		Tools:       tools,
 		Model:       model,
+
+		// Routing fields (K-132). The model above is resolved from the raw
+		// frontmatter string exactly as before; ModelRaw is the same value
+		// with quotes and a trailing comment removed.
+		Runtime:          fmRuntimeID(fields["runtime"]),
+		RuntimeFallback:  fmRuntimeList(fields["runtime-fallback"]),
+		Domain:           fmScalar(fields["domain"]),
+		ModelRaw:         fmScalar(fields["model"]),
+		ModelPolicy:      fmScalar(fields["model-policy"]),
+		MaxCostPerTask:   fmFloat(fields["max-cost-per-task"]),
+		MaxTokensPerTask: fmInt(fields["max-tokens-per-task"]),
+		MaxDurationS:     fmInt(fields["max-duration-s"]),
 	}, nil
+}
+
+// runtimeIDRe is the shape of a runtime identifier taken from frontmatter. It
+// is deliberately the same alphabet as projectcfg's: the value reaches log
+// lines and error text, so nothing outside [a-z0-9._-] is kept.
+var runtimeIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
+
+// fmScalar returns a frontmatter scalar as YAML would read it for the simple
+// `key: value` lines parseFrontmatter produces: surrounding whitespace, one
+// pair of matching quotes and a trailing ` # comment` are removed.
+func fmScalar(raw string) string {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return ""
+	}
+	if q := v[0]; q == '"' || q == '\'' {
+		// Quoted: the value ends at the closing quote; anything after it
+		// (a comment) is dropped.
+		if end := strings.IndexByte(v[1:], q); end >= 0 {
+			return v[1 : 1+end]
+		}
+		return strings.TrimSpace(v[1:])
+	}
+	if i := strings.Index(v, " #"); i >= 0 {
+		v = v[:i]
+	} else if v[0] == '#' {
+		return ""
+	}
+	return strings.TrimSpace(v)
+}
+
+// fmRuntimeID returns raw as a runtime id, or "" when it is empty or not shaped
+// like one.
+func fmRuntimeID(raw string) string {
+	v := fmScalar(raw)
+	if !runtimeIDRe.MatchString(v) {
+		return ""
+	}
+	return v
+}
+
+// fmRuntimeList parses an inline `[a, b]` runtime list, keeping order, dropping
+// entries that are not runtime ids and repeated entries.
+func fmRuntimeList(raw string) []string {
+	items := parseToolsList(stripTrailingComment(raw))
+	if len(items) == 0 {
+		return nil
+	}
+	var out []string
+	seen := make(map[string]struct{}, len(items))
+	for _, it := range items {
+		id := fmRuntimeID(it)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}
+
+// stripTrailingComment removes a ` # comment` that follows an inline list.
+func stripTrailingComment(raw string) string {
+	v := strings.TrimSpace(raw)
+	if i := strings.LastIndex(v, "]"); i >= 0 {
+		return v[:i+1]
+	}
+	return v
+}
+
+// fmFloat parses a non-negative, finite frontmatter number; anything else is 0.
+func fmFloat(raw string) float64 {
+	f, err := strconv.ParseFloat(fmScalar(raw), 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < 0 {
+		return 0
+	}
+	return f
+}
+
+// fmInt parses a non-negative frontmatter integer; anything else is 0.
+func fmInt(raw string) int {
+	n, err := strconv.Atoi(fmScalar(raw))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 // splitFrontmatter splits a markdown file into (frontmatter, body).
 // frontmatter is the YAML between the opening and closing --- markers.
 // body is everything after the closing ---.
 // If there is no frontmatter, frontmatter is "" and body is the full content.
-func splitFrontmatter(content string) (frontmatter, body string) {
+//
+// The file is read line by line, and a line longer than maxLineBytes is an
+// error: bufio.Scanner's default 64 KiB limit used to stop the scan there
+// without a word, so the rest of the file, the agent's persona after that line
+// included, silently vanished from the prompt.
+func splitFrontmatter(content string) (frontmatter, body string, err error) {
 	scanner := bufio.NewScanner(strings.NewReader(content))
+	scanner.Buffer(make([]byte, 0, 4096), maxLineBytes)
 	var lines []string
 	for scanner.Scan() {
 		lines = append(lines, scanner.Text())
 	}
+	if scanErr := scanner.Err(); scanErr != nil {
+		if errors.Is(scanErr, bufio.ErrTooLong) {
+			return "", "", &lineTooLongError{Line: len(lines) + 1}
+		}
+		return "", "", scanErr
+	}
 
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != "---" {
-		return "", content
+		return "", content, nil
 	}
 
 	// Find the closing ---.
@@ -227,12 +504,28 @@ func splitFrontmatter(content string) (frontmatter, body string) {
 		}
 	}
 	if closeIdx < 0 {
-		return "", content
+		return "", content, nil
 	}
 
 	fm := strings.Join(lines[1:closeIdx], "\n")
 	bd := strings.Join(lines[closeIdx+1:], "\n")
-	return fm, bd
+	return fm, bd, nil
+}
+
+// maxLineBytes bounds one line of an agent or skill definition. A real file's
+// longest line is a few hundred bytes (the persona is capped at 64 KiB in total
+// on the chat paths), so 1 MiB is far beyond sane and still bounds what one
+// malformed line can make the roster reader hold.
+const maxLineBytes = 1 << 20
+
+// lineTooLongError reports a line over maxLineBytes and where it is. Compose
+// skips an agent whose own file returns it (see addDir) and refuses when the
+// file at fault is an extended template, which is why the type exists: the two
+// cases need telling apart.
+type lineTooLongError struct{ Line int }
+
+func (e *lineTooLongError) Error() string {
+	return fmt.Sprintf("line %d is longer than %d bytes; split it across lines", e.Line, maxLineBytes)
 }
 
 // parseFrontmatter parses simple key: value YAML lines from frontmatter.
@@ -334,15 +627,32 @@ type ComposedSkill struct {
 //
 // Returns an empty (non-nil) slice when either directory is absent — callers
 // should not treat a missing skills dir as an error.
+//
+// A SKILL.md is read like an agent file (readAgentFile, see agentfile.go), and
+// one that may not be read is skipped with the same once-per-file warning, so a
+// bad entry, and a cloned repository controls the project's, does not take the
+// whole listing with it. That covers a symlink that does not end at a regular
+// file inside the framework's lib/skills or the project's .claude/skills, an
+// entry that is not a regular file, a file over MaxAgentFileBytes, a line over the
+// bound, and a failure to read a file in the project directory. Only a failure to
+// read a framework file is an error. A skill directory without a SKILL.md is
+// skipped silently, as before. The project's .claude/skills is not read at all
+// when it is a symlink, or sits under a symlinked .claude: it is skipped whole,
+// once, with the same warning Compose gives for .claude/agents. The framework's
+// own root and its lib/skills may be links and are not checked.
 func ComposeSkills(yakosRoot, project string) ([]ComposedSkill, error) {
 	fwDir := filepath.Join(yakosRoot, "lib", "skills")
 	projDir := ""
 	if project != "" {
 		candidate := filepath.Join(project, ".claude", "skills")
-		if stat, err := os.Stat(candidate); err == nil && stat.IsDir() {
+		if p := InspectProjectDir(project, candidate); p != DirOK {
+			warnSkippedDir("skill", candidate, p.Reason())
+		} else if stat, err := os.Stat(candidate); err == nil && stat.IsDir() {
 			projDir = candidate
 		}
 	}
+
+	rules := skillRules(yakosRoot, project)
 
 	// index by slug; source tracks whether it came from framework or project.
 	type entry struct {
@@ -365,15 +675,29 @@ func ComposeSkills(yakosRoot, project string) ([]ComposedSkill, error) {
 			}
 			slug := e.Name()
 			skillPath := filepath.Join(dir, slug, "SKILL.md")
-			data, err := os.ReadFile(skillPath) //nolint:gosec
-			if err != nil {
-				if os.IsNotExist(err) {
-					continue // dir exists but no SKILL.md — skip silently
-				}
-				return fmt.Errorf("agentscompose: read %s: %w", skillPath, err)
+			data, skip, readErr := readAgentFile(skillPath, rules)
+			switch {
+			case errors.Is(readErr, fs.ErrNotExist):
+				continue // dir exists but no SKILL.md — skip silently
+			case skip != "":
+				warnSkippedFile("skill", skillPath, skip)
+				continue
+			case readErr != nil && source == "project":
+				warnSkippedFile("skill", skillPath, "cannot be read: "+readErr.Error())
+				continue
+			case readErr != nil:
+				return fmt.Errorf("agentscompose: read %s: %w", skillPath, readErr)
 			}
 
-			fm, _ := splitFrontmatter(string(data))
+			fm, _, splitErr := splitFrontmatter(string(data))
+			var tooLong *lineTooLongError
+			if errors.As(splitErr, &tooLong) {
+				warnSkippedFile("skill", skillPath, tooLong.Error())
+				continue
+			}
+			if splitErr != nil {
+				return fmt.Errorf("agentscompose: parse %s: %w", skillPath, splitErr)
+			}
 			fields := parseFrontmatter(fm)
 
 			name := fields["name"]

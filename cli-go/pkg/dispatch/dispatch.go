@@ -44,12 +44,16 @@ type Request struct {
 	// Required for agent roster composition (lib/agents/ lookup).
 	YakosRoot string
 
-	// Runtime is the runtime override ("claude", "codex", "gemini", "agy").
-	// Empty means resolve from agent frontmatter.
+	// Runtime is the runtime override ("claude", "codex", "agy"). Empty (or
+	// "auto") means resolve from the agent's frontmatter pin, then the
+	// project's .yakos.yml, then the operator's default.
 	Runtime string
 
-	// Model is the model tier override ("haiku", "sonnet", "opus").
-	// Empty means resolve from agent frontmatter.
+	// Model is the model override: a Claude tier ("haiku", "sonnet", "opus",
+	// "fable") or an alias ("cheap", "balanced", "best", "reasoning",
+	// "frontier") for claude; an alias or a model id for codex and agy. It is
+	// validated against the resolved runtime. Empty means resolve from agent
+	// frontmatter, then the runtime's default.
 	Model string
 
 	// Timeout is the dispatch timeout in seconds. 0 means 600s (10 minutes).

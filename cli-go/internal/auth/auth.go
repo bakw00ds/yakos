@@ -607,14 +607,22 @@ func readDefaultRuntime(cfg Config) string {
 }
 
 // writeDefaultRuntime writes the runtime name to ~/.yakos-state/default-runtime.
+//
+// The dispatcher honours the file only when no one else could have written it
+// (ReadDefaultRuntime), so it is created 0600 whatever the umask, and the chmod
+// repairs a file an older version or the bash writer left group-writable
+// (WriteFile keeps an existing file's mode).
 func writeDefaultRuntime(cfg Config, runtime string) error {
 	stateDir := filepath.Join(cfg.HomeDir, ".yakos-state")
 	if err := os.MkdirAll(stateDir, 0755); err != nil { //nolint:gosec
 		return fmt.Errorf("auth set-default: mkdir %s: %w", stateDir, err)
 	}
 	path := filepath.Join(stateDir, "default-runtime")
-	if err := os.WriteFile(path, []byte(runtime+"\n"), 0644); err != nil { //nolint:gosec
+	if err := os.WriteFile(path, []byte(runtime+"\n"), 0o600); err != nil {
 		return fmt.Errorf("auth set-default: write %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("auth set-default: chmod %s: %w", path, err)
 	}
 	return nil
 }

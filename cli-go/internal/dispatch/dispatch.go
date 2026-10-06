@@ -5,12 +5,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/agentscompose"
-	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/runtime"
 )
 
@@ -58,64 +56,37 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 		timeout = defaultTimeout
 	}
 
-	// --- 2. Model resolution (mirrors dispatch.sh model-resolution block) ---
-	// Precedence (highest to lowest):
-	//   1. --model flag (CLI override)        → model_chosen_by: "override"
-	//   2. --eval-run-id flag                 → model_chosen_by: "eval"
-	//   3. agent frontmatter model:           → model_chosen_by: "frontmatter"
-
-	modelChosenBy := "frontmatter"
-	modelResolved := "sonnet" // default when agent has no model: field
-
-	if req.EvalRunID != "" {
-		modelChosenBy = "eval"
-		// eval still uses frontmatter/default model unless --model is also given.
-	}
-
-	if req.Model != "" {
-		// CLI --model flag: validate (aliases resolved by CLI layer before calling Run).
-		if !runtime.ValidateTier(req.Model) {
-			return nil, Result{}, fmt.Errorf("dispatch: invalid model tier %q (must be haiku|sonnet|opus|fable)", req.Model)
-		}
-		modelResolved = req.Model
-		modelChosenBy = "override"
-	}
-
-	// --- 3. Compose agent roster ---
-	roster, err := agentscompose.Compose(req.YakosRoot, req.Project)
-	if err != nil {
-		return nil, Result{}, fmt.Errorf("dispatch: compose agents: %w", err)
-	}
-
-	// --- 4. Find target agent ---
-	// See resolve.go for resolution order (specialist → generic runtime → error).
-	targetAgent, err := resolveAgent(roster, req.AgentName, req.YakosRoot, req.Project)
+	// --- 2-5. Route: roster, agent, runtime, model (K-132) ---
+	// One shared step (resolve.go routeDispatch) that Run and RunStream both
+	// use. Runtime precedence: override > agent frontmatter runtime: >
+	// .yakos.yml per-domain > .yakos.yml default-runtime > YAKOS_RUNTIME (CLI
+	// only) > ~/.yakos-state/default-runtime > claude, then runtime-fallback and
+	// default-fallback filtered by an availability + sign-in probe. Model
+	// precedence (mirrors dispatch.sh): --model > --eval-run-id (label only) >
+	// agent frontmatter model: > the runtime's default; validated per runtime.
+	rr, err := routeDispatch(ctx, routeInput{
+		YakosRoot:            req.YakosRoot,
+		Project:              req.Project,
+		Agent:                req.AgentName,
+		RuntimeOverride:      req.Runtime,
+		RuntimeEnvDefault:    req.RuntimeEnvDefault,
+		RuntimeFallbackOptIn: req.RuntimeFallbackOptIn,
+		ModelOverride:        req.Model,
+		EvalRunID:            req.EvalRunID,
+	})
 	if err != nil {
 		return nil, Result{}, err
 	}
-
-	// Apply agent's model: frontmatter if no override was given.
-	if req.Model == "" && targetAgent.Model != "" {
-		modelResolved = targetAgent.Model
-	}
-
-	// A user-level max_model ceiling (K-119) lowers a dearer model, whether it
-	// came from a project's supervisor.model or the agent's frontmatter.
-	if clamped, note := budget.ClampModel(req.AgentName, modelResolved, budget.Options{}); note != "" {
-		modelResolved = clamped
-		fmt.Fprintf(os.Stderr, "yakos budget: %s\n", note)
-	}
-
-	// --- 5. Resolve runtime ---
-	// See resolve.go for precedence (override → known-runtime name → "claude").
-	runtimeName := resolveRuntime(req.AgentName, req.Runtime)
-	adapter, err := runtime.Resolve(runtimeName)
-	if err != nil {
-		return nil, Result{}, fmt.Errorf("dispatch: %w", err)
-	}
+	targetAgent := rr.Agent
+	adapter := rr.Adapter
+	runtimeName := rr.Runtime
+	modelChosenBy := rr.ModelChosenBy
+	modelResolved := rr.Model
 
 	// Store resolved values back into req for event building.
 	req.Runtime = runtimeName
+	req.RuntimeChosenBy = rr.RuntimeChosenBy
+	req.FallbackFrom = rr.FallbackFrom
 	req.ModelChosenBy = modelChosenBy
 	req.ModelResolved = modelResolved
 
@@ -184,15 +155,17 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	}
 
 	res := Result{
-		ExitCode:      exitCode,
-		DurationS:     durationS,
-		OutputBytes:   outputBytes,
-		TaskBytes:     taskBytes,
-		StderrTail:    stderrTail,
-		StderrTrunc:   stderrTrunc,
-		ModelChosenBy: modelChosenBy,
-		ModelResolved: modelResolved,
-		EvalRunID:     req.EvalRunID,
+		ExitCode:        exitCode,
+		DurationS:       durationS,
+		OutputBytes:     outputBytes,
+		TaskBytes:       taskBytes,
+		StderrTail:      stderrTail,
+		StderrTrunc:     stderrTrunc,
+		ModelChosenBy:   modelChosenBy,
+		ModelResolved:   modelResolved,
+		EvalRunID:       req.EvalRunID,
+		RuntimeChosenBy: req.RuntimeChosenBy,
+		FallbackFrom:    req.FallbackFrom,
 	}
 
 	// --- 9b. Normalize the runtime's stdout (K-135) ---

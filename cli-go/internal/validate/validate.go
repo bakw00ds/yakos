@@ -27,6 +27,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/decision"
 	"github.com/bakw00ds/yakos/internal/statepath"
 )
@@ -64,6 +65,11 @@ type Config struct {
 	Writer io.Writer
 	// ErrWriter is where error output is written.  Defaults to os.Stderr.
 	ErrWriter io.Writer
+
+	// skipAgentsDir and skipSkillsDir are set by validateTree, on its own copy,
+	// when the project's agent or skill directory is refused (see
+	// agentscompose.InspectProjectDir): no pass reads through it.
+	skipAgentsDir, skipSkillsDir bool
 }
 
 // RunFramework validates $YAKOS_ROOT/lib/ (framework mode).
@@ -179,12 +185,39 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 		return
 	}
 
+	// In project mode the agent and skill directories are checked themselves: one
+	// that is a symlink, or has a symlinked .claude above it, is skipped whole by
+	// the dispatcher, wherever it leads. It is reported here, once, and no pass
+	// below reads through it. The framework's own directories are never checked: a
+	// bare install may leave lib/agents, lib/skills or the root itself as links.
+	if filepath.Base(filepath.Clean(base)) == ".claude" {
+		project := filepath.Dir(filepath.Clean(base))
+		for _, kind := range []string{"agents", "skills"} {
+			dir := filepath.Join(base, kind)
+			p := agentscompose.InspectProjectDir(project, dir)
+			if p == agentscompose.DirOK {
+				continue
+			}
+			r.addErr(w, fmt.Sprintf("%s: %s; the Go dispatcher skips it", dir, p.Reason()))
+			if kind == "agents" {
+				cfg.skipAgentsDir = true
+			} else {
+				cfg.skipSkillsDir = true
+			}
+		}
+	}
+
+	// A symlinked agent file may resolve into lib/agents, and in project mode into
+	// the project's .claude/agents: Compose's roots. Every pass over agent files
+	// skips a link outside them, and checkAgentEnums reports it.
+	roots := agentRootsFor(cfg, base)
+
 	// ADR-0009 guards. Silent when clean so validate's output stays
 	// line-identical to the bash implementation on a healthy tree.
-	checkDecisionGuards(r, w, base)
+	checkDecisionGuards(cfg, r, w, base, roots)
 
-	nAgents := countDirFiles(filepath.Join(base, "agents"), "*.md")
-	nSkills := countDirFiles(filepath.Join(base, "skills"), "SKILL.md")
+	nAgents := countDirFiles(agentsDirOf(cfg, base), "*.md")
+	nSkills := countDirFiles(skillsDirOf(cfg, base), "SKILL.md")
 	nRules := countDirFiles(filepath.Join(base, "rules"), "*.md")
 	r.addInfo(w, fmt.Sprintf("agents: %d | skills: %d | rules: %d", nAgents, nSkills, nRules))
 
@@ -194,7 +227,7 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 	}
 
 	// Validate frontmatter for agents, skills, and rules (excluding README/INDEX).
-	files := collectMDFiles(base)
+	files := collectMDFiles(cfg, base, roots)
 	for _, f := range files {
 		if _, err := parseFrontmatter(f); err != nil {
 			r.addErr(w, fmt.Sprintf("%s: bad YAML frontmatter", f))
@@ -222,8 +255,9 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 		}
 	}
 
-	// Agent frontmatter enums: runtime / runtime-fallback / model-policy.
-	checkAgentEnums(cfg, r, w, base)
+	// Agent frontmatter enums: runtime / runtime-fallback / model-policy, and the
+	// agent files the Go dispatcher would skip.
+	checkAgentEnums(cfg, r, w, base, roots)
 
 	// Line budget warnings
 	checkLineBudgets(cfg, r, w, base)
@@ -237,32 +271,33 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 
 // collectMDFiles returns agent .md, skills SKILL.md, and rules .md files under
 // base, excluding README.md and INDEX.md.  Files are sorted for stable output.
-func collectMDFiles(base string) []string {
+func collectMDFiles(cfg Config, base string, roots []string) []string {
 	var files []string
 
 	// agents/*.md (not README.md)
-	agentsDir := filepath.Join(base, "agents")
+	agentsDir := agentsDirOf(cfg, base)
 	if fi, err := os.Stat(agentsDir); err == nil && fi.IsDir() {
 		_ = filepath.WalkDir(agentsDir, func(p string, de fs.DirEntry, err error) error {
 			if err != nil || de.IsDir() {
 				return nil
 			}
 			name := de.Name()
-			if strings.HasSuffix(name, ".md") && name != "README.md" {
+			if strings.HasSuffix(name, ".md") && name != "README.md" && readableAgentEntry(p, roots) {
 				files = append(files, p)
 			}
 			return nil
 		})
 	}
 
-	// skills/*/SKILL.md
-	skillsDir := filepath.Join(base, "skills")
+	// skills/*/SKILL.md, leaving out a symlinked one that ComposeSkills refuses
+	skillsDir := skillsDirOf(cfg, base)
+	skillRoots := skillRootsFor(cfg, base)
 	if fi, err := os.Stat(skillsDir); err == nil && fi.IsDir() {
 		_ = filepath.WalkDir(skillsDir, func(p string, de fs.DirEntry, err error) error {
-			if err != nil || de.IsDir() {
+			if err != nil || de.IsDir() || isSpecialEntry(de) {
 				return nil
 			}
-			if de.Name() == "SKILL.md" {
+			if de.Name() == "SKILL.md" && !refusedLink(p, skillRoots) {
 				files = append(files, p)
 			}
 			return nil
@@ -273,7 +308,7 @@ func collectMDFiles(base string) []string {
 	rulesDir := filepath.Join(base, "rules")
 	if fi, err := os.Stat(rulesDir); err == nil && fi.IsDir() {
 		_ = filepath.WalkDir(rulesDir, func(p string, de fs.DirEntry, err error) error {
-			if err != nil || de.IsDir() {
+			if err != nil || de.IsDir() || isSpecialEntry(de) {
 				return nil
 			}
 			name := de.Name()
@@ -286,6 +321,15 @@ func collectMDFiles(base string) []string {
 
 	sort.Strings(files)
 	return files
+}
+
+// isSpecialEntry reports a directory entry that is a FIFO, a socket or a device.
+// The bash validator reads regular files only (find -type f), so the passes over
+// skills and rules leave these out as it does, instead of reporting the
+// frontmatter of a file they never read. (An agent file of that kind is
+// reported, once, by checkAgentEnums.)
+func isSpecialEntry(de fs.DirEntry) bool {
+	return de.Type()&(fs.ModeNamedPipe|fs.ModeSocket|fs.ModeDevice|fs.ModeCharDevice|fs.ModeIrregular) != 0
 }
 
 // countDirFiles counts files matching a glob pattern under dir, excluding
@@ -328,12 +372,13 @@ func isValidJSON(path string) bool {
 // ---- line budget checks -----------------------------------------------------
 
 func checkLineBudgets(cfg Config, r *Result, w io.Writer, base string) {
-	agentsDir := filepath.Join(base, "agents")
+	agentRoots := agentRootsFor(cfg, base)
+	agentsDir := agentsDirOf(cfg, base)
 	_ = filepath.WalkDir(agentsDir, func(p string, de fs.DirEntry, err error) error {
 		if err != nil || de.IsDir() {
 			return nil
 		}
-		if !strings.HasSuffix(de.Name(), ".md") || de.Name() == "README.md" {
+		if !strings.HasSuffix(de.Name(), ".md") || de.Name() == "README.md" || !readableAgentEntry(p, agentRoots) {
 			return nil
 		}
 		n := countLines(p)
@@ -343,12 +388,13 @@ func checkLineBudgets(cfg Config, r *Result, w io.Writer, base string) {
 		return nil
 	})
 
-	skillsDir := filepath.Join(base, "skills")
+	skillsDir := skillsDirOf(cfg, base)
+	skillRoots := skillRootsFor(cfg, base)
 	_ = filepath.WalkDir(skillsDir, func(p string, de fs.DirEntry, err error) error {
-		if err != nil || de.IsDir() {
+		if err != nil || de.IsDir() || isSpecialEntry(de) {
 			return nil
 		}
-		if de.Name() != "SKILL.md" {
+		if de.Name() != "SKILL.md" || refusedLink(p, skillRoots) {
 			return nil
 		}
 		n := countLines(p)
@@ -360,7 +406,7 @@ func checkLineBudgets(cfg Config, r *Result, w io.Writer, base string) {
 
 	rulesDir := filepath.Join(base, "rules")
 	_ = filepath.WalkDir(rulesDir, func(p string, de fs.DirEntry, err error) error {
-		if err != nil || de.IsDir() {
+		if err != nil || de.IsDir() || isSpecialEntry(de) {
 			return nil
 		}
 		name := de.Name()
@@ -376,6 +422,9 @@ func checkLineBudgets(cfg Config, r *Result, w io.Writer, base string) {
 }
 
 func countLines(path string) int {
+	if !readableAgentFile(path) {
+		return 0
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return 0
@@ -393,17 +442,30 @@ func checkPlaybookReferences(cfg Config, r *Result, w io.Writer, base string) {
 
 	// Collect all referenced playbook names across agents, rules, skills.
 	refSet := map[string]struct{}{}
+	agentsDir := agentsDirOf(cfg, base)
+	skillsDir := skillsDirOf(cfg, base)
 	roots := []string{
-		filepath.Join(base, "agents"),
+		agentsDir,
 		filepath.Join(base, "rules"),
-		filepath.Join(base, "skills"),
+		skillsDir,
 	}
+	agentRoots := agentRootsFor(cfg, base)
+	skillRoots := skillRootsFor(cfg, base)
 	for _, root := range roots {
+		isAgents := root == agentsDir
+		isSkills := root == skillsDir
 		_ = filepath.WalkDir(root, func(p string, de fs.DirEntry, err error) error {
 			if err != nil || de.IsDir() {
 				return nil
 			}
-			if !strings.HasSuffix(de.Name(), ".md") {
+			readable := readableAgentFile(p)
+			if isAgents {
+				readable = readableAgentEntry(p, agentRoots)
+			}
+			if isSkills && refusedLink(p, skillRoots) {
+				readable = false
+			}
+			if !strings.HasSuffix(de.Name(), ".md") || !readable {
 				return nil
 			}
 			data, readErr := os.ReadFile(p)
@@ -771,6 +833,7 @@ func checkSkillMDSections(cfg Config, r *Result, w io.Writer) {
 // checkAgentMDSections warns on agent .md files missing required sections.
 func checkAgentMDSections(cfg Config, r *Result, w io.Writer) {
 	required := []string{"Purpose", "Execution", "Special rules", "Handling peer messages", "Personality"}
+	agentRoots := agentscompose.AgentFileRoots(cfg.YakosRoot, "")
 	agentsDir := filepath.Join(cfg.YakosRoot, "lib", "agents")
 	_ = filepath.WalkDir(agentsDir, func(p string, de fs.DirEntry, err error) error {
 		if err != nil || de.IsDir() {
@@ -781,7 +844,7 @@ func checkAgentMDSections(cfg Config, r *Result, w io.Writer) {
 			return nil
 		}
 		// Skip lead-template until Batch 3 ships content.
-		if name == "lead-template.md" {
+		if name == "lead-template.md" || !readableAgentEntry(p, agentRoots) {
 			return nil
 		}
 		data, readErr := os.ReadFile(p)
@@ -889,10 +952,11 @@ func validateEvalCaseFile(path string) error {
 // checkEvalDirs validates golden-case eval directories for each agent .md.
 // Mirrors check_eval_dirs in validate.sh.
 func checkEvalDirs(cfg Config, r *Result, w io.Writer, root string) {
-	agentsDir := filepath.Join(root, "agents")
+	agentsDir := agentsDirOf(cfg, root)
 	if _, err := os.Stat(agentsDir); os.IsNotExist(err) {
 		return
 	}
+	roots := agentRootsFor(cfg, root)
 
 	// Walk only maxdepth 1 (direct children of agents/).
 	entries, err := os.ReadDir(agentsDir)
@@ -909,6 +973,11 @@ func checkEvalDirs(cfg Config, r *Result, w io.Writer, root string) {
 		name := e.Name()
 		switch name {
 		case "README.md", "INDEX.md", "lead-template.md":
+			continue
+		}
+		// A link the dispatcher refuses is not read: its model-policy would be
+		// printed below. checkAgentEnums reports it, once.
+		if !readableAgentEntry(agentFile, roots) {
 			continue
 		}
 
@@ -986,14 +1055,14 @@ func min(a, b int) int {
 // lib/decisions/*.yaml. Jev is a decision provider, not a runtime: no agent
 // may name it as one, and no agent that can write may reference a provider.
 // It reports errors only; a clean tree adds no output lines.
-func checkDecisionGuards(r *Result, w io.Writer, base string) {
-	agentsDir := filepath.Join(base, "agents")
+func checkDecisionGuards(cfg Config, r *Result, w io.Writer, base string, roots []string) {
+	agentsDir := agentsDirOf(cfg, base)
 	var agentFiles []string
 	_ = filepath.WalkDir(agentsDir, func(p string, de fs.DirEntry, err error) error {
 		if err != nil || de.IsDir() {
 			return nil
 		}
-		if strings.HasSuffix(de.Name(), ".md") && de.Name() != "README.md" {
+		if strings.HasSuffix(de.Name(), ".md") && de.Name() != "README.md" && readableAgentEntry(p, roots) {
 			agentFiles = append(agentFiles, p)
 		}
 		return nil
@@ -1068,8 +1137,8 @@ func runtimeKnown(id string) bool {
 // runtime silently fell through to the resolver default, and a non-tier
 // model-policy made `yakos dispatch` die with "invalid model tier".
 // Mirrors check_agent_enums in cli/lib/validate.sh.
-func checkAgentEnums(cfg Config, r *Result, w io.Writer, base string) {
-	agentsDir := filepath.Join(base, "agents")
+func checkAgentEnums(cfg Config, r *Result, w io.Writer, base string, roots []string) {
+	agentsDir := agentsDirOf(cfg, base)
 	entries, err := os.ReadDir(agentsDir)
 	if err != nil {
 		return
@@ -1085,6 +1154,17 @@ func checkAgentEnums(cfg Config, r *Result, w io.Writer, base string) {
 			continue
 		}
 		file := filepath.Join(agentsDir, name)
+		// An agent named after a runtime would shadow `yakos dispatch <runtime>`
+		// and the console's default pane. The dispatcher skips it (K-132).
+		if id := strings.TrimSuffix(name, ".md"); inSet(id, []string{"claude", "codex", "agy"}) {
+			r.addErr(w, fmt.Sprintf("%s: agent id %q is a runtime name and is skipped by the Go dispatcher; rename it", file, id))
+		}
+		// A file the dispatcher would skip is an error, and nothing else is read
+		// from it: its frontmatter says nothing about what runs.
+		if msg := agentFileFinding(file, roots); msg != "" {
+			r.addErr(w, fmt.Sprintf("%s: %s", file, msg))
+			continue
+		}
 		fm, err := parseFrontmatter(file)
 		if err != nil || fm == nil {
 			continue // reported by the frontmatter pass
@@ -1092,7 +1172,7 @@ func checkAgentEnums(cfg Config, r *Result, w io.Writer, base string) {
 		checkRuntimeValue := func(key, v string) {
 			switch {
 			case v == "gemini":
-				r.addWarn(cfg, w, fmt.Sprintf("%s: %s: gemini is a deprecated shim for agy; use agy", file, key))
+				r.addWarn(cfg, w, fmt.Sprintf("%s: %s: gemini was removed; use agy", file, key))
 			case !runtimeKnown(v):
 				r.addErr(w, fmt.Sprintf("%s: %s: %q is not a known runtime (known: %s)", file, key, v, strings.Join(knownRuntimes, ", ")))
 			}

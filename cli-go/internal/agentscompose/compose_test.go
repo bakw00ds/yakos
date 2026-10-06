@@ -11,7 +11,10 @@ import (
 
 func TestSplitFrontmatter_WithFrontmatter(t *testing.T) {
 	content := "---\nid: backend\nmodel: sonnet\n---\n\nBody text here.\n"
-	fm, body := splitFrontmatter(content)
+	fm, body, err := splitFrontmatter(content)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !strings.Contains(fm, "model: sonnet") {
 		t.Errorf("frontmatter should contain 'model: sonnet', got %q", fm)
 	}
@@ -22,7 +25,10 @@ func TestSplitFrontmatter_WithFrontmatter(t *testing.T) {
 
 func TestSplitFrontmatter_NoFrontmatter(t *testing.T) {
 	content := "Just prose\nno frontmatter"
-	fm, body := splitFrontmatter(content)
+	fm, body, err := splitFrontmatter(content)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if fm != "" {
 		t.Errorf("expected empty frontmatter, got %q", fm)
 	}
@@ -32,7 +38,10 @@ func TestSplitFrontmatter_NoFrontmatter(t *testing.T) {
 }
 
 func TestSplitFrontmatter_EmptyFile(t *testing.T) {
-	fm, body := splitFrontmatter("")
+	fm, body, err := splitFrontmatter("")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if fm != "" || body != "" {
 		t.Errorf("empty file: expected empty fm and body, got fm=%q body=%q", fm, body)
 	}
@@ -402,10 +411,18 @@ func TestAgentToJSON_NoTools(t *testing.T) {
 // ---- IsKnownRuntime + GenericAgentForRuntime ---------------------------------
 
 func TestIsKnownRuntime_KnownNames(t *testing.T) {
-	for _, name := range []string{"claude", "codex", "agy", "gemini"} {
+	for _, name := range []string{"claude", "codex", "agy"} {
 		if !IsKnownRuntime(name) {
 			t.Errorf("IsKnownRuntime(%q) = false, want true", name)
 		}
+	}
+}
+
+// gemini was retired from the runtime registry (K-132); a bare "gemini" agent
+// name is no longer a catch-all.
+func TestIsKnownRuntime_GeminiRetired(t *testing.T) {
+	if IsKnownRuntime("gemini") {
+		t.Error("IsKnownRuntime(\"gemini\") = true, want false: the shim is retired")
 	}
 }
 
@@ -422,7 +439,7 @@ func TestIsKnownRuntime_UnknownName(t *testing.T) {
 }
 
 func TestGenericAgentForRuntime_Fields(t *testing.T) {
-	for _, name := range []string{"claude", "codex", "agy", "gemini"} {
+	for _, name := range []string{"claude", "codex", "agy"} {
 		agent := GenericAgentForRuntime(name)
 		if agent.ID != name {
 			t.Errorf("GenericAgentForRuntime(%q).ID = %q, want %q", name, agent.ID, name)

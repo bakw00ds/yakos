@@ -6,6 +6,97 @@ current release, what survives, and how to fully uninstall when needed.
 This doc is the **upgrade authority** — `yakos --help`, README, and
 CHANGELOG point here. Last updated for v0.39.
 
+## Upgrading to the next release (unreleased)
+
+Changes since v0.61.0.0 that may need action. The first two are behavior
+changes.
+
+### 1. Agents with `runtime:` now run on that runtime
+
+`general-codex`, `general-agy` and any project agent with `runtime:` set
+now run on the runtime they declare instead of claude. Before, the Go
+dispatcher (the daemon, MCP, console chat, Flows and the `YAKOS_IMPL=go`
+CLI) ignored `runtime:` and ran everything on claude (K-127). The full
+resolution order is in
+[docs/runtime-matrix.md](docs/runtime-matrix.md#go-dispatch-now-honors-runtime).
+
+To keep the old behavior:
+
+```sh
+# one call
+yakos dispatch general-codex "<task>" --runtime claude
+```
+
+- In the console, set the Chat pane runtime to `claude`. New panes default to
+  `auto`, which follows the agent's pin.
+- To keep it permanently, remove the `runtime:` line from the agent's
+  frontmatter.
+
+### 2. A runtime that is not signed in now fails fast
+
+If codex or agy is not installed or not signed in, dispatch now fails fast
+(or falls back per the agent's `runtime-fallback`, then the project's
+`default-fallback`) instead of running on claude. The error names each
+runtime it skipped and why:
+
+```text
+agy: not signed in; run: yakos auth login agy
+```
+
+To have a pinned agent fall back to claude instead of failing, add this to
+its frontmatter:
+
+```yaml
+runtime: codex
+runtime-fallback: [claude]
+```
+
+**A runtime you name yourself never falls back.** `--runtime codex`, a
+console pane set to codex, the `runtime` parameter of an MCP, JSON-RPC or
+REST call, and `yakos dispatch codex "..."` all mean "send this to codex".
+If codex cannot run, dispatch fails with the reason and the fallbacks it did
+not use, even when the agent or `.yakos.yml` lists some, because answering
+from another vendor is not what you asked for:
+
+```text
+dispatch: runtime codex was requested explicitly but cannot run: not signed in; run: yakos auth login codex. Not falling back to claude: an explicit runtime does not use the agent's or the project's fallback list
+dispatch: to allow a fallback for this run, pass --runtime-fallback claude
+```
+
+On the CLI, `--runtime codex --runtime-fallback claude` opts in. (The bash
+`yakos dispatch` still falls back for `--runtime`; this is a deliberate
+difference.) Pins and `.yakos.yml` defaults keep falling back as above.
+
+### 3. Pins the Go dispatcher skips
+
+Agents that pin `runtime: claude-sdk`, `antigravity-sdk` or a plugin id are
+skipped by the Go dispatcher, because those runtimes only exist in the bash
+path. Give such an agent a `runtime-fallback`, or use `YAKOS_IMPL=bash`.
+
+### 4. `gemini` is gone from the Go side
+
+`gemini` is no longer a runtime in the Go runtime registry, the console
+runtime selector or `yakos start`'s known runtimes.
+Change `runtime: gemini` pins to `runtime: agy`. `yakos validate` still
+accepts `runtime: gemini` in agent frontmatter, as a warning, for one more
+release. A dispatch to gemini, or to an agent still pinned to it, fails with
+`gemini was removed; use agy`.
+
+### 5. Agent files named after a runtime are skipped
+
+An agent whose file is named `claude.md`, `codex.md` or `agy.md` would shadow
+the runtime's own agent (what `yakos dispatch codex "..."` and the console's
+default pane resolve to), so a cloned repository could use one to send them to
+another vendor. The Go dispatcher now skips such a file with a warning, and
+`yakos validate` reports it as an error. Rename the file.
+
+### 6. The default runtime file must be yours
+
+`~/.yakos-state/default-runtime` (written by `yakos auth set-default`) is used
+only when it is a regular file owned by you that no one else can write, in a
+directory with the same properties, not a symlink. A file that fails this is
+ignored with a one-line notice. A file `yakos auth set-default` wrote passes.
+
 ## Unreleased: codex runs in an OS sandbox, agy gets `--sandbox` but is not contained (K-133)
 
 The Go dispatcher (the console, MCP, Flows, JSON-RPC, and `yakos dispatch` with

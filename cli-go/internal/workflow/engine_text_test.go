@@ -307,12 +307,12 @@ func TestEngine_EndToEndRealDispatchSplicesText(t *testing.T) {
 	}
 }
 
-// Until per-runtime model resolution (K-132) moves into dispatch, which only
-// accepts the four Claude tiers, the engine resolves a node's alias to its tier
-// before dispatch. This pins that contract so a workflow with `model: balanced`
-// keeps working on main; K-132 flips it when it starts passing the model through
-// verbatim.
-func TestEngine_ResolvesNodeModelAliasBeforeDispatch(t *testing.T) {
+// The engine hands a node's model to dispatch exactly as written. An alias
+// (balanced) means a different model on each runtime, and the runtime is only
+// settled inside dispatch (the agent's pin, the project config, fallbacks), so
+// dispatch resolves it against the runtime that actually runs. Resolving it here
+// to a Claude tier would hand "sonnet" to a codex node (K-132).
+func TestEngine_LeavesNodeModelAliasesForDispatchToResolve(t *testing.T) {
 	t.Parallel()
 	var mu sync.Mutex
 	got := map[string]string{}
@@ -334,7 +334,7 @@ func TestEngine_ResolvesNodeModelAliasBeforeDispatch(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	for agent, want := range map[string]string{"agent-a": "sonnet", "agent-b": "opus", "agent-c": "sonnet", "agent-d": ""} {
+	for agent, want := range map[string]string{"agent-a": "balanced", "agent-b": "best", "agent-c": "sonnet", "agent-d": ""} {
 		if got[agent] != want {
 			t.Errorf("%s was dispatched with model %q, want %q", agent, got[agent], want)
 		}
