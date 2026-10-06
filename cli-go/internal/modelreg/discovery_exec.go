@@ -91,11 +91,16 @@ func execRunner(ctx context.Context, spec RunSpec) (RunResult, error) {
 		return RunResult{}, err
 	}
 	res := RunResult{Stdout: out.bytes(), Stderr: errOut.bytes()}
-	if runErr == nil || errors.Is(runErr, exec.ErrWaitDelay) {
-		// ErrWaitDelay: the process itself exited with success but something it
-		// started still held the pipes. What the process wrote has been read (the
-		// copy ran for the whole delay); the straggler's later output is parsed as
-		// defensively as everything else.
+	if runErr == nil {
+		return res, nil
+	}
+	if errors.Is(runErr, exec.ErrWaitDelay) {
+		// The process itself exited with success but something it started still held
+		// the pipes for the whole wait delay. What the process wrote has been read;
+		// the straggler's later output is parsed as defensively as everything else.
+		// The straggler itself is a leftover of this probe: it is killed with the
+		// process group, as a cancel kills it, instead of being left under init.
+		killProcessGroup(cmd)
 		return res, nil
 	}
 	var exitErr *exec.ExitError

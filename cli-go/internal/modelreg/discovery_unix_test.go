@@ -588,3 +588,33 @@ func TestIsolateProcessCancelBeforeStartIsHarmless(t *testing.T) {
 		t.Errorf("Cancel before Start = %v, want nil", err)
 	}
 }
+
+// A fake agy that prints a valid listing, starts a helper that keeps the output
+// pipes open, and exits 0: the probe takes the listing once the wait delay is up,
+// and the helper does not outlive it. Before, the group was killed only on a
+// cancel, so this helper was reparented to init and ran on (K-161). The helper
+// ignores SIGTERM (the ignore is inherited), so the group must be killed, not
+// asked to stop.
+func TestDiscoveryExec_AHelperHoldingThePipesAfterAnExitIsKilledWithTheGroup(t *testing.T) {
+	old := waitDelay
+	waitDelay = 300 * time.Millisecond
+	t.Cleanup(func() { waitDelay = old })
+	pidFile := filepath.Join(t.TempDir(), "pids")
+	killAtCleanup(t, pidFile)
+	script := discScript(t, "trap '' TERM\n/bin/sleep 3602 &\necho $! >> "+shq(pidFile)+"\nprintf 'model-a\\tA\\n'\nexit 0\n")
+	rig := newDiscRig(t, discReal(script, 30*time.Second))
+
+	start := time.Now()
+	rep, err := rig.d.Probe(context.Background(), "agy")
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("Probe took %v with a wait delay of 300ms", elapsed)
+	}
+	if err != nil || rep.Status != ProbeUpdated || !reflect.DeepEqual(discIDs(rep.Snapshot), []string{"model-a"}) {
+		t.Fatalf("got %q %q %v %q; the exited process's own listing must be used", rep.Status, rep.Reason, err, discIDs(rep.Snapshot))
+	}
+	for _, pid := range discReadPIDs(t, pidFile, 1) {
+		if !discProcessDead(pid) {
+			t.Errorf("the helper (pid %d) that held agy's pipes outlived the probe", pid)
+		}
+	}
+}

@@ -40,3 +40,19 @@ func isolateProcess(cmd *exec.Cmd) {
 		return err
 	}
 }
+
+// killProcessGroup kills what is left of the command's process group once the
+// command itself has exited: a helper that kept the command's output pipes open
+// (the probe waited the whole wait delay for it) is a leftover of the probe, and
+// would otherwise be reparented to init and run on. The group id is the command's
+// pid. The command was reaped at most the wait delay ago, and a pid is not reused
+// while any process of its group is alive; if the group is already empty the kill
+// finds nothing (ESRCH). The one way to reach an unrelated process is a wrap-around
+// of the whole pid space inside that window that hands the pid to a new group
+// leader, the exposure every job-control shell accepts.
+func killProcessGroup(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+}
