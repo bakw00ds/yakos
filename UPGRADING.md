@@ -28,9 +28,9 @@ Rolling back a binary install to v0.61.0.0:
   runs, so its dollar budgets read those runs as free (item 7). The refreshed
   supervisor hook then gates on dollars only.
 
-Changes since v0.61.0.0 that may need action. Items 1 and 2, item 7 (dollar
-budgets and subscription runs), and the two sections after item 8 (the codex and
-agy sandbox, the SDK sidecar API key) are behavior changes.
+Changes since v0.61.0.0 that may need action. Items 1 to 7 and the two sections
+after item 8 (the codex and agy sandbox, the SDK sidecar API key) are behavior
+changes; item 8 needs no action.
 
 ### 1. Agents with `runtime:` now run on that runtime
 
