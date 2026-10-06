@@ -237,6 +237,7 @@ func runDispatch(yakosRoot string, args []string) {
 		Timeout:              timeoutSecs,
 		YakosRoot:            yakosRoot,
 		ConversationID:       cliConvID,
+		Surface:              dispatch.SurfaceCLI,
 	}
 
 	stdout, res, err := dispatch.Run(context.Background(), req)

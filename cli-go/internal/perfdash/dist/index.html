@@ -31,15 +31,24 @@
   </div>
 
   <section id="dashboard" class="hidden">
-    <!-- Summary cards -->
+    <!-- Summary cards. Tokens lead. The cost card is shown only while the
+         window has API-billed spend: subscription and local runs report tokens
+         and no dollars. -->
     <div class="cards">
+      <div class="card">
+        <div class="card-label">Total Tokens</div>
+        <div class="card-value" id="card-tokens">—</div>
+        <div class="card-sub" id="card-tokens-detail" title="Per-kind split as logged; only the total is comparable across runtimes"></div>
+        <div class="card-sub hidden" id="card-apieq" title="What subscription runs would have cost at API rates; informational, not spend"></div>
+      </div>
       <div class="card">
         <div class="card-label">Total Dispatches</div>
         <div class="card-value" id="card-dispatches">—</div>
       </div>
-      <div class="card">
+      <div class="card hidden" id="card-cost-wrap">
         <div class="card-label">Total Cost (USD)</div>
         <div class="card-value" id="card-cost">—</div>
+        <div class="card-sub">API-billed runs only</div>
       </div>
       <div class="card">
         <div class="card-label">Avg Latency</div>
@@ -56,8 +65,9 @@
       <div class="chart-controls">
         <span class="chart-title">Timeseries</span>
         <select id="metric-select">
+          <option value="tokens" selected>Tokens</option>
           <option value="dispatches">Dispatches</option>
-          <option value="cost">Cost (USD)</option>
+          <option value="cost" id="metric-opt-cost" hidden disabled>Cost (USD)</option>
           <option value="latency">Latency (ms)</option>
         </select>
         <select id="bucket-select">
@@ -82,11 +92,11 @@
         </select>
       </div>
       <table id="breakdown-table" class="data-table">
-        <thead>
+        <thead id="breakdown-head">
           <tr>
             <th>Key</th>
             <th>Dispatches</th>
-            <th>Cost (USD)</th>
+            <th>Tokens</th>
             <th>Avg Latency</th>
             <th>p95 Latency</th>
           </tr>
@@ -100,14 +110,14 @@
       <div class="top-block">
         <h3>Top Agents</h3>
         <table class="data-table">
-          <thead><tr><th>Agent</th><th>Dispatches</th><th>Cost (USD)</th></tr></thead>
+          <thead id="top-agents-head"><tr><th>Agent</th><th>Dispatches</th><th>Tokens</th></tr></thead>
           <tbody id="top-agents-body"></tbody>
         </table>
       </div>
       <div class="top-block">
         <h3>Top Runtimes</h3>
         <table class="data-table">
-          <thead><tr><th>Runtime</th><th>Dispatches</th><th>Cost (USD)</th></tr></thead>
+          <thead id="top-runtimes-head"><tr><th>Runtime</th><th>Dispatches</th><th>Tokens</th></tr></thead>
           <tbody id="top-runtimes-body"></tbody>
         </table>
       </div>
@@ -117,7 +127,7 @@
     <div class="recent-section">
       <h3>Recent Dispatches</h3>
       <table id="recent-table" class="data-table">
-        <thead>
+        <thead id="recent-head">
           <tr>
             <th>Time</th>
             <th>Agent</th>
@@ -125,7 +135,8 @@
             <th>Project</th>
             <th>Exit</th>
             <th>Duration</th>
-            <th>Cost (USD)</th>
+            <th>Tokens</th>
+            <th>Billing</th>
           </tr>
         </thead>
         <tbody id="recent-body"></tbody>

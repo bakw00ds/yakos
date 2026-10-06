@@ -7,9 +7,12 @@ package dispatch
 // the legacy rows are what the bash dispatcher wrote. Everything happens in a
 // temporary directory (isolatedLogDir); no operator state is touched.
 //
-// It pins what the readers do today and the one fact they cannot know from the
-// keys: for codex the two writers put different numbers under the same
-// input_tokens key (see cost.Usage). No reader changes with this test.
+// It pins what the readers do and the one fact they cannot know from the keys:
+// for codex the two writers put different numbers under the same input_tokens
+// key (see cost.Usage). K-136 did not change the bash writer; it made every
+// reader total tokens as input + output + cache_read + cache_creation, on which
+// the two conventions agree (asserted below), and moved a subscription run's
+// dollar figure out of usage.total_cost_usd (see applyLedger).
 
 import (
 	"context"
@@ -116,10 +119,28 @@ func TestDispatchLog_MixedLegacyAndNewRecordsAreReadTogether(t *testing.T) {
 		t.Errorf("a stream-json agy run writes its usage: %+v", newAgyStream.Usage)
 	}
 
-	// claude: both writers agree on every key.
+	// claude: both writers agree on every token key. They differ on dollars only
+	// by design: the bash row (no billing field) keeps the figure as spend, while
+	// the Go row, written with no API key in the environment, is a subscription
+	// row and holds it as api_equivalent_usd with usage.total_cost_usd 0.
 	oldClaude, newClaude := byAgent["legacy-claude"][0].Usage, newRows["claude"].Usage
-	if oldClaude == nil || newClaude == nil || *oldClaude != *newClaude {
-		t.Errorf("claude rows disagree: bash %+v, go %+v", oldClaude, newClaude)
+	if oldClaude == nil || newClaude == nil {
+		t.Fatalf("claude rows lack usage: bash %+v, go %+v", oldClaude, newClaude)
+	}
+	if o, n := *oldClaude, *newClaude; o.TotalCostUSD != 0.0123 || n.TotalCostUSD != 0 {
+		t.Errorf("claude spend figures: bash %v, go %v; want 0.0123 and 0", o.TotalCostUSD, n.TotalCostUSD)
+	} else {
+		o.TotalCostUSD, n.TotalCostUSD = 0, 0
+		if o != n {
+			t.Errorf("claude token keys disagree: bash %+v, go %+v", o, n)
+		}
+	}
+	if ev := newRows["claude"]; ev.Billing != cost.BillingSubscription || ev.APIEquivalentUSD != 0.0123 || ev.SpendUSD() != 0 {
+		t.Errorf("go claude row billing=%q api_equivalent=%v spend=%v; want a subscription row with a 0.0123 API-equivalent and no spend",
+			ev.Billing, ev.APIEquivalentUSD, ev.SpendUSD())
+	}
+	if ev := byAgent["legacy-claude"][0]; ev.SpendUSD() != 0.0123 {
+		t.Errorf("a legacy row keeps counting as spend: %v", ev.SpendUSD())
 	}
 
 	// codex: the SAME recorded run (15131 input tokens of which 7424 cached) reads
@@ -136,10 +157,17 @@ func TestDispatchLog_MixedLegacyAndNewRecordsAreReadTogether(t *testing.T) {
 		t.Errorf("go codex row = %+v, want fresh 7707 and cache_read 7424", newCodex)
 	}
 	if oldCodex.InputTokens == newCodex.InputTokens {
-		t.Error("the writers' input_tokens for codex are expected to differ until K-136 aligns them")
+		t.Error("the writers' input_tokens for codex differ by convention (bash keeps cached tokens inside it)")
 	}
 	if whole := newCodex.InputTokens + newCodex.CacheRead + newCodex.CacheCreation; whole != oldCodex.InputTokens {
 		t.Errorf("whole prompt: go %d, bash %d", whole, oldCodex.InputTokens)
+	}
+	// What makes the split harmless to the readers that add all four counts (the
+	// budget aggregate and the cost views; the metrics collector and `work close`
+	// add input plus output only, and do see it): the two conventions agree on
+	// that sum for the SAME run.
+	if o, n := byAgent["legacy-codex"][0].Tokens(), newRows["codex"].Tokens(); o.Input+o.CacheRead+o.CacheCreation != n.Input+n.CacheRead+n.CacheCreation || o.Output != n.Output {
+		t.Errorf("codex token totals disagree: bash %+v, go %+v", o, n)
 	}
 
 	// The aggregating readers take the mixed log without error. cost.Aggregate
@@ -165,8 +193,9 @@ func TestDispatchLog_MixedLegacyAndNewRecordsAreReadTogether(t *testing.T) {
 	if summary.TotalDispatches != 7 {
 		t.Errorf("perfdash summary counts %d dispatches, want 7", summary.TotalDispatches)
 	}
-	// Both claude rows carry a real cost, so they are costed from it, not estimated.
-	if summary.TotalCostUSD < 0.0246 {
-		t.Errorf("perfdash total cost %.4f is below the two claude rows' own 0.0246", summary.TotalCostUSD)
+	// Dollars are spend only (K-136): the legacy claude row counts, the Go claude
+	// row was a subscription run and does not, and nothing is estimated.
+	if summary.TotalCostUSD != 0.0123 {
+		t.Errorf("perfdash total cost %.4f, want the legacy claude row's 0.0123 and nothing else", summary.TotalCostUSD)
 	}
 }

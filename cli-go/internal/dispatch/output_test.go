@@ -144,10 +144,19 @@ func TestRun_ClaudeStreamJSONBecomesTextUsageAndSession(t *testing.T) {
 	if res.OutputBytes != int64(len(stdout)) {
 		t.Errorf("OutputBytes = %d, want the raw length %d", res.OutputBytes, len(stdout))
 	}
-	// The dispatch_finished line now carries the usage the runtime reported.
+	// The dispatch_finished line carries the usage the runtime reported. With no
+	// API key in the environment the run is a subscription run (K-136), so the
+	// harness's dollar figure is kept as an API-equivalent and is NOT in the
+	// usage cost that readers sum as spend.
 	u, ok := finishedUsage(t, logDir)
-	if !ok || u["input_tokens"] != float64(120) || u["cache_read"] != float64(9000) || u["total_cost_usd"] != 0.0123 {
+	if !ok || u["input_tokens"] != float64(120) || u["cache_read"] != float64(9000) || u["total_cost_usd"] != float64(0) {
 		t.Errorf("dispatch_finished usage = %v (present=%v)", u, ok)
+	}
+	events := readDispatchLog(t, logDir)
+	fin := events[len(events)-1]
+	assertField(t, fin, "billing", "subscription")
+	if fin["api_equivalent_usd"] != 0.0123 {
+		t.Errorf("api_equivalent_usd = %v, want the harness's 0.0123", fin["api_equivalent_usd"])
 	}
 }
 

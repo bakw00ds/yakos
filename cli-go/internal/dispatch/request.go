@@ -128,4 +128,37 @@ type Request struct {
 	// without prior validation.
 	// Only the claude adapter uses this; other runtimes ignore it.
 	Effort string
+
+	// ---- Ledger fields (K-136) -------------------------------------------------
+	//
+	// These only feed the dispatch_finished event that Account writes. None of
+	// them changes what is dispatched, and none is a caller input that could
+	// steer accounting: billing is never taken from a request (Account derives it
+	// from the harness environment), so no transport can claim a cheaper class.
+
+	// Surface names the entry point that made this dispatch, one of the
+	// Surface* constants: cli, console-chat, mcp, jsonrpc, rest, grpc, flows. The
+	// transport stamps it (Params.Surface; the CLI sets it itself). Empty is
+	// allowed and is simply left out of the event.
+	Surface string
+
+	// RouteRule, RouteReason, RouteClass and PolicySHA are the router's record of
+	// why this runtime and model were chosen. They stay empty until the router
+	// lands (plan phase P1); the fields exist now so the log schema is stable.
+	RouteRule   string
+	RouteReason string
+	RouteClass  string
+	PolicySHA   string
 }
+
+// The Surface values a transport stamps on a dispatch.
+const (
+	SurfaceCLI         = "cli"
+	SurfaceConsoleChat = "console-chat"
+	SurfaceMCP         = "mcp"
+	SurfaceJSONRPC     = "jsonrpc"
+	SurfaceREST        = "rest"
+	SurfaceGRPC        = "grpc"
+	SurfaceFlows       = "flows"
+	SurfaceLibrary     = "library" // pkg/dispatch, the embeddable Go API
+)

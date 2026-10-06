@@ -18,7 +18,7 @@ import (
 //	high       high-risk events not yet claimed by a run
 //	caplog     1 once the cap was reported;  ceillog: the same for the ceiling
 //	backoff    epoch until which launches pause (account session limit)
-//	budgetlog  1 once the dollar-budget ceiling was reported (separate from ceillog)
+//	budgetlog  1 once the budget ceiling (dollars or tokens) was reported (separate from ceillog)
 type runState struct {
 	hasStart  bool
 	start     int64
@@ -30,7 +30,7 @@ type runState struct {
 	caplog    int
 	ceillog   int
 	backoff   int64
-	budgetlog int // 1 once the dollar-budget ceiling was reported (its own flag)
+	budgetlog int // 1 once the budget ceiling, in dollars or in tokens, was reported (its own flag)
 }
 
 // sessionKey sanitizes a session id for use in a file name: every byte

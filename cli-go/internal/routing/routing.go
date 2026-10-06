@@ -1117,7 +1117,11 @@ func readDispatchTelemetry(logPath string, offset int64, runID, agentID string) 
 			DurationS    float64 `json:"duration_s"`
 			EstInTokens  int64   `json:"est_input_tokens"`
 			EstOutTokens int64   `json:"est_output_tokens"`
-			Usage        *struct {
+			// APIEquivalentUSD is what a subscription run would have cost at
+			// API rates (K-136): the Go dispatcher writes usage.total_cost_usd 0
+			// for such a run and keeps the harness's figure here.
+			APIEquivalentUSD *float64 `json:"api_equivalent_usd"`
+			Usage            *struct {
 				InputTokens  *int64   `json:"input_tokens"`
 				OutputTokens *int64   `json:"output_tokens"`
 				Cost         *float64 `json:"total_cost_usd"`
@@ -1143,6 +1147,13 @@ func readDispatchTelemetry(logPath string, offset int64, runID, agentID string) 
 				tel.OutputTokens = *rec.Usage.OutputTokens
 			}
 			tel.Cost = rec.Usage.Cost
+			// The eval compares tiers by what a run costs at API rates, which is
+			// the spend for an api-billed run and the API-equivalent for a
+			// subscription run (its spend field is 0). Without this a subscription
+			// eval would price every tier at $0 and could not tell them apart.
+			if (tel.Cost == nil || *tel.Cost == 0) && rec.APIEquivalentUSD != nil && *rec.APIEquivalentUSD > 0 {
+				tel.Cost = rec.APIEquivalentUSD
+			}
 		}
 	}
 	return tel, found

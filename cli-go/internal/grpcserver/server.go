@@ -296,6 +296,7 @@ func (d *dispatchSrv) Run(ctx context.Context, req *pb.DispatchRunRequest) (*pb.
 		Model:          req.Model,
 		Timeout:        int(req.Timeout),
 		YakosRoot:      req.YakosRoot, // per-request override; empty → Service uses cfg default
+		Surface:        dispatch.SurfaceGRPC,
 		OperatorID:     req.OperatorID,
 		ConversationID: req.ConversationID,
 		SessionID:      req.SessionID,
@@ -347,6 +348,7 @@ func (d *dispatchSrv) Stream(req *pb.DispatchRunRequest, stream pb.Dispatch_Stre
 			Model:          req.Model,
 			Timeout:        int(req.Timeout),
 			YakosRoot:      req.YakosRoot,
+			Surface:        dispatch.SurfaceGRPC,
 			OperatorID:     req.OperatorID,
 			ConversationID: req.ConversationID,
 			SessionID:      req.SessionID,

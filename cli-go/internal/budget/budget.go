@@ -60,8 +60,19 @@ type Status struct {
 	// StopUSD is where `yakos dispatch` refuses: the limit, or for the
 	// supervisor twice it (state hard_stop at the limit refuses routine hook
 	// launches only; see builtinStopFactor).
-	StopUSD   float64  `json:"stop_usd"`
-	SpentUSD  float64  `json:"spent_usd"`
+	StopUSD  float64 `json:"stop_usd"`
+	SpentUSD float64 `json:"spent_usd"`
+	// Token budget (K-136), additive. LimitTokens is 0 (and omitted) when the
+	// agent has no token limit; StopTokens is where `yakos dispatch` refuses
+	// (the limit times the stop factor); SpentTokens is every reported token of
+	// every run in the window, whatever its billing, and is reported even when no
+	// token limit is set. TokensPct is the share of the token limit used.
+	LimitTokens int64   `json:"limit_tokens,omitempty"`
+	StopTokens  int64   `json:"stop_tokens,omitempty"`
+	SpentTokens int64   `json:"spent_tokens,omitempty"`
+	TokensPct   float64 `json:"tokens_pct,omitempty"`
+	// Pct is the share of the limit used: the dollar limit's, the token
+	// limit's, or the larger of the two when an agent has both.
 	Pct       float64  `json:"pct"`
 	WarnPct   int      `json:"warn_pct"`
 	Source    string   `json:"source"`
@@ -111,17 +122,115 @@ func reasonFor(s State) string {
 // Refused reports whether new dispatches for this agent must be refused.
 func (s Status) Refused() bool { return s.State == StateHardStop }
 
+// HasLimit reports whether the agent has a limit of either kind. An agent with
+// neither is off: nothing is evaluated and nothing is refused.
+func (s Status) HasLimit() bool { return s.LimitUSD > 0 || s.LimitTokens > 0 }
+
+// OverStop reports whether the agent has reached the dispatch stop of ANY
+// configured limit: the dollar limit times the stop factor, or the token limit
+// times the stop factor. It is what Enforce refuses on, and what the supervisor
+// hook's 2x high-risk ceiling tests; for an agent with a stop factor of 1 it
+// equals hard_stop.
+func (s Status) OverStop() bool { return s.usdTripped() || s.tokensTripped() }
+
+// usdTripped and tokensTripped say which limit has reached its dispatch stop. A
+// limit that is not configured never trips.
+func (s Status) usdTripped() bool {
+	return s.LimitUSD > 0 && s.SpentUSD+1e-9 >= s.StopUSD
+}
+
+func (s Status) tokensTripped() bool {
+	return s.LimitTokens > 0 && s.SpentTokens >= s.StopTokens
+}
+
+// spentDesc is "1,200 of 1,000 tokens", "$3.00 of $5.00", or both joined by
+// "and" with the tokens first (tokens are the primary unit), for the limits the
+// agent has. A dollar-only agent reads exactly as it did before token limits
+// existed.
+func (s Status) spentDesc() string {
+	var parts []string
+	if s.LimitTokens > 0 {
+		parts = append(parts, fmt.Sprintf("%s of %s tokens", commas(s.SpentTokens), commas(s.LimitTokens)))
+	}
+	if s.LimitUSD > 0 || s.LimitTokens <= 0 {
+		parts = append(parts, fmt.Sprintf("$%.2f of $%.2f", s.SpentUSD, s.LimitUSD))
+	}
+	return strings.Join(parts, " and ")
+}
+
+// Usage is what the agent has used against each of its limits, tokens first:
+// "34,000,000 of 33,000,000 tokens", "$3.00 of $5.00", or both joined by "and".
+// It is the text `yakos doctor` and the budget messages share.
+func (s Status) Usage() string { return s.spentDesc() }
+
+// ReachedLimits says which of the agent's limits it has reached, the test for
+// hard_stop: the dollar limit, the token limit, or both. A limit that is not
+// configured is never reached.
+func (s Status) ReachedLimits() (usd, tokens bool) {
+	return s.LimitUSD > 0 && s.SpentUSD+1e-9 >= s.LimitUSD, s.LimitTokens > 0 && s.SpentTokens >= s.LimitTokens
+}
+
+// ReachedDesc names the limit or limits the agent has reached, for a message:
+// "token limit", "dollar limit" or "token and dollar limits"; "" when it has
+// reached none.
+func (s Status) ReachedDesc() string {
+	usd, tok := s.ReachedLimits()
+	switch {
+	case usd && tok:
+		return "token and dollar limits"
+	case tok:
+		return "token limit"
+	case usd:
+		return "dollar limit"
+	}
+	return ""
+}
+
+// RaiseHint is the command that raises the limit that was reached: the dollar
+// form for a dollar stop, `--tokens <n>` for a token stop, and both for both. An
+// agent that has reached neither (a warning, or a stop that is only the 2x
+// dispatch stop of one limit) gets the form for the limit it has.
+func (s Status) RaiseHint() string {
+	usd, tok := s.ReachedLimits()
+	if !usd && !tok {
+		usd, tok = s.LimitUSD > 0, s.LimitTokens > 0
+	}
+	switch {
+	case usd && tok:
+		return fmt.Sprintf("`yakos budget set %s <usd> --tokens <n>`", s.Agent)
+	case tok:
+		return fmt.Sprintf("`yakos budget set %s --tokens <n>`", s.Agent)
+	}
+	return fmt.Sprintf("`yakos budget set %s <usd>`", s.Agent)
+}
+
+// commas formats n with thousands separators.
+func commas(n int64) string {
+	s := fmt.Sprintf("%d", n)
+	neg := strings.HasPrefix(s, "-")
+	if neg {
+		s = s[1:]
+	}
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	if neg {
+		s = "-" + s
+	}
+	return s
+}
+
 // Message is a one-line human description.
 func (s Status) Message() string {
 	switch s.State {
 	case StateOff:
 		return fmt.Sprintf("%s: no budget", s.Agent)
 	case StateHardStop:
-		return fmt.Sprintf("%s: HARD STOP, $%.2f of $%.2f (%s) spent", s.Agent, s.SpentUSD, s.LimitUSD, s.Window)
+		return fmt.Sprintf("%s: HARD STOP, %s (%s) spent", s.Agent, s.spentDesc(), s.Window)
 	case StateWarning:
-		return fmt.Sprintf("%s: warning, $%.2f of $%.2f (%s) spent, %.0f%%", s.Agent, s.SpentUSD, s.LimitUSD, s.Window, s.Pct)
+		return fmt.Sprintf("%s: warning, %s (%s) spent, %.0f%%", s.Agent, s.spentDesc(), s.Window, s.Pct)
 	}
-	return fmt.Sprintf("%s: ok, $%.2f of $%.2f (%s) spent, %.0f%%", s.Agent, s.SpentUSD, s.LimitUSD, s.Window, s.Pct)
+	return fmt.Sprintf("%s: ok, %s (%s) spent, %.0f%%", s.Agent, s.spentDesc(), s.Window, s.Pct)
 }
 
 // RefusedError is returned by Enforce for an agent in hard_stop.
@@ -135,6 +244,21 @@ func (e *RefusedError) Error() string {
 		msg = fmt.Sprintf("budget: dispatch refused: agent %q exceeded 2x the $%.2f %s supervisor budget (high-risk exemption ceiling, $%.2f spent)", s.Agent, s.LimitUSD, s.Window, s.SpentUSD)
 	}
 	hints := []string{fmt.Sprintf("raise it with `yakos budget set %s <usd>`", s.Agent), fmt.Sprintf("run `yakos budget reset %s`", s.Agent)}
+	if s.LimitTokens > 0 {
+		// An agent with a token limit (K-136): say what was used, and which limit
+		// to raise. A dollar limit that did not trip is not blamed.
+		used := fmt.Sprintf("used %s of its %s tokens", commas(s.SpentTokens), commas(s.LimitTokens))
+		switch {
+		case s.LimitUSD > 0 && s.usdTripped() && s.tokensTripped():
+			msg = fmt.Sprintf("budget: dispatch refused: agent %q has spent $%.2f of its $%.2f and %s (%s budget)", s.Agent, s.SpentUSD, s.LimitUSD, used, s.Window)
+			hints[0] = fmt.Sprintf("raise them with `yakos budget set %s <usd> --tokens <n>`", s.Agent)
+		case s.LimitUSD > 0 && s.usdTripped():
+			// Only the dollar limit is exhausted: the message above already says so.
+		default:
+			msg = fmt.Sprintf("budget: dispatch refused: agent %q has %s (%s token budget)", s.Agent, used, s.Window)
+			hints[0] = fmt.Sprintf("raise it with `yakos budget set %s --tokens <n>`", s.Agent)
+		}
+	}
 	if s.RollsOver != "" {
 		hints = append(hints, "or wait for the window to roll over on "+s.RollsOver)
 	}
@@ -155,23 +279,27 @@ func Evaluate(agent string, o Options) (Status, error) {
 	dir := o.dir()
 	now := o.now()
 	pol, perr := LoadPolicy(dir)
-	var projectUSD *float64
 	var warns []string
 	if perr != nil {
 		warns = append(warns, perr.Error())
 	}
-	if pl, w := ProjectLimits(o.Project); w != "" {
-		warns = append(warns, w)
-	} else if v, ok := pl[agent]; ok {
-		projectUSD = &v
+	cfg := readProjectConfig(o.Project)
+	if cfg.warn != "" {
+		warns = append(warns, cfg.warn)
 	}
-	lim := Resolve(agent, pol, projectUSD)
+	// The agent a project names as its supervisor is budgeted at the stricter of its
+	// own limit and the supervisor's, per unit and per stop, with a lifetime window if
+	// a side that has a limit is lifetime (K-136, sec-330 finding 8): a project can
+	// rename its supervisor and never raise anything. effective builds that one tuple,
+	// and it is what is reported below.
+	lim := effective(agent, pol, cfg)
 	st := Status{
 		Agent: agent, State: StateOff, Window: lim.Window, WindowKey: WindowKey(lim.Window, now),
-		LimitUSD: lim.USD, StopUSD: lim.USD * lim.StopFactor, WarnPct: lim.WarnPct, Source: lim.Source, Warnings: append(warns, lim.Warnings...),
+		LimitUSD: lim.USD, StopUSD: lim.StopUSD, WarnPct: lim.WarnPct, Source: lim.Source, Warnings: append(warns, lim.Warnings...),
+		LimitTokens: lim.Tokens, StopTokens: lim.StopTokens,
 	}
 	st.Reason = ReasonOff
-	if lim.USD <= 0 {
+	if lim.USD <= 0 && lim.Tokens <= 0 {
 		return st, nil
 	}
 	if next := NextWindowStart(lim.Window, now); !next.IsZero() {
@@ -185,18 +313,35 @@ func Evaluate(agent string, o Options) (Status, error) {
 		return st, fmt.Errorf("budget: reading spend: %w", err)
 	}
 	spent := agg.spend(agent, lim.Window, st.WindowKey)
+	spentTok := agg.tokens(agent, lim.Window, st.WindowKey).Total()
 	resets, rerr := readResets(dir)
 	if rerr != nil {
 		st.Warnings = append(st.Warnings, rerr.Error())
 	}
 	if r, ok := resets[agent]; ok && r.Window == string(lim.Window) && r.Key == st.WindowKey {
 		spent -= r.USD
+		spentTok -= r.Tokens
 	}
 	spent = math.Max(0, spent)
+	if spentTok < 0 {
+		spentTok = 0
+	}
 	st.SpentUSD = spent
-	st.Pct = spent / lim.USD * 100
+	st.SpentTokens = spentTok
+	// Each configured limit has its own share used; the agent's is the larger,
+	// and it is at hard_stop when EITHER limit is reached (K-136).
+	hard := false
+	if lim.USD > 0 {
+		st.Pct = finitePct(spent / lim.USD * 100)
+		hard = spent+1e-9 >= lim.USD
+	}
+	if lim.Tokens > 0 {
+		st.TokensPct = finitePct(float64(spentTok) / float64(lim.Tokens) * 100)
+		st.Pct = math.Max(st.Pct, st.TokensPct)
+		hard = hard || spentTok >= lim.Tokens
+	}
 	switch {
-	case spent+1e-9 >= lim.USD:
+	case hard:
 		st.State = StateHardStop
 	case st.Pct >= float64(lim.WarnPct):
 		st.State = StateWarning
@@ -217,12 +362,30 @@ func Evaluate(agent string, o Options) (Status, error) {
 	return st, nil
 }
 
+// maxPct bounds the share of a limit that a status reports as used. A limit that is
+// tiny but not zero (a trusted-policy 5e-324 is a number in range) divides to +Inf,
+// which json cannot encode: `budget check --json` would print nothing a hook could
+// parse (sec-330, final round of #330). The state never depends on it, since a share
+// that large is a hard stop either way, and every amount and stop a status carries is
+// already finite (the 1e9 dollar bound, 0 for an off unit).
+const maxPct = 1e12
+
+// finitePct is p, bounded to maxPct and 0 when it is not a number.
+func finitePct(p float64) float64 {
+	if math.IsNaN(p) {
+		return 0
+	}
+	return math.Min(p, maxPct)
+}
+
 // Enforce is the dispatch pre-flight: it returns a *RefusedError when agent is
-// in hard_stop and past its dispatch stop (StopUSD), nil otherwise. Every other failure (unreadable log,
-// untrusted policy file) fails open; the returned Status carries the details.
+// in hard_stop and past its dispatch stop (StopUSD for a dollar limit,
+// StopTokens for a token limit; either one refuses), nil otherwise. Every other
+// failure (unreadable log, untrusted policy file) fails open; the returned
+// Status carries the details.
 func Enforce(agent string, o Options) (Status, error) {
 	st, err := Evaluate(agent, o)
-	if st.State == StateHardStop && st.SpentUSD+1e-9 >= st.StopUSD {
+	if st.State == StateHardStop && st.OverStop() {
 		return st, &RefusedError{Status: st}
 	}
 	return st, err
@@ -237,7 +400,7 @@ func Reset(agent string, o Options) (Status, error) {
 	dir := o.dir()
 	now := o.now()
 	pol, _ := LoadPolicy(dir)
-	lim := Resolve(agent, pol, nil)
+	lim := effective(agent, pol, readProjectConfig(o.Project))
 	key := WindowKey(lim.Window, now)
 	if err := resetLocked(dir, agent, lim.Window, key, now); err != nil {
 		return Status{}, err
@@ -257,6 +420,6 @@ func resetLocked(dir, agent string, w Window, key string, now time.Time) error {
 		return err
 	}
 	resets, _ := readResets(dir) // an untrusted file is replaced by the write below
-	resets[agent] = resetRec{Window: string(w), Key: key, USD: agg.spend(agent, w, key), At: now.UTC().Format(time.RFC3339)}
+	resets[agent] = resetRec{Window: string(w), Key: key, USD: agg.spend(agent, w, key), Tokens: agg.tokens(agent, w, key).Total(), At: now.UTC().Format(time.RFC3339)}
 	return writeJSON(dir, resetsFileName, resets)
 }

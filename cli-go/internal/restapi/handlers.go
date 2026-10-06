@@ -300,6 +300,7 @@ func (s *Server) handleDispatchCreate(w http.ResponseWriter, r *http.Request) {
 		Runtime: req.Runtime,
 		Model:   req.Model,
 		Timeout: req.Timeout,
+		Surface: dispatch.SurfaceREST,
 	})
 	if err != nil {
 		writeError(w, http.StatusBadGateway, dispatch.PrefixedMessage(err))

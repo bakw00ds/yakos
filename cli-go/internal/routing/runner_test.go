@@ -329,6 +329,30 @@ func TestReadDispatchTelemetry_Table(t *testing.T) {
 			t.Fatal("expected not found")
 		}
 	})
+	// K-136: a subscription run written by the Go dispatcher has usage cost 0 and
+	// keeps the harness's figure as api_equivalent_usd. The eval prices a tier by
+	// what the run costs at API rates, so it reads the API-equivalent then, and
+	// an api-billed run keeps its own spend.
+	t.Run("subscription run is priced at its api equivalent", func(t *testing.T) {
+		p := filepath.Join(dir, "subscription.ndjson")
+		line := strings.Replace(finishedLine("a", "r", 1, `{"input_tokens":5,"output_tokens":2,"total_cost_usd":0}`),
+			`"est_input_tokens"`, `"billing":"subscription","api_equivalent_usd":0.0123,"est_input_tokens"`, 1)
+		_ = os.WriteFile(p, []byte(line+"\n"), 0o600)
+		tel, ok := readDispatchTelemetry(p, 0, "r", "a")
+		if !ok || tel.Cost == nil || *tel.Cost != 0.0123 {
+			t.Fatalf("got %+v ok=%v, want cost 0.0123", tel, ok)
+		}
+	})
+	t.Run("api run keeps its spend even with an api equivalent present", func(t *testing.T) {
+		p := filepath.Join(dir, "apirun.ndjson")
+		line := strings.Replace(finishedLine("a", "r", 1, `{"total_cost_usd":0.5}`),
+			`"est_input_tokens"`, `"billing":"api","api_equivalent_usd":9,"est_input_tokens"`, 1)
+		_ = os.WriteFile(p, []byte(line+"\n"), 0o600)
+		tel, ok := readDispatchTelemetry(p, 0, "r", "a")
+		if !ok || tel.Cost == nil || *tel.Cost != 0.5 {
+			t.Fatalf("got %+v ok=%v, want the spend 0.5", tel, ok)
+		}
+	})
 }
 
 // writeTelemetryDispatchSh writes a stub dispatch.sh that appends a

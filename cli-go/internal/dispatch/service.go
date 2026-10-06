@@ -139,6 +139,13 @@ type Params struct {
 	// runtimes.
 	ResumeSessionID string
 
+	// Surface is the entry point that built this Params, one of the Surface*
+	// constants (rest, jsonrpc, grpc, mcp, flows, console-chat). The transport
+	// sets it as a constant of its own; it is recorded on the dispatch_finished
+	// event (K-136) and steers nothing else. Account drops a value that is not a
+	// short lowercase identifier, so it cannot carry free text into the log.
+	Surface string
+
 	// isMCPStamped signals that this Params was built by the MCP transport
 	// layer, not by a human-facing transport (gRPC/REST/JSON-RPC/console).
 	// Only the MCP transport sets this to true; it is not derivable from the
@@ -152,6 +159,7 @@ type Params struct {
 // public field so non-MCP callers cannot forge the MCP attribution.
 func MCPParams(p Params) Params {
 	p.isMCPStamped = true
+	p.Surface = SurfaceMCP
 	return p
 }
 
@@ -315,6 +323,7 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 		SessionID:       p.SessionID,
 		WorkDirOverride: p.WorkDirOverride,
 		Effort:          p.Effort,
+		Surface:         p.Surface,
 	}
 
 	// --- Acquire governor slot ---

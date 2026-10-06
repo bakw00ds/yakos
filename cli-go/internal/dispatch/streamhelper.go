@@ -35,15 +35,30 @@ type StreamParserState struct {
 	ToolUseBlocks  map[int]*runtime.ToolEvent
 	ToolIDToName   map[string]string
 	ThinkingBlocks map[int]*runtime.ThinkingBlockEntry
+
+	// ModelID is the concrete model id the last system/init line named ("" until
+	// one is seen). ParseAndDispatch keeps it up to date; the turn summary and the
+	// one-shot Result report it.
+	ModelID string
+
+	// EmitTurnSummary makes ParseAndDispatch emit one StreamChunk{Type:"summary"}
+	// for every terminal result line, the end-of-turn record a multi-turn session
+	// needs: the chat handler turns it into the turn's ledger entry and the UI
+	// uses it to mark the turn done. The one-shot path leaves it false because it
+	// ends the process and writes its own summary.
+	EmitTurnSummary bool
 }
 
-// NewStreamParserState allocates a fresh set of parser maps.
+// NewStreamParserState allocates a fresh set of parser maps for a multi-turn
+// (interactive) session. It reports each turn's end as a summary chunk (see
+// EmitTurnSummary); the one-shot streaming path builds its own state without it.
 func NewStreamParserState() *StreamParserState {
 	return &StreamParserState{
-		TextBlocks:     make(map[int]struct{}),
-		ToolUseBlocks:  make(map[int]*runtime.ToolEvent),
-		ToolIDToName:   make(map[string]string),
-		ThinkingBlocks: make(map[int]*runtime.ThinkingBlockEntry),
+		TextBlocks:      make(map[int]struct{}),
+		ToolUseBlocks:   make(map[int]*runtime.ToolEvent),
+		ToolIDToName:    make(map[string]string),
+		ThinkingBlocks:  make(map[int]*runtime.ThinkingBlockEntry),
+		EmitTurnSummary: true,
 	}
 }
 
@@ -64,6 +79,9 @@ type StreamLineResult struct {
 	// SessionID is the claude session id carried by the terminal result line
 	// ("" on every other line, and when the id fails runtime.ValidSessionID).
 	SessionID string
+	// Failed is true on a terminal result line that reports the turn failed
+	// (is_error, or an error_* subtype); see runtime.ResultFailed.
+	Failed bool
 }
 
 // ParseAndDispatch parses one NDJSON line from a claude stream-json output and
@@ -105,9 +123,18 @@ func ParseAndDispatch(line []byte, ps *StreamParserState, onChunk func(StreamChu
 	// and delete it here to keep the map bounded across long sessions.
 	cleanupTextBlockOnStop(line, ps.TextBlocks)
 
+	if id := runtime.SystemModelID(line); id != "" {
+		ps.ModelID = id
+	}
+
 	sessionID := ""
+	failed := false
 	if isResult {
 		sessionID = runtime.ResultSessionID(line)
+		failed = runtime.ResultFailed(line)
+		if ps.EmitTurnSummary {
+			onChunk(turnSummaryChunk(costUSD, usage, sessionID, failed, ps.ModelID))
+		}
 	}
 
 	return StreamLineResult{
@@ -118,7 +145,30 @@ func ParseAndDispatch(line []byte, ps *StreamParserState, onChunk func(StreamChu
 		ToolEvent:     toolEv,
 		ThinkingEvent: thinkEv,
 		SessionID:     sessionID,
+		Failed:        failed,
 	}
+}
+
+// turnSummaryChunk is the end-of-turn summary of one claude turn in a
+// multi-turn session: its exit status, duration, cost, token usage and native
+// session id, read from the terminal result line, and the model id the session
+// announced.
+func turnSummaryChunk(costUSD float64, usage *cost.Usage, sessionID string, failed bool, modelID string) StreamChunk {
+	c := StreamChunk{
+		Type:            "summary",
+		TotalCostUSD:    costUSD,
+		RuntimeResolved: "claude",
+		ModelResolved:   modelID,
+		Usage:           usage,
+		NativeSessionID: sessionID,
+	}
+	if failed {
+		c.ExitCode = 1
+	}
+	if usage != nil {
+		c.DurationS = float64(usage.DurationMs) / 1000
+	}
+	return c
 }
 
 // streamEventEnvelope is the outer wrapper for stream_event lines.

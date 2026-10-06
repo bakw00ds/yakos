@@ -123,6 +123,14 @@ select:focus, button:focus {
   letter-spacing: -0.02em;
 }
 
+/* Secondary line under a card value: per-kind token split, API-billed note,
+   API-equivalent note. Muted: none of it is spend. */
+.card-sub {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #6b7280;
+}
+
 /* ---- chart ---- */
 
 .chart-section {
@@ -220,6 +228,11 @@ select:focus, button:focus {
 }
 
 .data-table tr:last-child td { border-bottom: none; }
+
+/* API-equivalent column: what subscription runs would have cost at API rates.
+   Informational, never spend. */
+.data-table th.muted,
+.data-table td.muted { color: #6b7280; font-style: italic; }
 .data-table tbody tr:hover { background: #1e2535; }
 
 .exit-ok  { color: #4ade80; }

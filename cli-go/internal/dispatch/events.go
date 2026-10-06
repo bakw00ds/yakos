@@ -72,32 +72,6 @@ func appendEvent(path string, line []byte) error {
 	return err
 }
 
-// writeStarted writes a dispatch_started event to the dispatch-log.
-// Schema matches PR #40: includes the project field.
-// Identity fields (operator_id, conversation_id, session_id) are emitted
-// when non-empty; they are omitted on legacy dispatches so legacy readers
-// continue to parse the line without error.
-func writeStarted(req Request, ts time.Time, logPath string) {
-	// Use the canonical Event struct from internal/cost to ensure schema parity.
-	ev := cost.Event{
-		Type:           "dispatch_started",
-		Ts:             ts.UTC().Format(time.RFC3339),
-		Agent:          req.AgentName,
-		Runtime:        req.Runtime,
-		Project:        req.Project,
-		TaskPreview:    truncate(req.Task, 200),
-		Model:          req.ModelResolved,
-		OperatorID:     req.OperatorID,
-		ConversationID: req.ConversationID,
-		SessionID:      req.SessionID,
-	}
-	line, err := json.Marshal(ev)
-	if err != nil {
-		return // not fatal
-	}
-	_ = appendEvent(logPath, line)
-}
-
 // Result is the outcome of a dispatch Run, used to build the dispatch_finished event.
 //
 // The fields from Runtime down are the typed output of the run (K-135): what
@@ -105,7 +79,8 @@ func writeStarted(req Request, ts time.Time, logPath string) {
 // filled by Run and by the streaming path from the runtime's own stdout format
 // (claude stream-json, codex JSONL, agy stream-json, or plain text) so every
 // transport receives text instead of raw NDJSON. They are NOT written to the
-// dispatch-log by writeFinished; the log keeps its schema.
+// dispatch-log as they are (Account.Finish chooses what the event carries and
+// applies the billing rule); the log keeps its schema.
 type Result struct {
 	ExitCode    int
 	DurationS   float64
@@ -195,13 +170,16 @@ type Result struct {
 	Error string
 }
 
-// finishedEvent is the full dispatch_finished schema (PR #40 + #31 + #34 + #32 + Phase 2).
+// finishedEvent is the full dispatch_finished schema (PR #40 + #31 + #34 + #32 + Phase 2 + K-136).
 // Named fields are serialized exactly — downstream tools (cost, supervise,
-// model-routing, finops-review) parse this; no drift allowed.
+// model-routing, finops-review) parse this; no drift allowed. Only Account
+// builds and writes it.
 //
-// Identity fields (operator_id, conversation_id, session_id) are
-// additive-optional: omitempty means they are absent from legacy/bash-written
-// lines. All readers of this schema MUST tolerate their absence.
+// Identity fields (operator_id, conversation_id, session_id) and the K-136
+// ledger fields are additive-optional: omitempty means they are absent from
+// legacy/bash-written lines. All readers of this schema MUST tolerate their
+// absence and ignore keys they do not know. The canonical reader struct is
+// cost.Event, which documents each ledger field.
 type finishedEvent struct {
 	Type            string      `json:"type"`
 	Ts              string      `json:"ts"`
@@ -229,56 +207,21 @@ type finishedEvent struct {
 	// events that never reached runtime resolution.
 	RuntimeChosenBy string `json:"runtime_chosen_by,omitempty"`
 	FallbackFrom    string `json:"fallback_from,omitempty"`
-}
-
-// writeFinished writes a dispatch_finished event to the dispatch-log.
-func writeFinished(req Request, res Result, ts time.Time, logPath string) {
-	ev := finishedEvent{
-		Type:            "dispatch_finished",
-		Ts:              ts.UTC().Format(time.RFC3339),
-		Agent:           req.AgentName,
-		Runtime:         req.Runtime,
-		Project:         req.Project,
-		ExitCode:        res.ExitCode,
-		DurationS:       res.DurationS,
-		OutputBytes:     res.OutputBytes,
-		TaskBytes:       res.TaskBytes,
-		EstInputTokens:  res.TaskBytes / 4,
-		EstOutputTokens: res.OutputBytes / 4,
-		Model:           res.ModelResolved,
-		ModelChosenBy:   res.ModelChosenBy,
-		ModelResolved:   res.ModelResolved,
-		StderrTruncated: res.StderrTrunc,
-		Usage:           res.Usage,
-		// Identity fields: omitempty so legacy readers see no new keys.
-		OperatorID:     req.OperatorID,
-		ConversationID: req.ConversationID,
-		SessionID:      req.SessionID,
-		// Routing fields come from the request: it is stamped once by
-		// routeDispatch, so every Result constructor stays untouched.
-		RuntimeChosenBy: req.RuntimeChosenBy,
-		FallbackFrom:    req.FallbackFrom,
-	}
-
-	// eval_run_id: null when empty, string when set.
-	if res.EvalRunID != "" {
-		ev.EvalRunID = res.EvalRunID
-	} else {
-		ev.EvalRunID = nil
-	}
-
-	// stderr_tail: null when empty (success case), string when set.
-	if res.StderrTail != "" {
-		ev.StderrTail = res.StderrTail
-	} else {
-		ev.StderrTail = nil
-	}
-
-	line, err := json.Marshal(ev)
-	if err != nil {
-		return // not fatal
-	}
-	_ = appendEvent(logPath, line)
+	// K-136 ledger fields — additive-optional (see cost.Event for the meaning
+	// of each). Tokens are the primary unit; dollars are spend only when Billing
+	// is api, and a subscription run's reported figure lives in APIEquivalentUSD
+	// with Usage.TotalCostUSD zeroed.
+	Provider         string  `json:"provider,omitempty"`
+	ModelID          string  `json:"model_id,omitempty"`
+	Billing          string  `json:"billing,omitempty"`
+	CostSource       string  `json:"cost_source,omitempty"`
+	APIEquivalentUSD float64 `json:"api_equivalent_usd,omitempty"`
+	RouteRule        string  `json:"route_rule,omitempty"`
+	RouteReason      string  `json:"route_reason,omitempty"`
+	RouteClass       string  `json:"route_class,omitempty"`
+	PolicySHA        string  `json:"policy_sha,omitempty"`
+	Surface          string  `json:"surface,omitempty"`
+	NativeSessionID  string  `json:"native_session_id,omitempty"`
 }
 
 // WriteBudgetViolation writes a budget_violation event when a dispatch exceeded

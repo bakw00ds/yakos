@@ -498,7 +498,8 @@ _ss_risk_reason() {
 # trusted user-level policy (~/.yakos-state/supervisor-policy.yml) or the
 # built-in defaults; a project .yakos.yml may only make them STRICTER.
 # State (key=value): start launches hlaunches last pending high caplog ceillog
-# (the count ceiling's report flag) backoff budgetlog (the dollar ceiling's own flag)
+# (the count ceiling's report flag) backoff budgetlog (the budget ceiling's own flag,
+# for a dollar or a token ceiling alike)
 # backoff. Go twin: supervisorstream.go (launchGate, allowLaunch) and wrap.go.
 _ss_cfg_raw() { # <key>: raw text after "key:" of the first match under supervisor:
     [ -f "$yakos_yml" ] || return 0
@@ -1139,14 +1140,23 @@ _ss_gfold_done() { # after the run state has been written
     _ss_gfold_n=0; _ss_gfold=()
     return 0
 }
-# _ss_budget: the supervisor's dollar budget (K-119), read once per launch
-# decision (never per event) through `yakos budget check --json`. The Go twin
-# evaluates in-process; a bash hook cannot, so it forks the CLI here. Sets
-# _ss_bud_state (off|ok|warning|hard_stop), _ss_bud_hard / _ss_bud_over (0|1:
-# spent >= limit / spent >= the 2x dispatch stop), and the amounts. ANY failure
-# (no CLI, an old CLI without `budget`, bad JSON) leaves everything off: fail
-# open. The project's agent_budgets can only lower the limit; the CLI applies
-# that rule. Go twin: budgetGate / evalBudget.
+# _ss_budget: the supervisor's budget (K-119, K-136), over its dollar limit, its
+# token limit or both, read once per launch decision (never per event) through
+# `yakos budget check --json`. The Go twin evaluates in-process; a bash hook
+# cannot, so it forks the CLI here. Sets _ss_bud_state (off|ok|warning|hard_stop;
+# hard_stop when EITHER limit is reached), _ss_bud_hard / _ss_bud_over (0|1: the
+# state is hard_stop / either limit is past its 2x dispatch stop), the dollar
+# amounts (_ss_bud_spent/_limit/_stop) and the token amounts (_ss_bud_tspent/
+# _tlimit/_tstop). A limit that is not configured is 0 and never trips; the
+# budget is OFF only when neither is set. Three flags say which unit a message
+# names (u dollars, t tokens): _ss_bud_uw at the warning level (the larger share
+# of its limit, a tie going to tokens), _ss_bud_uh at the limit (tokens when the
+# token limit itself is reached) and _ss_bud_uc at the 2x ceiling (tokens when
+# the token limit is itself past its stop). ANY failure (no CLI, an old CLI
+# without `budget`, bad JSON) leaves everything off: fail open. An older CLI
+# prints no token fields; they read as 0, so it behaves as it always did. The
+# project's agent_budgets can only lower the limit; the CLI applies that rule.
+# Go twin: budgetGate / evalBudget.
 # K-128 (S3): a failed read still fails open, but no longer silently. _ss_bud_cause says
 # why: timeout (the CLI outlived its wall-clock bound), no_output (it printed nothing and
 # exited non-zero: too old to have `budget`, crashed, or could not be run), parse (what it
@@ -1202,8 +1212,7 @@ _ss_budget_raw() {
     return 0
 }
 _ss_budget() {
-    _ss_bud_state=off; _ss_bud_hard=0; _ss_bud_over=0
-    _ss_bud_spent=0; _ss_bud_limit=0; _ss_bud_stop=0
+    _ss_bud_clear
     _ss_bud_cause=""
     local out
     [ -n "${yakos_cli:-}" ] || return 0
@@ -1217,24 +1226,38 @@ _ss_budget() {
     fi
     # The CLI's own word that it could not read the spend (read_failed: set from the error and never
     # from text, also on its internal-error path) comes first, because its numbers are then "ok, nothing
-    # spent", not a measurement. Otherwise not a budget at all (no numeric limit_usd, or not JSON) is a
-    # parse failure, and a limit of 0 is the budget switched off, which is not. The seventh field is
-    # read_failed as 0 or 1.
-    out="$(printf '%s' "$_ss_bud_raw" | jq -r 'if .read_failed == true then ["off", 0, 0, 0, 0, 0, 1] elif (.limit_usd | type) != "number" then error("no limit_usd") else select(.limit_usd > 0) | [.state, .spent_usd, .limit_usd, .stop_usd, (if .state == "hard_stop" then 1 else 0 end), (if .state == "hard_stop" and (.spent_usd + 0.000000001) >= .stop_usd then 1 else 0 end), 0] end | @tsv' 2>/dev/null)" || { _ss_bud_cause=parse; return 0; }
+    # spent", not a measurement, and it is tested BEFORE any limit, so a zero limit can never turn a
+    # failed read into "off". Otherwise not a budget at all (no numeric limit_usd, or not JSON) is a
+    # parse failure, and no limit of either kind (a dollar limit of 0 AND a token limit of 0 or absent) is
+    # the budget switched off, which is not a failure: a token-only budget has limit_usd 0 and is on.
+    # The fields: state, the three dollar amounts, the three token amounts (absent in an older CLI's JSON,
+    # so 0; a stop that is missing reads as the limit), hard, over, the three unit flags, and read_failed
+    # as 0 or 1.
+    out="$(printf '%s' "$_ss_bud_raw" | jq -r 'if .read_failed == true then ["off", 0, 0, 0, 0, 0, 0, 0, 0, "u", "u", "u", 1] elif (.limit_usd | type) != "number" then error("no limit_usd") elif ((.state | type) != "string") or ((.spent_usd | type) != "number") or ((.stop_usd | type) != "number") then error("not a budget status") else .limit_usd as $ul | .spent_usd as $su | .stop_usd as $sp | .state as $st | (.limit_tokens | if type == "number" then . else 0 end) as $tl | (.spent_tokens | if type == "number" then . else 0 end) as $ts | (.stop_tokens | if type == "number" and . > 0 then . else $tl end) as $tstop | select($ul > 0 or $tl > 0) | ($st == "hard_stop") as $hard | [$st, $su, $ul, $sp, $ts, $tl, $tstop, (if $hard then 1 else 0 end), (if $hard and (($ul > 0 and ($su + 0.000000001) >= $sp) or ($tl > 0 and $ts >= $tstop)) then 1 else 0 end), (if $tl > 0 and ($ul <= 0 or ($ts / $tl) >= ($su / $ul)) then "t" else "u" end), (if $tl > 0 and $ts >= $tl then "t" else "u" end), (if $tl > 0 and $ts >= $tstop then "t" else "u" end), 0] end | @tsv' 2>/dev/null)" || { _ss_bud_cause=parse; return 0; }
     [ -n "$out" ] || return 0
-    IFS="$(printf '\t')" read -r _ss_bud_state _ss_bud_spent _ss_bud_limit _ss_bud_stop _ss_bud_hard _ss_bud_over _ss_bud_rf <<EOF_BUD
+    IFS="$(printf '\t')" read -r _ss_bud_state _ss_bud_spent _ss_bud_limit _ss_bud_stop _ss_bud_tspent _ss_bud_tlimit _ss_bud_tstop _ss_bud_hard _ss_bud_over _ss_bud_uw _ss_bud_uh _ss_bud_uc _ss_bud_rf <<EOF_BUD
 $out
 EOF_BUD
     case "$_ss_bud_hard$_ss_bud_over$_ss_bud_rf" in
         [01][01][01]) : ;;
-        *) _ss_bud_state=off; _ss_bud_hard=0; _ss_bud_over=0; _ss_bud_cause=parse; return 0 ;;
+        *) _ss_bud_clear; _ss_bud_cause=parse; return 0 ;;
+    esac
+    case "$_ss_bud_uw$_ss_bud_uh$_ss_bud_uc" in
+        [ut][ut][ut]) : ;;
+        *) _ss_bud_clear; _ss_bud_cause=parse; return 0 ;;
     esac
     if [ "$_ss_bud_rf" = 1 ]; then
-        _ss_bud_state=off; _ss_bud_hard=0; _ss_bud_over=0
-        _ss_bud_spent=0; _ss_bud_limit=0; _ss_bud_stop=0
+        _ss_bud_clear
         _ss_bud_cause=read_error
     fi
     return 0
+}
+# _ss_bud_clear: the budget as "off" (every amount 0, every flag cleared), the cause left to the caller.
+_ss_bud_clear() {
+    _ss_bud_state=off; _ss_bud_hard=0; _ss_bud_over=0
+    _ss_bud_spent=0; _ss_bud_limit=0; _ss_bud_stop=0
+    _ss_bud_tspent=0; _ss_bud_tlimit=0; _ss_bud_tstop=0
+    _ss_bud_uw=u; _ss_bud_uh=u; _ss_bud_uc=u
 }
 # _ss_ledger_stamp: a freshness token for the spend ledger, the dispatch log the budget is
 # computed from: its size in bytes ("none" while it does not exist). Every dispatch event,
@@ -1278,9 +1301,10 @@ _ss_test_pause() {
 }
 # _ss_allow <routine|high> <now>: sets _ss_deny to "" (allow) or the reason:
 # backoff, ceiling, budgetceil, budget, cap, interval. The one gate decision.
-# The dollar budget exempts high-risk launches the same way the cap does:
-# routine launches stop at the supervisor's hard_stop, high-risk ones run on to
-# 2x the limit, decided here in-process (no env var or flag carries it).
+# The budget exempts high-risk launches the same way the cap does: routine
+# launches stop at the supervisor's hard_stop (either limit, dollars or tokens),
+# high-risk ones run on to 2x the limit (of either), decided here in-process (no
+# env var or flag carries it).
 # Go twin: allowLaunch.
 _ss_allow() {
     _ss_deny=""
@@ -1321,11 +1345,25 @@ _ss_synth_finding() {
     return 0
 }
 # Same CRITICAL alert for the dollar-budget ceiling. Go twin: writeSynthBudgetFinding.
+# (A session gets ONE budget CRITICAL, from whichever unit's ceiling was reached: the dollar and
+# the token alert share the budgetlog flag.)
 _ss_synth_budget_finding() {
     local line
     line="$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg c "$(printf '%.2f' "$_ss_bud_stop")" \
         '{ts: $ts, batch_size: 0, scores: {}, overall: "CRITICAL", synthetic: true,
           rationale: ("Supervisor dollar-budget ceiling ($" + $c + ") reached: further high-risk events are recorded but no longer supervised. Raise or reset the budget (yakos budget status) and review the session and the pending events file."),
+          recommended_action: "surface_to_operator"}' 2>/dev/null)" || return 0
+    [ -n "$line" ] || return 0
+    ( umask 077; printf '%s\n' "$line" >> "$findings" ) 2>/dev/null || true
+    return 0
+}
+# The same alert for the token-budget ceiling (K-136), the ceiling in plain digits. Go twin:
+# writeSynthTokenBudgetFinding.
+_ss_synth_token_budget_finding() {
+    local line
+    line="$(jq -nc --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --argjson c "$_ss_bud_tstop" \
+        '{ts: $ts, batch_size: 0, scores: {}, overall: "CRITICAL", synthetic: true,
+          rationale: ("Supervisor token-budget ceiling (" + ($c|tostring) + " tokens) reached: further high-risk events are recorded but no longer supervised. Raise or reset the budget (yakos budget status) and review the session and the pending events file."),
           recommended_action: "surface_to_operator"}' 2>/dev/null)" || return 0
     [ -n "$line" ] || return 0
     ( umask 077; printf '%s\n' "$line" >> "$findings" ) 2>/dev/null || true
@@ -1361,8 +1399,7 @@ _ss_gate() {
     if [ "$crossed" = 1 ]; then _ss_wlog="$(ho_logdir)/supervisor-stream.ndjson"; fi
     now="$(date +%s)"; nsec=$SECONDS
     stale=$((sup_deadline + sup_interval + 60))
-    _ss_bud_state=off; _ss_bud_hard=0; _ss_bud_over=0
-    _ss_bud_spent=0; _ss_bud_limit=0; _ss_bud_stop=0
+    _ss_bud_clear
     _ss_bud_ready=0; _ss_bud_stamp=""; _ss_bud_cause=""
     while :; do
         # The budget read forks the CLI (up to ~2 s) and only a launch decision
@@ -1495,36 +1532,69 @@ _ss_gate_report() { # <kind> <delay>
     # that did not fail leaves the cause empty. Go twin: reportGate.
     if [ -n "$_ss_bud_cause" ]; then
         ho_log "supervisor-stream" "WARN" "pass" \
-            "supervisor budget unavailable (cause: $_ss_bud_cause); failing open: this launch decision is not checked against the dollar budget" \
+            "supervisor budget unavailable (cause: $_ss_bud_cause); failing open: this launch decision is not checked against the budget" \
             "$(jq -nc --arg a "$sup_agent" --arg c "$_ss_bud_cause" '{agent: $a, budget_reason: "budget_unavailable", cause: $c}')"
     fi
     # Budget warning: every launch decision at warning level says so. At
     # hard_stop the deny cases below say it (or, for a high-risk launch under
-    # the ceiling, the exempt note here). Go twin: launchGate.
+    # the ceiling, the exempt note here). Each message names ONE unit, dollars
+    # or tokens (see _ss_budget); a dollar message is the one it always was, and
+    # a token message has the same shape with spent_tokens, limit_tokens and
+    # ceiling_tokens in the place of the dollar fields, the amounts in plain
+    # digits. Go twin: launchGate / reportGate (warnExtra and its siblings).
     if [ "$_ss_bud_state" = warning ]; then
-        ho_log "supervisor-stream" "WARN" "pass" \
-            "supervisor budget at warning level" \
-            "$(jq -nc --arg a "$sup_agent" --argjson s "$_ss_bud_spent" --argjson l "$_ss_bud_limit" '{agent: $a, spent_usd: $s, limit_usd: $l, budget_reason: "budget_warning"}')"
-        echo "supervisor-stream: supervisor budget at $(awk -v s="$_ss_bud_spent" -v l="$_ss_bud_limit" 'BEGIN{printf "%.0f", s/l*100}')% ($(printf '$%.2f of $%.2f' "$_ss_bud_spent" "$_ss_bud_limit")); at 100% routine supervisor runs stop" >&2
+        if [ "$_ss_bud_uw" = t ]; then
+            ho_log "supervisor-stream" "WARN" "pass" \
+                "supervisor budget at warning level" \
+                "$(jq -nc --arg a "$sup_agent" --argjson s "$_ss_bud_tspent" --argjson l "$_ss_bud_tlimit" '{agent: $a, spent_tokens: $s, limit_tokens: $l, budget_reason: "budget_warning"}')"
+            echo "supervisor-stream: supervisor budget at $(awk -v s="$_ss_bud_tspent" -v l="$_ss_bud_tlimit" 'BEGIN{printf "%.0f", s/l*100}')% ($_ss_bud_tspent of $_ss_bud_tlimit tokens); at 100% routine supervisor runs stop" >&2
+        else
+            ho_log "supervisor-stream" "WARN" "pass" \
+                "supervisor budget at warning level" \
+                "$(jq -nc --arg a "$sup_agent" --argjson s "$_ss_bud_spent" --argjson l "$_ss_bud_limit" '{agent: $a, spent_usd: $s, limit_usd: $l, budget_reason: "budget_warning"}')"
+            echo "supervisor-stream: supervisor budget at $(awk -v s="$_ss_bud_spent" -v l="$_ss_bud_limit" 'BEGIN{printf "%.0f", s/l*100}')% ($(printf '$%.2f of $%.2f' "$_ss_bud_spent" "$_ss_bud_limit")); at 100% routine supervisor runs stop" >&2
+        fi
     elif [ "$_ss_bud_hard" = 1 ] && [ -z "$_ss_deny" ]; then
-        ho_log "supervisor-stream" "WARN" "pass" \
-            "supervisor budget exhausted; high-risk launch allowed under the ceiling" \
-            "$(jq -nc --arg a "$sup_agent" --argjson s "$_ss_bud_spent" --argjson l "$_ss_bud_limit" --argjson c "$_ss_bud_stop" '{agent: $a, spent_usd: $s, limit_usd: $l, ceiling_usd: $c, budget_reason: "budget_exhausted"}')"
-        echo "supervisor-stream: supervisor budget exhausted ($(printf '$%.2f of $%.2f' "$_ss_bud_spent" "$_ss_bud_limit")); launching high-risk supervision under the $(printf '$%.2f' "$_ss_bud_stop") ceiling" >&2
+        if [ "$_ss_bud_uh" = t ]; then
+            ho_log "supervisor-stream" "WARN" "pass" \
+                "supervisor budget exhausted; high-risk launch allowed under the ceiling" \
+                "$(jq -nc --arg a "$sup_agent" --argjson s "$_ss_bud_tspent" --argjson l "$_ss_bud_tlimit" --argjson c "$_ss_bud_tstop" '{agent: $a, spent_tokens: $s, limit_tokens: $l, ceiling_tokens: $c, budget_reason: "budget_exhausted"}')"
+            echo "supervisor-stream: supervisor budget exhausted ($_ss_bud_tspent of $_ss_bud_tlimit tokens); launching high-risk supervision under the $_ss_bud_tstop token ceiling" >&2
+        else
+            ho_log "supervisor-stream" "WARN" "pass" \
+                "supervisor budget exhausted; high-risk launch allowed under the ceiling" \
+                "$(jq -nc --arg a "$sup_agent" --argjson s "$_ss_bud_spent" --argjson l "$_ss_bud_limit" --argjson c "$_ss_bud_stop" '{agent: $a, spent_usd: $s, limit_usd: $l, ceiling_usd: $c, budget_reason: "budget_exhausted"}')"
+            echo "supervisor-stream: supervisor budget exhausted ($(printf '$%.2f of $%.2f' "$_ss_bud_spent" "$_ss_bud_limit")); launching high-risk supervision under the $(printf '$%.2f' "$_ss_bud_stop") ceiling" >&2
+        fi
     fi
     case "$_ss_act" in
         budget)
-            ho_log "supervisor-stream" "WARN" "pass" \
-                "supervisor budget exhausted; skipping this routine supervisor launch (high-risk events still launch)" \
-                "$(jq -nc --arg a "$sup_agent" --argjson s "$_ss_bud_spent" --argjson l "$_ss_bud_limit" --arg k "$kind" '{agent: $a, spent_usd: $s, limit_usd: $l, budget_reason: "budget_exhausted", kind: $k}')"
-            echo "supervisor-stream: supervisor budget exhausted ($(printf '$%.2f of $%.2f' "$_ss_bud_spent" "$_ss_bud_limit")); routine supervisor runs are skipped until it is raised, reset, or the month rolls over (yakos budget status)" >&2 ;;
+            if [ "$_ss_bud_uh" = t ]; then
+                ho_log "supervisor-stream" "WARN" "pass" \
+                    "supervisor budget exhausted; skipping this routine supervisor launch (high-risk events still launch)" \
+                    "$(jq -nc --arg a "$sup_agent" --argjson s "$_ss_bud_tspent" --argjson l "$_ss_bud_tlimit" --arg k "$kind" '{agent: $a, spent_tokens: $s, limit_tokens: $l, budget_reason: "budget_exhausted", kind: $k}')"
+                echo "supervisor-stream: supervisor budget exhausted ($_ss_bud_tspent of $_ss_bud_tlimit tokens); routine supervisor runs are skipped until it is raised, reset, or the month rolls over (yakos budget status)" >&2
+            else
+                ho_log "supervisor-stream" "WARN" "pass" \
+                    "supervisor budget exhausted; skipping this routine supervisor launch (high-risk events still launch)" \
+                    "$(jq -nc --arg a "$sup_agent" --argjson s "$_ss_bud_spent" --argjson l "$_ss_bud_limit" --arg k "$kind" '{agent: $a, spent_usd: $s, limit_usd: $l, budget_reason: "budget_exhausted", kind: $k}')"
+                echo "supervisor-stream: supervisor budget exhausted ($(printf '$%.2f of $%.2f' "$_ss_bud_spent" "$_ss_bud_limit")); routine supervisor runs are skipped until it is raised, reset, or the month rolls over (yakos budget status)" >&2
+            fi ;;
         budgetceil)
             if [ "$_ss_first" = 1 ]; then
-                ho_log "supervisor-stream" "WARN" "pass" \
-                    "supervisor budget ceiling reached; high-risk launches are no longer supervised" \
-                    "$(jq -nc --arg a "$sup_agent" --argjson s "$_ss_bud_spent" --argjson c "$_ss_bud_stop" '{agent: $a, spent_usd: $s, ceiling_usd: $c, budget_reason: "budget_exhausted"}')"
-                echo "supervisor-stream: supervisor budget ceiling ($(printf '$%.2f' "$_ss_bud_stop")) reached; high-risk supervisor runs are skipped" >&2
-                _ss_synth_budget_finding
+                if [ "$_ss_bud_uc" = t ]; then
+                    ho_log "supervisor-stream" "WARN" "pass" \
+                        "supervisor budget ceiling reached; high-risk launches are no longer supervised" \
+                        "$(jq -nc --arg a "$sup_agent" --argjson s "$_ss_bud_tspent" --argjson c "$_ss_bud_tstop" '{agent: $a, spent_tokens: $s, ceiling_tokens: $c, budget_reason: "budget_exhausted"}')"
+                    echo "supervisor-stream: supervisor budget ceiling ($_ss_bud_tstop tokens) reached; high-risk supervisor runs are skipped" >&2
+                    _ss_synth_token_budget_finding
+                else
+                    ho_log "supervisor-stream" "WARN" "pass" \
+                        "supervisor budget ceiling reached; high-risk launches are no longer supervised" \
+                        "$(jq -nc --arg a "$sup_agent" --argjson s "$_ss_bud_spent" --argjson c "$_ss_bud_stop" '{agent: $a, spent_usd: $s, ceiling_usd: $c, budget_reason: "budget_exhausted"}')"
+                    echo "supervisor-stream: supervisor budget ceiling ($(printf '$%.2f' "$_ss_bud_stop")) reached; high-risk supervisor runs are skipped" >&2
+                    _ss_synth_budget_finding
+                fi
             fi ;;
         backoff)
             ho_log "supervisor-stream" "REPORT" "pass" \

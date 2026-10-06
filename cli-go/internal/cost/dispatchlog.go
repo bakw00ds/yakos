@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -36,10 +37,21 @@ import (
 // writers agree. For codex they do not: rows the bash dispatcher wrote copied
 // codex's own fields, so input_tokens holds the whole prompt, cached tokens
 // included, and cache_read is 0; rows the Go dispatcher writes hold the fresh
-// remainder in input_tokens and the cached part in cache_read. A reader that
-// adds prompt tokens up per row must not infer the convention from the keys
-// alone. Aligning the two writers is K-136; this comment records the fact and
-// no reader changes with it.
+// remainder in input_tokens and the cached part in cache_read. The two
+// conventions agree on the sum, so the readers that add all four counts (K-136:
+// TokenTotals.Total, the budget aggregate, the cost and dashboard views) are
+// unaffected. Two older readers add only input and output tokens, the metrics
+// collector and `work close`: for a legacy bash codex row they count the whole
+// prompt, and for a Go row of the same run only its fresh part. A reader that
+// reports the input/cache split of a legacy bash codex row sees a different
+// split as well. The bash writer is not changed (docs/runtime-matrix.md, "Usage
+// fields by harness").
+//
+// Dollars (K-136). TotalCostUSD is the dollar figure the harness reported. It is
+// spend only on a row whose billing is "api" (or on a row that predates the
+// billing field); under a subscription it is stored as the event's
+// api_equivalent_usd instead and TotalCostUSD is 0. Readers must use
+// Event.SpendUSD, never sum this field directly.
 type Usage struct {
 	InputTokens   int64   `json:"input_tokens"`
 	OutputTokens  int64   `json:"output_tokens"`
@@ -90,6 +102,127 @@ type Event struct {
 	OperatorID     string `json:"operator_id,omitempty"`
 	ConversationID string `json:"conversation_id,omitempty"`
 	SessionID      string `json:"session_id,omitempty"`
+
+	// K-136 ledger fields on dispatch_finished, written only by the Go
+	// dispatcher's dispatch.Account. All are additive-optional: absent on
+	// bash-written lines and on Go lines from before K-136, where a reader sees
+	// the zero value. Dispatcher code must tolerate their absence; it must also
+	// ignore unknown keys, as the bash readers do.
+	//
+	// Provider is the vendor behind the runtime (anthropic, openai, google).
+	// ModelID is the concrete model id the harness reported, else the resolved
+	// model name.
+	Provider string `json:"provider,omitempty"`
+	ModelID  string `json:"model_id,omitempty"`
+	// Billing is how the run was paid for: subscription, api or local. Tokens are
+	// recorded for every run; dollars count as spend only when it is api (see
+	// CountsAsSpend and Event.SpendUSD).
+	Billing string `json:"billing,omitempty"`
+	// CostSource says where a dollar figure came from: "harness" when the
+	// harness reported it (claude's total_cost_usd). Empty when the event has no
+	// dollar figure.
+	CostSource string `json:"cost_source,omitempty"`
+	// APIEquivalentUSD is what a non-api run would have cost at API rates, as
+	// the harness reported it. It is informational and is never spend.
+	APIEquivalentUSD float64 `json:"api_equivalent_usd,omitempty"`
+	// Routing fields. Empty until the router lands (plan phase P1).
+	RouteRule    string `json:"route_rule,omitempty"`
+	RouteReason  string `json:"route_reason,omitempty"`
+	FallbackFrom string `json:"fallback_from,omitempty"`
+	RouteClass   string `json:"route_class,omitempty"`
+	PolicySHA    string `json:"policy_sha,omitempty"`
+	// Surface is the entry point that made the dispatch: cli, console-chat,
+	// mcp, jsonrpc, rest, grpc, flows.
+	Surface string `json:"surface,omitempty"`
+	// NativeSessionID is the harness's own session id (claude session_id, codex
+	// thread_id, agy conversation_id), usable to resume the conversation.
+	NativeSessionID string `json:"native_session_id,omitempty"`
+}
+
+// Billing values of Event.Billing.
+const (
+	BillingSubscription = "subscription"
+	BillingAPI          = "api"
+	BillingLocal        = "local"
+)
+
+// CountsAsSpend reports whether dollars on an event with this billing value are
+// real spend. Tokens are the primary unit (K-136): dollars count only for runs
+// paid per API call, never for a subscription harness or a local model. An
+// event with no billing field was written before K-136, when the dollar figure
+// was the only cost there was; it keeps counting, so a budget does not reset
+// itself on upgrade. A billing value this version does not know counts too,
+// the safe direction for a cost guard.
+func CountsAsSpend(billing string) bool {
+	switch billing {
+	case BillingSubscription, BillingLocal:
+		return false
+	}
+	return true
+}
+
+// SpendUSD is the dollars of this event that count as spend: the usage cost on
+// an api-billed or pre-K-136 event, 0 otherwise or when the figure is not a
+// finite non-negative number.
+func (e Event) SpendUSD() float64 {
+	if e.Usage == nil || !CountsAsSpend(e.Billing) {
+		return 0
+	}
+	c := e.Usage.TotalCostUSD
+	if math.IsNaN(c) || c < 0 || c > 1e12 { // NaN, negative or absurd
+		return 0
+	}
+	return c
+}
+
+// TokenTotals is a sum of reported token counts, kept apart by kind.
+type TokenTotals struct {
+	Input         int64 `json:"input"`
+	Output        int64 `json:"output"`
+	CacheRead     int64 `json:"cache_read"`
+	CacheCreation int64 `json:"cache_creation"`
+}
+
+// Total is every token: fresh input, output, and both cache kinds.
+func (t TokenTotals) Total() int64 { return t.Input + t.Output + t.CacheRead + t.CacheCreation }
+
+// Add returns t plus o.
+func (t TokenTotals) Add(o TokenTotals) TokenTotals {
+	return TokenTotals{
+		Input:         t.Input + o.Input,
+		Output:        t.Output + o.Output,
+		CacheRead:     t.CacheRead + o.CacheRead,
+		CacheCreation: t.CacheCreation + o.CacheCreation,
+	}
+}
+
+// IsZero reports whether no tokens were reported.
+func (t TokenTotals) IsZero() bool { return t == TokenTotals{} }
+
+// Tokens returns the event's reported token counts. An event with no usage
+// object reports none: a size estimate (est_input_tokens) is not a count and is
+// never mixed in. Negative or absurd counts, which a corrupt line could carry,
+// are treated as 0 so one bad row cannot move a total.
+func (e Event) Tokens() TokenTotals {
+	if e.Usage == nil {
+		return TokenTotals{}
+	}
+	return TokenTotals{
+		Input:         sane(e.Usage.InputTokens),
+		Output:        sane(e.Usage.OutputTokens),
+		CacheRead:     sane(e.Usage.CacheRead),
+		CacheCreation: sane(e.Usage.CacheCreation),
+	}
+}
+
+// maxSaneTokens bounds one count of one event; larger is a corrupt line.
+const maxSaneTokens = int64(1) << 40
+
+func sane(n int64) int64 {
+	if n < 0 || n > maxSaneTokens {
+		return 0
+	}
+	return n
 }
 
 // LogFiles returns the sorted list of dispatch-log NDJSON files in dir.

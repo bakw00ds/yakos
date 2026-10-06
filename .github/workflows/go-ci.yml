@@ -90,7 +90,10 @@ jobs:
       - name: go test
         working-directory: cli-go
         # Use -count=1 to bypass test result cache in CI.
-        run: go test -count=1 -race -timeout 5m ./...
+        # -timeout is per package binary. cmd/yakos runs the built binary in many
+        # tests and took 232 s to 301 s on the macOS runner against the previous
+        # 5m ceiling (K-136, #330), so the ceiling leaves a margin.
+        run: go test -count=1 -race -timeout 15m ./...
 
       - name: Build binary (native)
         # Build from the module root (cli-go/) and output to repo-root bin/.

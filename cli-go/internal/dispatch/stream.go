@@ -4,7 +4,7 @@ package dispatch
 //
 // Design:
 //   - Mirrors Run's setup (roster compose, model resolution, identity validation,
-//     governor) by going through the Service facade.
+//     budget pre-flight, governor) by going through the Service facade.
 //   - Step 8 uses execWithStreaming instead of execWithStderrCapture.
 //   - execWithStreaming attaches cmd.StdoutPipe() and reads stdout with a
 //     fixed-size read buffer and a manual per-line byte counter.  Any single
@@ -15,8 +15,8 @@ package dispatch
 //     the buffer hint).
 //   - Stderr is attached as cmd.Stderr = &bytes.Buffer and drained after
 //     cmd.Wait() returns.  It is NOT read in a parallel goroutine.
-//   - Writes dispatch_started and dispatch_finished events via the same
-//     writeStarted/writeFinished functions as Run (parity).
+//   - Writes dispatch_started and dispatch_finished events through the same
+//     Account as Run (parity; Account is the only writer of both).
 //   - Emits StreamChunk{Type:"token"} for each incremental text delta.
 //   - Emits StreamChunk{Type:"summary"} as the final chunk with cost/metrics.
 //
@@ -300,6 +300,15 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		return Result{}, fmt.Errorf("dispatch: task is required")
 	}
 
+	// --- Per-agent budget pre-flight (K-119; RunStream joined Run in K-136) ---
+	// A streamed turn spends like a one-shot dispatch, so it is refused the same
+	// way: a NEW dispatch for an agent in hard_stop never starts, before any
+	// process is forked and before any event is written. Any other budget problem
+	// fails open (see budgetPreflight).
+	if err := budgetPreflight(Request{AgentName: p.Agent, Project: project}); err != nil {
+		return Result{}, err
+	}
+
 	// --- Route: roster, agent, runtime, model (mirrors Run steps 2-5) ---
 	// resolve.go routeDispatch is shared with Run, so both paths pick the
 	// runtime and model by one rule. The daemon never supplies a
@@ -334,6 +343,7 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		ModelResolved:   rr.Model,
 		WorkDirOverride: p.WorkDirOverride,
 		Effort:          p.Effort,
+		Surface:         p.Surface,
 	}
 
 	chatReq := runtime.ChatDispatchRequest{
@@ -405,9 +415,9 @@ func execWithStreaming(
 	chatReq runtime.ChatDispatchRequest,
 	onChunk func(StreamChunk),
 ) (Result, error) {
-	logPath := dispatchLogPath()
-	tsStart := time.Now()
-	writeStarted(req, tsStart, logPath)
+	acct := NewAccount(req)
+	acct.Start()
+	tsStart := acct.Started()
 
 	cp, hasChatCmd := adapter.(chatCmdProvider)
 
@@ -419,6 +429,7 @@ func execWithStreaming(
 		costUSD        float64
 		usageCost      *cost.Usage
 		nativeSession  string               // claude session_id from the result frame
+		streamModelID  string               // claude: the model id the init line announced
 		parsed         *runtime.ParseResult // buffered runtimes: the LineParser's outcome
 		textBlocks     = make(map[int]struct{})
 		toolUseBlocks  = make(map[int]*runtime.ToolEvent)          // index → in-progress tool_use
@@ -433,12 +444,12 @@ func execWithStreaming(
 		stdoutPipe, pipeErr := cmd.StdoutPipe()
 		if pipeErr != nil {
 			tsEnd := time.Now()
-			writeFinished(req, Result{
+			acct.FinishAt(Result{
 				ExitCode:      -1,
 				DurationS:     tsEnd.Sub(tsStart).Seconds(),
 				ModelChosenBy: req.ModelChosenBy,
 				ModelResolved: req.ModelResolved,
-			}, tsEnd, logPath)
+			}, tsEnd)
 			return Result{ExitCode: -1}, fmt.Errorf("dispatch: stream: stdout pipe: %w", pipeErr)
 		}
 		// Stderr is attached as a plain buffer and drained by the OS write path.
@@ -448,12 +459,12 @@ func execWithStreaming(
 
 		if startErr := cmd.Start(); startErr != nil {
 			tsEnd := time.Now()
-			writeFinished(req, Result{
+			acct.FinishAt(Result{
 				ExitCode:      -1,
 				DurationS:     tsEnd.Sub(tsStart).Seconds(),
 				ModelChosenBy: req.ModelChosenBy,
 				ModelResolved: req.ModelResolved,
-			}, tsEnd, logPath)
+			}, tsEnd)
 			return Result{ExitCode: -1}, fmt.Errorf("dispatch: stream: start: %w", startErr)
 		}
 
@@ -514,6 +525,8 @@ func execWithStreaming(
 				}
 			}
 		})
+
+		streamModelID = ps.ModelID
 
 		// Wait for the process and collect exit code.
 		waitErr := cmd.Wait()
@@ -611,10 +624,12 @@ func execWithStreaming(
 		// claude's own session id, from the result frame, for a chat handler to
 		// resume the conversation with.
 		result.SessionID = nativeSession
+		// and the concrete model id (K-136: the ledger records it).
+		result.ModelID = streamModelID
 	}
 
-	// Write dispatch_finished identically to Run (parity invariant).
-	writeFinished(req, result, tsEnd, logPath)
+	// Finish the ledger entry identically to Run (parity invariant).
+	acct.FinishAt(result, tsEnd)
 
 	// Emit the terminal summary chunk.
 	onChunk(StreamChunk{

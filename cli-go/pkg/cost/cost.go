@@ -40,19 +40,53 @@ const (
 
 // Usage holds the optional per-invocation token/cost data reported by the
 // runtime adapter. Fields are zero when the runtime did not return structured
-// telemetry.
+// telemetry. TotalCostUSD is whatever dollar figure the harness reported; it is
+// spend only on an api-billed (or pre-K-136) event, so total dollars with
+// Event.SpendUSD, never by summing this field.
 type Usage = internalcost.Usage
 
 // Event is a single line from dispatch-log.ndjson.
 //
 // Fields marked omitempty are optional in older log entries; callers must
 // treat zero values as absent. The struct mirrors the JSON schema exactly.
+//
+// Tokens are the primary accounting unit: Event.Tokens returns the real counts
+// the harness reported, and Event.SpendUSD returns the dollars that count as
+// spend (api-billed runs only; 0 for subscription and local runs). These two
+// methods are the only supported way to total tokens and dollars. The
+// est_input_tokens and est_output_tokens fields are size estimates and are not
+// token counts.
 type Event = internalcost.Event
 
+// TokenTotals is a sum of reported token counts, kept apart by kind.
+type TokenTotals = internalcost.TokenTotals
+
+// How a run was paid for (Event.Billing). An event with no billing field was
+// written before K-136 and keeps counting its dollar figure as spend.
+const (
+	BillingSubscription = internalcost.BillingSubscription // Claude Code, Codex ChatGPT login, Antigravity: no per-call charge
+	BillingAPI          = internalcost.BillingAPI          // paid per API call: dollars are spend
+	BillingLocal        = internalcost.BillingLocal        // a local model: no charge
+)
+
+// CountsAsSpend reports whether dollars on an event with this billing value are
+// real spend.
+func CountsAsSpend(billing string) bool {
+	return internalcost.CountsAsSpend(billing)
+}
+
 // Row is one aggregated row in a Report.
+//
+// TotalInTokens and TotalOutTokens are the est_* size estimates. Tokens,
+// SpendUSD and APIEquivUSD total the real token counts, the api-billed dollars
+// and the informational api-equivalent dollars (what subscription runs would
+// have cost at API rates; never spend). The three are not part of a Row's JSON
+// encoding.
 type Row = internalcost.Row
 
-// Report is the output of Aggregate.
+// Report is the output of Aggregate and AggregateLedger. Ledger is true when at
+// least one aggregated event carries a billing field; it is not part of a
+// Report's JSON encoding.
 type Report = internalcost.Report
 
 // ParseAxis converts a string flag value to an Axis.
@@ -117,7 +151,8 @@ func StreamFiles(paths []string, since string) <-chan Event {
 // Aggregate streams events from ch and rolls them up by axis.
 //
 // The returned Report has Rows sorted descending by total tokens, matching
-// bash's sort_by(.total_in_tokens + .total_out_tokens) | reverse.
+// bash's sort_by(.total_in_tokens + .total_out_tokens) | reverse. These are the
+// est_* size estimates, and the order never depends on what the log holds.
 //
 // limit <= 0 means no limit (all rows returned).
 //
@@ -132,4 +167,20 @@ func StreamFiles(paths []string, since string) <-chan Event {
 //	}
 func Aggregate(ch <-chan Event, axis Axis, limit int) Report {
 	return internalcost.Aggregate(ch, axis, limit)
+}
+
+// AggregateLedger is Aggregate for logs written by the K-136 dispatcher: when at
+// least one aggregated event is a ledger event (it carries a billing field), the
+// rows are ranked by real tokens (Row.Tokens, descending) instead of the est_*
+// estimates, and limit keeps the top rows by that rank. Without a ledger event it
+// returns exactly what Aggregate returns.
+//
+// Example:
+//
+//	report := cost.AggregateLedger(cost.StreamFiles(files, ""), cost.AxisRuntime, 0)
+//	for _, row := range report.Rows {
+//	    fmt.Printf("%s: %d tokens, $%.2f spent\n", row.Key, row.Tokens.Total(), row.SpendUSD)
+//	}
+func AggregateLedger(ch <-chan Event, axis Axis, limit int) Report {
+	return internalcost.AggregateLedger(ch, axis, limit)
 }

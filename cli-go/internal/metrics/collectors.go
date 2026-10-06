@@ -46,7 +46,9 @@ func collectEfficiency(stateDir, projectDir string, since string, m *Metrics) {
 		var evTokens float64
 
 		if ev.Usage != nil {
-			evCost = ev.Usage.TotalCostUSD
+			// Spend, not the raw usage figure (K-136): a subscription or local run
+			// reports a dollar amount that is not spend (api_equivalent_usd).
+			evCost = ev.SpendUSD()
 			evTokens = float64(ev.Usage.InputTokens + ev.Usage.OutputTokens)
 		} else {
 			// Fall back to estimated tokens.

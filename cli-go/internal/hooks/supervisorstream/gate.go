@@ -263,22 +263,30 @@ func (h *Hook) reportGate(out *hooktype.HookOutput, in hooktype.HookInput, logFi
 	// read that did not fail leaves the cause empty. Bash twin: _ss_gate_report.
 	if cause := lim.bud.cause; cause != "" {
 		h.appendLog(out, in, logFile, "WARN", "pass",
-			"supervisor budget unavailable (cause: "+cause+"); failing open: this launch decision is not checked against the dollar budget",
+			"supervisor budget unavailable (cause: "+cause+"); failing open: this launch decision is not checked against the budget",
 			map[string]any{"agent": c.agent, "budget_reason": reasonBudgetUnavailable, "cause": cause})
 	}
 	// Budget warning: every launch decision at warning level says so. At
 	// hard_stop the deny cases below say it instead (or, for a high-risk
-	// launch under the ceiling, the exempt note here).
+	// launch under the ceiling, the exempt note here). Each message names one
+	// unit, dollars or tokens (see budgetGate); a dollar message is the one it
+	// always was.
 	if b := lim.bud; b.state == string(budget.StateWarning) {
 		h.appendLog(out, in, logFile, "WARN", "pass",
-			"supervisor budget at warning level",
-			map[string]any{"agent": c.agent, "spent_usd": b.spent, "limit_usd": b.limit, "budget_reason": budget.ReasonWarning})
-		out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget at %.0f%% ($%.2f of $%.2f); at 100%% routine supervisor runs stop\n", b.spent/b.limit*100, b.spent, b.limit)
+			"supervisor budget at warning level", warnExtra(c.agent, b))
+		if b.tokensWarn() {
+			out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget at %.0f%% (%d of %d tokens); at 100%% routine supervisor runs stop\n", float64(b.tokSpent)/float64(b.tokLimit)*100, b.tokSpent, b.tokLimit)
+		} else {
+			out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget at %.0f%% ($%.2f of $%.2f); at 100%% routine supervisor runs stop\n", b.spent/b.limit*100, b.spent, b.limit)
+		}
 	} else if b.hard && res.deny == denyNone {
 		h.appendLog(out, in, logFile, "WARN", "pass",
-			"supervisor budget exhausted; high-risk launch allowed under the ceiling",
-			map[string]any{"agent": c.agent, "spent_usd": b.spent, "limit_usd": b.limit, "ceiling_usd": b.stop, "budget_reason": budget.ReasonExhausted})
-		out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget exhausted ($%.2f of $%.2f); launching high-risk supervision under the $%.2f ceiling\n", b.spent, b.limit, b.stop)
+			"supervisor budget exhausted; high-risk launch allowed under the ceiling", exemptExtra(c.agent, b))
+		if b.tokensHard() {
+			out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget exhausted (%d of %d tokens); launching high-risk supervision under the %d token ceiling\n", b.tokSpent, b.tokLimit, b.tokStop)
+		} else {
+			out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget exhausted ($%.2f of $%.2f); launching high-risk supervision under the $%.2f ceiling\n", b.spent, b.limit, b.stop)
+		}
 	}
 	findings := filepath.Join(h.WorkCurrentDir, "supervisor-findings.ndjson")
 	b := lim.bud
@@ -287,16 +295,23 @@ func (h *Hook) reportGate(out *hooktype.HookOutput, in hooktype.HookInput, logFi
 		switch res.deny {
 		case denyBudget:
 			h.appendLog(out, in, logFile, "WARN", "pass",
-				"supervisor budget exhausted; skipping this routine supervisor launch (high-risk events still launch)",
-				map[string]any{"agent": c.agent, "spent_usd": b.spent, "limit_usd": b.limit, "budget_reason": budget.ReasonExhausted, "kind": res.kind})
-			out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget exhausted ($%.2f of $%.2f); routine supervisor runs are skipped until it is raised, reset, or the month rolls over (yakos budget status)\n", b.spent, b.limit)
+				"supervisor budget exhausted; skipping this routine supervisor launch (high-risk events still launch)", skipExtra(c.agent, b, res.kind))
+			if b.tokensHard() {
+				out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget exhausted (%d of %d tokens); routine supervisor runs are skipped until it is raised, reset, or the month rolls over (yakos budget status)\n", b.tokSpent, b.tokLimit)
+			} else {
+				out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget exhausted ($%.2f of $%.2f); routine supervisor runs are skipped until it is raised, reset, or the month rolls over (yakos budget status)\n", b.spent, b.limit)
+			}
 		case denyBudgetCeiling:
 			if res.first {
 				h.appendLog(out, in, logFile, "WARN", "pass",
-					"supervisor budget ceiling reached; high-risk launches are no longer supervised",
-					map[string]any{"agent": c.agent, "spent_usd": b.spent, "ceiling_usd": b.stop, "budget_reason": budget.ReasonExhausted})
-				out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget ceiling ($%.2f) reached; high-risk supervisor runs are skipped\n", b.stop)
-				writeSynthBudgetFinding(findings, b.stop, h.NowFn())
+					"supervisor budget ceiling reached; high-risk launches are no longer supervised", ceilingExtra(c.agent, b))
+				if b.tokensOver() {
+					out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget ceiling (%d tokens) reached; high-risk supervisor runs are skipped\n", b.tokStop)
+					writeSynthTokenBudgetFinding(findings, b.tokStop, h.NowFn())
+				} else {
+					out.Stderr = fmt.Appendf(out.Stderr, "supervisor-stream: supervisor budget ceiling ($%.2f) reached; high-risk supervisor runs are skipped\n", b.stop)
+					writeSynthBudgetFinding(findings, b.stop, h.NowFn())
+				}
 			}
 		case denyBackoff:
 			h.appendLog(out, in, logFile, "REPORT", "pass",
@@ -365,6 +380,47 @@ func writeSynthBudgetFinding(path string, ceilingUSD float64, now time.Time) {
 	appendSynth(path, now, fmt.Sprintf("Supervisor dollar-budget ceiling ($%.2f) reached: further high-risk events are recorded but no longer supervised. Raise or reset the budget (yakos budget status) and review the session and the pending events file.", ceilingUSD))
 }
 
+// writeSynthTokenBudgetFinding is that alert for the token-budget ceiling (K-136):
+// the same text with the unit changed, and the ceiling in plain digits. It shares
+// the dollar ceiling's once-per-session flag, so a session gets one budget
+// CRITICAL, naming the ceiling that was reached. Bash twin:
+// _ss_synth_token_budget_finding.
+func writeSynthTokenBudgetFinding(path string, ceilingTokens int64, now time.Time) {
+	appendSynth(path, now, fmt.Sprintf("Supervisor token-budget ceiling (%d tokens) reached: further high-risk events are recorded but no longer supervised. Raise or reset the budget (yakos budget status) and review the session and the pending events file.", ceilingTokens))
+}
+
+// The four budget records, by unit. A dollar record is the one K-119 wrote, field
+// for field; a token record has the same shape with spent_tokens, limit_tokens and
+// ceiling_tokens in the place of the dollar fields (logExtraOrder keeps their
+// order the same as bash's literals). Bash twin: _ss_gate_report.
+func warnExtra(agent string, b budgetGate) map[string]any {
+	if b.tokensWarn() {
+		return map[string]any{"agent": agent, "spent_tokens": b.tokSpent, "limit_tokens": b.tokLimit, "budget_reason": budget.ReasonWarning}
+	}
+	return map[string]any{"agent": agent, "spent_usd": b.spent, "limit_usd": b.limit, "budget_reason": budget.ReasonWarning}
+}
+
+func exemptExtra(agent string, b budgetGate) map[string]any {
+	if b.tokensHard() {
+		return map[string]any{"agent": agent, "spent_tokens": b.tokSpent, "limit_tokens": b.tokLimit, "ceiling_tokens": b.tokStop, "budget_reason": budget.ReasonExhausted}
+	}
+	return map[string]any{"agent": agent, "spent_usd": b.spent, "limit_usd": b.limit, "ceiling_usd": b.stop, "budget_reason": budget.ReasonExhausted}
+}
+
+func skipExtra(agent string, b budgetGate, kind string) map[string]any {
+	if b.tokensHard() {
+		return map[string]any{"agent": agent, "spent_tokens": b.tokSpent, "limit_tokens": b.tokLimit, "budget_reason": budget.ReasonExhausted, "kind": kind}
+	}
+	return map[string]any{"agent": agent, "spent_usd": b.spent, "limit_usd": b.limit, "budget_reason": budget.ReasonExhausted, "kind": kind}
+}
+
+func ceilingExtra(agent string, b budgetGate) map[string]any {
+	if b.tokensOver() {
+		return map[string]any{"agent": agent, "spent_tokens": b.tokSpent, "ceiling_tokens": b.tokStop, "budget_reason": budget.ReasonExhausted}
+	}
+	return map[string]any{"agent": agent, "spent_usd": b.spent, "ceiling_usd": b.stop, "budget_reason": budget.ReasonExhausted}
+}
+
 func appendSynth(path string, now time.Time, rationale string) {
 	rec := map[string]any{
 		"ts": now.UTC().Format(time.RFC3339), "batch_size": 0, "scores": map[string]any{},
@@ -393,11 +449,13 @@ const (
 	reasonBudgetUnavailable = "budget_unavailable"
 )
 
-// evalBudget reads the supervisor's dollar budget in-process (no fork). Any
-// problem fails open: a zero budgetGate allows the launch, and one whose spend
-// could not be read says so in cause (K-128, S3). A budget that is off (a limit
-// of 0) is not a failure. The project's agent_budgets can only lower the limit,
-// never loosen it (budget.Resolve).
+// evalBudget reads the supervisor's budget in-process (no fork), over both of its
+// units (K-136). Any problem fails open: a zero budgetGate allows the launch, and
+// one whose spend could not be read says so in cause (K-128, S3). A budget that is
+// off is not a failure: it has no limit of either kind, a dollar limit of 0 AND a
+// token limit of 0. The decision is the unified status's: hard_stop when either
+// limit is reached, and over when either is past its dispatch stop. The project's
+// agent_budgets can only lower the limit, never loosen it (budget.Resolve).
 func (h *Hook) evalBudget(agent string, in hooktype.HookInput) budgetGate {
 	st, err := budget.Evaluate(agent, budget.Options{Project: h.resolveProjectDir(in), Now: h.NowFn})
 	if budgetEvaluatedHook != nil {
@@ -406,13 +464,14 @@ func (h *Hook) evalBudget(agent string, in hooktype.HookInput) budgetGate {
 	if err != nil {
 		return budgetGate{cause: budgetCauseReadError}
 	}
-	if st.LimitUSD <= 0 {
+	if !st.HasLimit() {
 		return budgetGate{}
 	}
 	return budgetGate{
 		hard:  st.State == budget.StateHardStop,
-		over:  st.State == budget.StateHardStop && st.SpentUSD+1e-9 >= st.StopUSD,
+		over:  st.State == budget.StateHardStop && st.OverStop(),
 		state: string(st.State), spent: st.SpentUSD, limit: st.LimitUSD, stop: st.StopUSD,
+		tokSpent: st.SpentTokens, tokLimit: st.LimitTokens, tokStop: st.StopTokens,
 	}
 }
 

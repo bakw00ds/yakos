@@ -71,8 +71,9 @@ type limits struct {
 	// ceil is the high-risk launch ceiling: 3x the TRUSTED cap (policy or
 	// default), never reduced by a project value. 0 means unlimited.
 	ceil int
-	// bud is the supervisor's dollar-budget position (K-119), evaluated
-	// in-process at launch time. Zero value = no budget in force.
+	// bud is the supervisor's budget position (K-119, K-136), over its dollar
+	// limit, its token limit or both, evaluated in-process at launch time. Zero
+	// value = no budget in force.
 	bud     budgetGate
 	ignored []string // project values refused because they reduce supervision
 	invalid []string // values below their minimum, replaced by the default
@@ -239,20 +240,50 @@ func resolveLimits(cfg *supervisorConfig, model string, env map[string]string) l
 	return l
 }
 
-// budgetGate is the supervisor budget as the launch gate sees it. hard is
-// state hard_stop (spent >= limit); over is spent >= the dispatch stop (2x the
-// limit), the ceiling for high-risk launches. Both false when the budget is
-// off or the read failed (fail open). cause is empty unless the read failed
-// (K-128, S3): then it says why and the gate writes one WARN naming it. A budget
-// that is merely off is not a failure. Bash twin: _ss_budget.
+// budgetGate is the supervisor budget as the launch gate sees it, over both of
+// its units (K-136): a dollar limit, a token limit, or both. hard is state
+// hard_stop (either limit reached); over is either limit past its dispatch stop
+// (2x the limit), the ceiling for high-risk launches. Both false when the budget
+// is off (no limit of either kind) or the read failed (fail open). cause is
+// empty unless the read failed (K-128, S3): then it says why and the gate writes
+// one WARN naming it. A budget that is merely off is not a failure. A limit that
+// is not configured is 0, and never trips. Bash twin: _ss_budget.
 type budgetGate struct {
 	hard, over bool
 	state      string
-	spent      float64
-	limit      float64
-	stop       float64
+	spent      float64 // dollars spent in the window
+	limit      float64 // the dollar limit; 0 when there is none
+	stop       float64 // the dollar dispatch stop (the limit times the stop factor)
+	tokSpent   int64   // tokens used in the window
+	tokLimit   int64   // the token limit; 0 when there is none
+	tokStop    int64   // the token dispatch stop
 	cause      string
 }
+
+// Every message about the budget names ONE unit, tokens first (K-136: tokens are
+// the primary unit). Which one depends on what the message is about, and the
+// three rules below are the whole of it. The bash twin computes the same three
+// from the same numbers (_ss_budget: the uw, uh and uc flags).
+
+// tokensWarn: at the warning level, the unit with the larger share of its limit,
+// a tie going to tokens. A budget with one limit names that limit.
+func (b budgetGate) tokensWarn() bool {
+	if b.tokLimit <= 0 {
+		return false
+	}
+	if b.limit <= 0 {
+		return true
+	}
+	return float64(b.tokSpent)/float64(b.tokLimit) >= b.spent/b.limit
+}
+
+// tokensHard: at the limit (hard_stop), tokens when the token limit has itself
+// been reached, else dollars.
+func (b budgetGate) tokensHard() bool { return b.tokLimit > 0 && b.tokSpent >= b.tokLimit }
+
+// tokensOver: at the 2x ceiling, tokens when the token limit is itself past its
+// dispatch stop, else dollars: the message names the ceiling that was reached.
+func (b budgetGate) tokensOver() bool { return b.tokLimit > 0 && b.tokSpent >= b.tokStop }
 
 // denyReason is why allowLaunch refused ("" means allow).
 type denyReason string
@@ -272,7 +303,7 @@ const (
 // allowLaunch is the single gate decision. High-risk launches bypass the cap
 // and the interval up to a ceiling of 3x the cap; routine launches count
 // against the cap and wait out the interval; an account session limit pauses
-// both. The #316 dollar budget plugs in here and exempts high-risk the same
+// both. The #316 budget (dollars, tokens or both) plugs in here and exempts high-risk the same
 // way: routine launches are refused at the supervisor's hard_stop, high-risk
 // ones run on up to 2x the limit (decided here, in-process: no env var or flag
 // carries the exemption). Bash twin: _ss_allow.
