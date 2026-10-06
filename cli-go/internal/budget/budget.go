@@ -331,11 +331,11 @@ func Evaluate(agent string, o Options) (Status, error) {
 	// and it is at hard_stop when EITHER limit is reached (K-136).
 	hard := false
 	if lim.USD > 0 {
-		st.Pct = spent / lim.USD * 100
+		st.Pct = finitePct(spent / lim.USD * 100)
 		hard = spent+1e-9 >= lim.USD
 	}
 	if lim.Tokens > 0 {
-		st.TokensPct = float64(spentTok) / float64(lim.Tokens) * 100
+		st.TokensPct = finitePct(float64(spentTok) / float64(lim.Tokens) * 100)
 		st.Pct = math.Max(st.Pct, st.TokensPct)
 		hard = hard || spentTok >= lim.Tokens
 	}
@@ -359,6 +359,22 @@ func Evaluate(agent string, o Options) (Status, error) {
 		st.Projects = st.Projects[:10]
 	}
 	return st, nil
+}
+
+// maxPct bounds the share of a limit that a status reports as used. A limit that is
+// tiny but not zero (a trusted-policy 5e-324 is a number in range) divides to +Inf,
+// which json cannot encode: `budget check --json` would print nothing a hook could
+// parse (sec-330, final round of #330). The state never depends on it, since a share
+// that large is a hard stop either way, and every amount and stop a status carries is
+// already finite (the 1e9 dollar bound, 0 for an off unit).
+const maxPct = 1e12
+
+// finitePct is p, bounded to maxPct and 0 when it is not a number.
+func finitePct(p float64) float64 {
+	if math.IsNaN(p) {
+		return 0
+	}
+	return math.Min(p, maxPct)
 }
 
 // Enforce is the dispatch pre-flight: it returns a *RefusedError when agent is
