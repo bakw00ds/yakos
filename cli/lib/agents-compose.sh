@@ -214,6 +214,39 @@ yk_agents_symlink_problem() {
     return 0
 }
 
+# yk_agents_warn_dir <kind> <dir> <reason>     kind is "agent" (or "skill")
+yk_agents_warn_dir() {
+    printf 'yakos: WARN: ignoring %s directory %s: %s\n' "$1" "$2" "$3" >&2
+}
+
+# yk_agents_dir_problem <project-root> <dir>
+#   For a project's agent (or skill) directory reached through a symlink, the
+#   directory itself or the .claude above it, print why it may not be read; print
+#   nothing for a plain directory and for a link that resolves to a directory
+#   inside the project. Files seen through a linked directory are regular files and
+#   never reach yk_agents_symlink_problem, so the directory is checked itself. Inside
+#   means an ancestor directory of the target IS the project (same device and
+#   inode). Go twin: agentscompose.InspectProjectDir.
+yk_agents_dir_problem() {
+    local project="$1" dir="$2" real d
+    [ -n "$project" ] || return 0
+    if [ ! -L "$project/.claude" ] && [ ! -L "$dir" ]; then return 0; fi
+    # Nothing there, so nothing is read through the link.
+    if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then return 0; fi
+    if [ ! -d "$dir" ] || ! real="$(cd -P -- "$dir" 2>/dev/null && pwd -P)"; then
+        echo "symlink does not resolve to a directory"
+        return 0
+    fi
+    d="$(dirname -- "$real")"
+    while :; do
+        if [ "$d" -ef "$project" ]; then return 0; fi
+        if [ "$d" = "/" ] || [ "$d" = "." ]; then break; fi
+        d="$(dirname -- "$d")"
+    done
+    echo "symlink resolves outside the project directory"
+    return 0
+}
+
 # yk_agents_resolve_extends <yakos-root> <project-body> <extends-name>
 #   When a project agent declares `extends: <framework-name>`, prepend
 #   the framework template's body to the project body. The combined
@@ -390,9 +423,16 @@ yk_agents_compose() {
     fi
 
     local fw_dir="$yakos_root/lib/agents"
-    local proj_dir=""
-    if [ -n "$project_root" ] && [ -d "$project_root/.claude/agents" ]; then
-        proj_dir="$project_root/.claude/agents"
+    local proj_dir="" dir_reason=""
+    if [ -n "$project_root" ]; then
+        # The project's agent directory is checked itself: a link to a directory
+        # outside the project is skipped whole, with one warning.
+        dir_reason="$(yk_agents_dir_problem "$project_root" "$project_root/.claude/agents")"
+        if [ -n "$dir_reason" ]; then
+            yk_agents_warn_dir agent "$project_root/.claude/agents" "$dir_reason"
+        elif [ -d "$project_root/.claude/agents" ]; then
+            proj_dir="$project_root/.claude/agents"
+        fi
     fi
 
     local merged

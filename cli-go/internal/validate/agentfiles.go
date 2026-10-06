@@ -56,6 +56,23 @@ func agentFileFinding(path string, roots []string) string {
 	return ""
 }
 
+// agentsDirOf and skillsDirOf are the directories a pass reads agent and skill
+// files from: base/agents and base/skills, or a path that never exists when
+// validateTree refused the project's directory, so the pass finds nothing in it.
+func agentsDirOf(cfg Config, base string) string {
+	if cfg.skipAgentsDir {
+		return filepath.Join(base, ".rejected-agents")
+	}
+	return filepath.Join(base, "agents")
+}
+
+func skillsDirOf(cfg Config, base string) string {
+	if cfg.skipSkillsDir {
+		return filepath.Join(base, ".rejected-skills")
+	}
+	return filepath.Join(base, "skills")
+}
+
 // agentRootsFor returns the directories a symlinked agent file under base/agents
 // may resolve into: lib/agents, and in project mode (base is a project's .claude)
 // the project's .claude/agents too. It is what Compose uses for the same tree.

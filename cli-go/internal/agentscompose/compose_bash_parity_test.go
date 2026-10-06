@@ -63,16 +63,30 @@ yk_agents_compose "$1" "$2"
 // lines it printed about files it ignored.
 func runBashComposer(t *testing.T, shell, root, project string) (ids, warns []string) {
 	t.Helper()
+	ids, stderr := bashCompose(t, shell, root, project)
+	for _, line := range strings.Split(stderr, "\n") {
+		if strings.HasPrefix(line, "yakos: WARN: ignoring agent file ") {
+			warns = append(warns, line)
+		}
+	}
+	sort.Strings(warns)
+	return ids, warns
+}
+
+// bashCompose runs the bash composer and returns the ids it composed, sorted, and
+// everything it wrote to stderr.
+func bashCompose(t *testing.T, shell, root, project string) (ids []string, stderr string) {
+	t.Helper()
 	repoLib, err := filepath.Abs(filepath.Join("..", "..", "..", "cli", "lib"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(shell, "-c", composeScript, "composer", root, project)
 	cmd.Env = append(os.Environ(), "YAKOS_LIB="+repoLib, "HOME="+t.TempDir())
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	var stdout, errBuf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &errBuf
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("%s: composer failed: %v\nstderr:\n%s", shell, err, stderr.String())
+		t.Fatalf("%s: composer failed: %v\nstderr:\n%s", shell, err, errBuf.String())
 	}
 	var composed map[string]json.RawMessage
 	if err := json.Unmarshal(stdout.Bytes(), &composed); err != nil {
@@ -81,14 +95,8 @@ func runBashComposer(t *testing.T, shell, root, project string) (ids, warns []st
 	for id := range composed {
 		ids = append(ids, id)
 	}
-	for _, line := range strings.Split(stderr.String(), "\n") {
-		if strings.HasPrefix(line, "yakos: WARN: ignoring agent file ") {
-			warns = append(warns, line)
-		}
-	}
 	sort.Strings(ids)
-	sort.Strings(warns)
-	return ids, warns
+	return ids, errBuf.String()
 }
 
 func TestBashComposerAppliesTheAgentFileRulesLikeCompose(t *testing.T) {
@@ -228,5 +236,152 @@ func TestBashComposerDoesNotOpenALinkToAFIFO(t *testing.T) {
 		if len(warns) != 1 || warns[0] != want {
 			t.Errorf("%s: warnings = %q, want %q", shell, warns, want)
 		}
+	}
+}
+
+// The project's agent directory is checked itself, in both twins: a symlinked
+// `.claude/agents`, or a symlinked `.claude` above it, must resolve to a directory
+// inside the project, or the composer skips the whole directory with one warning.
+// Compose and the bash composer run on the same fixtures, under each bash, and the
+// roster and the warning lines must be the same, byte for byte, and as written here.
+func TestBashComposerAppliesTheDirectoryRuleLikeCompose(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is not installed; the bash composer needs it")
+	}
+	const dirWarn = "yakos: WARN: ignoring agent directory "
+	const fileWarn = "yakos: WARN: ignoring agent file "
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, root, project string)
+		ids   string
+		warns func(project string) []string
+	}{
+		{
+			name: "agents linked outside the project",
+			setup: func(t *testing.T, root, project string) {
+				symlinkOrSkip(t, filepath.Join(outsideTree(t), "agents"), filepath.Join(project, ".claude", "agents"))
+			},
+			ids: "backend",
+			warns: func(project string) []string {
+				return []string{dirWarn + filepath.Join(project, ".claude", "agents") + ": " + DirOutsideReason}
+			},
+		},
+		{
+			name: "dot-claude linked outside the project",
+			setup: func(t *testing.T, root, project string) {
+				symlinkOrSkip(t, outsideTree(t), filepath.Join(project, ".claude"))
+			},
+			ids: "backend",
+			warns: func(project string) []string {
+				return []string{dirWarn + filepath.Join(project, ".claude", "agents") + ": " + DirOutsideReason}
+			},
+		},
+		{
+			name: "agents linked inside the project, with the rule for files inside it",
+			setup: func(t *testing.T, root, project string) {
+				writeAgentDir(t, filepath.Join(project, "config", "agents"), map[string]string{"mine": "model: haiku\n"})
+				writeFileT(t, filepath.Join(project, ".env"), secretText+"\n")
+				symlinkOrSkip(t, filepath.Join("..", "..", ".env"), filepath.Join(project, "config", "agents", "dotenv.md"))
+				symlinkOrSkip(t, filepath.Join(root, "lib", "agents", "backend.md"), filepath.Join(project, "config", "agents", "framework.md"))
+				symlinkOrSkip(t, filepath.Join("..", "config", "agents"), filepath.Join(project, ".claude", "agents"))
+			},
+			ids: "backend,framework,mine",
+			warns: func(project string) []string {
+				return []string{fileWarn + filepath.Join(project, ".claude", "agents", "dotenv.md") + ": " + AgentOutsideReason}
+			},
+		},
+		{
+			name: "dot-claude linked inside the project",
+			setup: func(t *testing.T, root, project string) {
+				writeAgentDir(t, filepath.Join(project, "dotclaude", "agents"), map[string]string{"mine": "model: haiku\n"})
+				symlinkOrSkip(t, "dotclaude", filepath.Join(project, ".claude"))
+			},
+			ids:   "backend,mine",
+			warns: func(string) []string { return nil },
+		},
+		{
+			name: "dot-claude linked inside the project, without an agents directory",
+			setup: func(t *testing.T, root, project string) {
+				writeFileT(t, filepath.Join(project, "dotclaude", "rules", "r.md"), "x\n")
+				symlinkOrSkip(t, "dotclaude", filepath.Join(project, ".claude"))
+			},
+			ids:   "backend",
+			warns: func(string) []string { return nil },
+		},
+		{
+			name: "agents linked to nothing",
+			setup: func(t *testing.T, root, project string) {
+				symlinkOrSkip(t, filepath.Join(project, "does-not-exist"), filepath.Join(project, ".claude", "agents"))
+			},
+			ids: "backend",
+			warns: func(project string) []string {
+				return []string{dirWarn + filepath.Join(project, ".claude", "agents") + ": " + DirUnresolvedReason}
+			},
+		},
+		{
+			name: "agents linked to a file",
+			setup: func(t *testing.T, root, project string) {
+				writeFileT(t, filepath.Join(project, "notes.txt"), "not a directory\n")
+				symlinkOrSkip(t, filepath.Join(project, "notes.txt"), filepath.Join(project, ".claude", "agents"))
+			},
+			ids: "backend",
+			warns: func(project string) []string {
+				return []string{dirWarn + filepath.Join(project, ".claude", "agents") + ": " + DirUnresolvedReason}
+			},
+		},
+		{
+			name: "a plain agents directory",
+			setup: func(t *testing.T, root, project string) {
+				writeAgentDir(t, filepath.Join(project, ".claude", "agents"), map[string]string{"mine": "model: haiku\n"})
+			},
+			ids:   "backend,mine",
+			warns: func(string) []string { return nil },
+		},
+	}
+	shells := bashes(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			warnings := captureWarnings(t)
+			root, project := dirsFixture(t)
+			tc.setup(t, root, project)
+
+			roster, err := Compose(root, project)
+			if err != nil {
+				t.Fatalf("Compose = %v", err)
+			}
+			goIDs := rosterIDs(roster)
+			sort.Strings(goIDs)
+			var goWarns []string
+			for _, line := range strings.Split(warnings.String(), "\n") {
+				if strings.HasPrefix(line, dirWarn) || strings.HasPrefix(line, fileWarn) {
+					goWarns = append(goWarns, line)
+				}
+			}
+			sort.Strings(goWarns)
+			want := tc.warns(project)
+			sort.Strings(want)
+			if strings.Join(goIDs, ",") != tc.ids || strings.Join(goWarns, "\n") != strings.Join(want, "\n") {
+				t.Fatalf("Compose: roster %v, warnings\n%s\nwant %s and\n%s", goIDs, strings.Join(goWarns, "\n"), tc.ids, strings.Join(want, "\n"))
+			}
+			for _, shell := range shells {
+				ids, stderr := bashCompose(t, shell, root, project)
+				var warns []string
+				for _, line := range strings.Split(stderr, "\n") {
+					if strings.HasPrefix(line, dirWarn) || strings.HasPrefix(line, fileWarn) {
+						warns = append(warns, line)
+					}
+				}
+				sort.Strings(warns)
+				if strings.Join(ids, ",") != tc.ids {
+					t.Errorf("%s: the bash composer composed %v, want %s", shell, ids, tc.ids)
+				}
+				if strings.Join(warns, "\n") != strings.Join(want, "\n") {
+					t.Errorf("%s: the bash composer's warnings differ\n got:\n%s\nwant:\n%s", shell, strings.Join(warns, "\n"), strings.Join(want, "\n"))
+				}
+				if strings.Contains(stderr, "MARKER") || strings.Contains(stderr, "TOPSECRET") {
+					t.Errorf("%s: text of a refused file reached stderr:\n%s", shell, stderr)
+				}
+			}
+		})
 	}
 }

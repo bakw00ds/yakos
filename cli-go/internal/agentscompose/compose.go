@@ -167,7 +167,9 @@ func Compose(yakosRoot, project string) ([]ComposedAgent, error) {
 	projDir := ""
 	if project != "" {
 		candidate := filepath.Join(project, ".claude", "agents")
-		if stat, err := os.Stat(candidate); err == nil && stat.IsDir() {
+		if p := InspectProjectDir(project, candidate); p != DirOK {
+			warnSkippedDir("agent", candidate, p.Reason())
+		} else if stat, err := os.Stat(candidate); err == nil && stat.IsDir() {
 			projDir = candidate
 		}
 	}
@@ -281,6 +283,15 @@ func warnSkippedFile(kind, path, reason string) {
 		return
 	}
 	fmt.Fprintf(WarnWriter, "yakos: WARN: ignoring %s file %s: %s\n", kind, path, reason)
+}
+
+// warnSkippedDir says once per directory why a project's agent or skill directory
+// was left out whole. kind is "agent" or "skill".
+func warnSkippedDir(kind, path, reason string) {
+	if _, seen := warnedPaths.LoadOrStore(path, struct{}{}); seen {
+		return
+	}
+	fmt.Fprintf(WarnWriter, "yakos: WARN: ignoring %s directory %s: %s\n", kind, path, reason)
 }
 
 // parseAgentContent parses and resolves the content of a single agent .md file.
@@ -628,7 +639,9 @@ func ComposeSkills(yakosRoot, project string) ([]ComposedSkill, error) {
 	projDir := ""
 	if project != "" {
 		candidate := filepath.Join(project, ".claude", "skills")
-		if stat, err := os.Stat(candidate); err == nil && stat.IsDir() {
+		if p := InspectProjectDir(project, candidate); p != DirOK {
+			warnSkippedDir("skill", candidate, p.Reason())
+		} else if stat, err := os.Stat(candidate); err == nil && stat.IsDir() {
 			projDir = candidate
 		}
 	}

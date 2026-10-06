@@ -55,7 +55,7 @@ func TestDecisionGuards_CleanTreeAddsNoOutput(t *testing.T) {
 	makeAgentFile(t, filepath.Join(base, "agents"), "tester.md", validAgentBody())
 	_, with := runTree(t, base)
 	var buf bytes.Buffer
-	checkDecisionGuards(&Result{}, &buf, base, nil)
+	checkDecisionGuards(Config{}, &Result{}, &buf, base, nil)
 	if buf.Len() != 0 {
 		t.Fatalf("clean tree must emit nothing (bash parity), got %q", buf.String())
 	}

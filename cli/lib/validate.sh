@@ -151,9 +151,32 @@ validate_tree() {
         info "directory does not exist; nothing to validate"
         return 0
     fi
+    # The project's agent and skill directories are checked themselves: one that
+    # is a symlink, or has a symlinked .claude above it, must resolve to a
+    # directory inside the project, or the dispatcher skips it whole. A rejected
+    # directory is reported here, once, and read by no pass below: those passes
+    # use $VALIDATE_AGENTS_DIR and $VALIDATE_SKILLS_DIR, which name a path that
+    # never exists for a rejected one. Go twin: validateTree in validate.go.
+    local project_dir="" agents_dir="$base/agents" skills_dir="$base/skills" dir_kind dir_reason
+    if [ "$label" = "project" ]; then
+        project_dir="$(dirname -- "$base")"
+        for dir_kind in agents skills; do
+            dir_reason="$(yk_agents_dir_problem "$project_dir" "$base/$dir_kind")"
+            if [ -n "$dir_reason" ]; then
+                err "$base/$dir_kind: $dir_reason; the Go dispatcher skips it"
+                case "$dir_kind" in
+                    agents) agents_dir="$base/.rejected-agents" ;;
+                    skills) skills_dir="$base/.rejected-skills" ;;
+                esac
+            fi
+        done
+    fi
+    VALIDATE_AGENTS_DIR="$agents_dir"
+    VALIDATE_SKILLS_DIR="$skills_dir"
+
     local n_agents n_skills n_rules
-    n_agents="$(count_dir_files "$base/agents" '*.md')"
-    n_skills="$(count_dir_files "$base/skills" 'SKILL.md')"
+    n_agents="$(count_dir_files "$agents_dir" '*.md')"
+    n_skills="$(count_dir_files "$skills_dir" 'SKILL.md')"
     n_rules="$(count_dir_files "$base/rules" '*.md')"
     info "agents: $n_agents | skills: $n_skills | rules: $n_rules"
 
@@ -177,8 +200,8 @@ validate_tree() {
             fi
         fi
         ok "$f"
-    done < <(find "$base/agents" -type f -name '*.md' ! -name 'README.md' 2>/dev/null
-             find "$base/skills" -type f -name 'SKILL.md' 2>/dev/null
+    done < <(find "$agents_dir" -type f -name '*.md' ! -name 'README.md' 2>/dev/null
+             find "$skills_dir" -type f -name 'SKILL.md' 2>/dev/null
              find "$base/rules"  -type f -name '*.md' ! -name 'README.md' ! -name 'INDEX.md' 2>/dev/null)
 
     # settings.json (project-only)
@@ -199,12 +222,7 @@ validate_tree() {
     fi
 
     # Agent frontmatter enums: runtime / runtime-fallback / model-policy, and the
-    # agent files the Go dispatcher would skip. A symlink may resolve into the
-    # framework's lib/, and into the project directory in project mode.
-    local project_dir=""
-    if [ "$label" = "project" ]; then
-        project_dir="$(dirname -- "$base")"
-    fi
+    # agent files the Go dispatcher would skip.
     check_agent_enums "$base" "$project_dir"
 
     # Line-budget WARNs (per Phase 1.5 §10 + STYLE.md §7)
@@ -214,7 +232,7 @@ validate_tree() {
     check_playbook_references "$base"
 
     # Golden-case eval validation (project mode)
-    check_eval_dirs "$base"
+    check_eval_dirs "$base" "$agents_dir"
 }
 
 # ---- standards checks (framework-mode only; STYLE.md §1-§7) ----------------
@@ -299,7 +317,8 @@ _validate_agent_file_problem() {
 
 check_agent_enums() {
     local base="$1" project_dir="${2:-}" agent_file name fm v problem ext
-    [ -d "$base/agents" ] || return 0
+    local agents_dir="${VALIDATE_AGENTS_DIR:-$base/agents}"
+    [ -d "$agents_dir" ] || return 0
     while IFS= read -r agent_file; do
         [ -n "$agent_file" ] || continue
         name="$(basename -- "$agent_file")"
@@ -345,7 +364,7 @@ check_agent_enums() {
                 *) err "$agent_file: model-policy: $v is not a model tier (want one of: ${_VALIDATE_MODEL_TIERS// /, }); it is the tier \`yakos model-routing promote\` wrote, not a policy name" ;;
             esac
         done < <(_validate_fm_values "$fm" "model-policy")
-    done < <(find "$base/agents" -maxdepth 1 ! -type d -name '*.md' 2>/dev/null | sort)
+    done < <(find "$agents_dir" -maxdepth 1 ! -type d -name '*.md' 2>/dev/null | sort)
 }
 
 check_line_budgets() {
@@ -360,7 +379,7 @@ check_line_budgets() {
         if [ "$n" -lt 80 ] || [ "$n" -gt 140 ]; then
             warn "$f: agent file is $n lines (budget 80-140)"
         fi
-    done < <(find "$base/agents" -type f -name '*.md' ! -name 'README.md' 2>/dev/null)
+    done < <(find "${VALIDATE_AGENTS_DIR:-$base/agents}" -type f -name '*.md' ! -name 'README.md' 2>/dev/null)
 
     while IFS= read -r f; do
         [ -n "$f" ] || continue
@@ -374,7 +393,7 @@ check_line_budgets() {
         if [ "$n" -lt 80 ] || [ "$n" -gt 350 ]; then
             warn "$f: skill is $n lines (budget 80-350)"
         fi
-    done < <(find "$base/skills" -type f -name 'SKILL.md' 2>/dev/null)
+    done < <(find "${VALIDATE_SKILLS_DIR:-$base/skills}" -type f -name 'SKILL.md' 2>/dev/null)
 
     while IFS= read -r f; do
         [ -n "$f" ] || continue
@@ -400,10 +419,11 @@ check_playbook_references() {
 
     local pb_dir="$YAKOS_ROOT/lib/playbooks"
 
-    # Collect referenced playbooks across all md files in the base
+    # Collect referenced playbooks across all md files in the base. Regular files
+    # only: `grep -r` reads a FIFO among them, and never returns.
     local refs
-    refs="$(grep -rhE '^[[:space:]]*-[[:space:]]*playbook:[A-Za-z0-9._/-]+' \
-                  "$base/agents" "$base/rules" "$base/skills" 2>/dev/null \
+    refs="$(find "${VALIDATE_AGENTS_DIR:-$base/agents}" "$base/rules" "${VALIDATE_SKILLS_DIR:-$base/skills}" \
+                  -type f -exec grep -hE '^[[:space:]]*-[[:space:]]*playbook:[A-Za-z0-9._/-]+' {} + 2>/dev/null \
             | sed -E 's/.*playbook:([A-Za-z0-9._/-]+).*/\1/' \
             | sort -u || true)"
 
@@ -660,7 +680,9 @@ check_eval_dirs() {
     # Walk agent search roots provided as arguments.  For each agent .md
     # file that has a sibling eval/ directory, validate every case-*.json
     # therein.  Also warn when model-policy: is set but eval/ is absent.
-    local root="$1"
+    # <agents-dir> defaults to <root>/agents; validate_tree passes a path that
+    # never exists for a project agent directory the dispatcher refuses.
+    local root="$1" agents_dir="${2:-$1/agents}"
     [ -d "$root" ] || return 0
 
     while IFS= read -r agent_file; do
@@ -715,7 +737,7 @@ check_eval_dirs() {
         if [ "$case_count" -eq 0 ]; then
             warn "$eval_dir: eval/ directory exists but contains no case-*.json files"
         fi
-    done < <(find "$root/agents" -maxdepth 1 -name '*.md' -type f 2>/dev/null)
+    done < <(find "$agents_dir" -maxdepth 1 -name '*.md' -type f 2>/dev/null)
 }
 
 run_standards_checks() {

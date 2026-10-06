@@ -265,3 +265,132 @@ func TestAgentFiles_ANonBareExtendsIsRejected(t *testing.T) {
 		t.Errorf("unexpected warning:\n%s", out)
 	}
 }
+
+// The project's agent and skill directories are checked themselves (rev-324): a
+// file seen through a linked directory is a regular file, so the rule for files
+// never sees it. One that is a symlink, or has a symlinked .claude above it, must
+// resolve to a directory inside the project, or the dispatcher skips it whole, and
+// validate says so once and reads nothing under it.
+const dirOutsideText = "symlink resolves outside the project directory; the Go dispatcher skips it"
+
+// dirsTree is a directory outside any project laid out like a .claude, with an
+// agent and a skill that would each be a finding if a pass read them. Every pass
+// that reads agent files has something to say about the agent: the frontmatter and
+// enum passes (a runtime that is not one), the line budget (it is short), the
+// playbook references, the eval check (a model-policy with no eval/ directory) and
+// the decision guard (a runtime fallback that names jev). The skill has a broken
+// frontmatter, a short body and a playbook reference of its own. The rules
+// directory has one good rule: with agents and skills both refused it is all that
+// is left to validate, and validate stops early when there is nothing, which would
+// hide whether the passes after that point read what was refused.
+func dirsTree(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeFile(t, filepath.Join(dir, "rules", "note.md"), "---\nname: note\n---\n\n# note\n"+strings.Repeat("filler\n", 70))
+	writeFile(t, filepath.Join(dir, "agents", "evil.md"),
+		"---\nid: evil\nruntime: nosuchruntime\nruntime-fallback: [jev]\nmodel-policy: haiku\n---\n\n# evil\n\n- playbook:evil-agent-ref\n")
+	writeFile(t, filepath.Join(dir, "skills", "evil", "SKILL.md"),
+		"---\nname: [unclosed\n---\n\n- playbook:evil-skill-ref\n")
+	return dir
+}
+
+func TestAgentFiles_ADirectoryLinkedOutsideTheProjectIsRejectedOnce(t *testing.T) {
+	root, proj := t.TempDir(), t.TempDir()
+	outside := dirsTree(t)
+	agentsLink := filepath.Join(proj, ".claude", "agents")
+	skillsLink := filepath.Join(proj, ".claude", "skills")
+	symlinkOrSkip(t, filepath.Join(outside, "agents"), agentsLink)
+	symlinkOrSkip(t, filepath.Join(outside, "skills"), skillsLink)
+
+	out, errs := validateProject(t, root, proj)
+	want := []string{agentsLink + ": " + dirOutsideText, skillsLink + ": " + dirOutsideText}
+	if strings.Join(errs, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("errors =\n%s\nwant\n%s\nfull output:\n%s", strings.Join(errs, "\n"), strings.Join(want, "\n"), out)
+	}
+	if strings.Contains(out, "evil") || strings.Contains(out, "[warn]") {
+		t.Errorf("a pass read through the refused directory, or warned:\n%s", out)
+	}
+}
+
+func TestAgentFiles_ALinkedDotClaudeOutsideTheProjectRejectsBothDirectories(t *testing.T) {
+	root, proj := t.TempDir(), t.TempDir()
+	symlinkOrSkip(t, dirsTree(t), filepath.Join(proj, ".claude"))
+
+	out, errs := validateProject(t, root, proj)
+	want := []string{
+		filepath.Join(proj, ".claude", "agents") + ": " + dirOutsideText,
+		filepath.Join(proj, ".claude", "skills") + ": " + dirOutsideText,
+	}
+	if strings.Join(errs, "\n") != strings.Join(want, "\n") || strings.Contains(out, "evil") {
+		t.Fatalf("errors =\n%s\nwant\n%s\nfull output:\n%s", strings.Join(errs, "\n"), strings.Join(want, "\n"), out)
+	}
+	// the refused directories are not counted either, only the one good rule is
+	if !strings.Contains(out, "agents: 0 | skills: 0 | rules: 1") {
+		t.Errorf("the count line should show 0 agents, 0 skills and 1 rule:\n%s", out)
+	}
+}
+
+// The framework's own lib/agents is never subject to the rule for a project's
+// directories, even when it is a link: framework mode does not apply it.
+func TestAgentFiles_FrameworkModeNeverAppliesTheDirectoryRule(t *testing.T) {
+	root, elsewhere := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(elsewhere, "agents", "real.md"), agentBody("real"))
+	writeFile(t, filepath.Join(root, "lib", "rules", "r.md"), "---\nname: r\n---\n\n# r\n"+strings.Repeat("filler\n", 70))
+	symlinkOrSkip(t, filepath.Join(elsewhere, "agents"), filepath.Join(root, "lib", "agents"))
+
+	t.Setenv("HOME", t.TempDir())
+	var buf bytes.Buffer
+	cfg := Config{YakosRoot: root, Writer: &buf, ErrWriter: &buf}
+	r := &Result{}
+	validateTree(cfg, r, &buf, "framework", filepath.Join(root, "lib"))
+	for _, f := range r.Findings {
+		if f.Level == LevelErr {
+			t.Errorf("unexpected error in framework mode: %s\n%s", f.Message, buf.String())
+		}
+	}
+}
+
+// Linked to a directory inside the project is accepted: no finding about the
+// directory. (validate does not walk into a symlinked directory, as it never did,
+// so what is inside it is not validated; the dispatcher composes it, and applies
+// the rule for files to each entry, as TestCompose_ComposesAProjectDirectoryLinkedInsideTheProject shows.)
+func TestAgentFiles_ADirectoryLinkedInsideTheProjectIsAccepted(t *testing.T) {
+	root, proj := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(proj, "config", "agents", "mine.md"), agentBody("mine"))
+	writeFile(t, filepath.Join(proj, "config", "skills", "ok", "SKILL.md"), "---\nname: ok\ndescription: fine\n---\n\n# ok\n"+strings.Repeat("filler\n", 90))
+	symlinkOrSkip(t, filepath.Join("..", "config", "agents"), filepath.Join(proj, ".claude", "agents"))
+	symlinkOrSkip(t, filepath.Join("..", "config", "skills"), filepath.Join(proj, ".claude", "skills"))
+
+	out, errs := validateProject(t, root, proj)
+	if len(errs) != 0 || strings.Contains(out, "[warn]") {
+		t.Fatalf("errors = %q, want none\n%s", errs, out)
+	}
+}
+
+// `.claude` linked to a directory inside the project is accepted too.
+func TestAgentFiles_ADotClaudeLinkedInsideTheProjectIsAccepted(t *testing.T) {
+	root, proj := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(proj, "dotclaude", "agents", "mine.md"), agentBody("mine"))
+	symlinkOrSkip(t, "dotclaude", filepath.Join(proj, ".claude"))
+
+	out, errs := validateProject(t, root, proj)
+	if len(errs) != 0 || strings.Contains(out, "[warn]") {
+		t.Fatalf("errors = %q, want none\n%s", errs, out)
+	}
+}
+
+func TestAgentFiles_ADirectoryThatIsALinkToNothingOrToAFileIsRejected(t *testing.T) {
+	root, proj := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(proj, "notes.txt"), "not a directory\n")
+	agentsLink := filepath.Join(proj, ".claude", "agents")
+	skillsLink := filepath.Join(proj, ".claude", "skills")
+	symlinkOrSkip(t, filepath.Join(proj, "does-not-exist"), agentsLink)
+	symlinkOrSkip(t, filepath.Join(proj, "notes.txt"), skillsLink)
+
+	out, errs := validateProject(t, root, proj)
+	text := "symlink does not resolve to a directory; the Go dispatcher skips it"
+	want := []string{agentsLink + ": " + text, skillsLink + ": " + text}
+	if strings.Join(errs, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("errors =\n%s\nwant\n%s\nfull output:\n%s", strings.Join(errs, "\n"), strings.Join(want, "\n"), out)
+	}
+}

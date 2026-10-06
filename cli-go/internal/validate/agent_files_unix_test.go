@@ -98,3 +98,26 @@ func TestAgentFiles_FrameworkAgentPassesDoNotBlockOnAFIFO(t *testing.T) {
 		t.Errorf("errors for the FIFO link = %q, want exactly %q\n%s", got, link+": "+msgUnresolved, buf.String())
 	}
 }
+
+// A FIFO among the rules and skills is neither read nor reported: the bash
+// validator reads regular files only, so a pipe there is nothing to either twin
+// (the bash half is in tests/run-agent-enums-test.sh, with the same fixture).
+func TestAgentFiles_AFIFOAmongRulesAndSkillsIsLeftAlone(t *testing.T) {
+	root, proj, _ := agentFilesProject(t)
+	rule := filepath.Join(proj, ".claude", "rules", "pipe.md")
+	skill := filepath.Join(proj, ".claude", "skills", "x", "SKILL.md")
+	for _, p := range []string{rule, skill} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := syscall.Mkfifo(p, 0o600); err != nil {
+			t.Skipf("cannot create a FIFO here: %v", err)
+		}
+	}
+	var out string
+	var errs []string
+	within(t, 10*time.Second, rule, func() { out, errs = validateProject(t, root, proj) })
+	if len(errs) != 0 || strings.Contains(out, "pipe.md") || strings.Contains(out, "SKILL.md") {
+		t.Errorf("a FIFO among the rules and skills was reported: errors = %q\n%s", errs, out)
+	}
+}

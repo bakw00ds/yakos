@@ -65,6 +65,11 @@ type Config struct {
 	Writer io.Writer
 	// ErrWriter is where error output is written.  Defaults to os.Stderr.
 	ErrWriter io.Writer
+
+	// skipAgentsDir and skipSkillsDir are set by validateTree, on its own copy,
+	// when the project's agent or skill directory is refused (see
+	// agentscompose.InspectProjectDir): no pass reads through it.
+	skipAgentsDir, skipSkillsDir bool
 }
 
 // RunFramework validates $YAKOS_ROOT/lib/ (framework mode).
@@ -180,6 +185,27 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 		return
 	}
 
+	// In project mode the agent and skill directories are checked themselves: one
+	// that is a symlink, or has a symlinked .claude above it, must resolve to a
+	// directory inside the project, or the dispatcher skips it whole. It is reported
+	// here, once, and no pass below reads through it.
+	if filepath.Base(filepath.Clean(base)) == ".claude" {
+		project := filepath.Dir(filepath.Clean(base))
+		for _, kind := range []string{"agents", "skills"} {
+			dir := filepath.Join(base, kind)
+			p := agentscompose.InspectProjectDir(project, dir)
+			if p == agentscompose.DirOK {
+				continue
+			}
+			r.addErr(w, fmt.Sprintf("%s: %s; the Go dispatcher skips it", dir, p.Reason()))
+			if kind == "agents" {
+				cfg.skipAgentsDir = true
+			} else {
+				cfg.skipSkillsDir = true
+			}
+		}
+	}
+
 	// A symlinked agent file may resolve into lib/agents, and in project mode into
 	// the project's .claude/agents: Compose's roots. Every pass over agent files
 	// skips a link outside them, and checkAgentEnums reports it.
@@ -187,10 +213,10 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 
 	// ADR-0009 guards. Silent when clean so validate's output stays
 	// line-identical to the bash implementation on a healthy tree.
-	checkDecisionGuards(r, w, base, roots)
+	checkDecisionGuards(cfg, r, w, base, roots)
 
-	nAgents := countDirFiles(filepath.Join(base, "agents"), "*.md")
-	nSkills := countDirFiles(filepath.Join(base, "skills"), "SKILL.md")
+	nAgents := countDirFiles(agentsDirOf(cfg, base), "*.md")
+	nSkills := countDirFiles(skillsDirOf(cfg, base), "SKILL.md")
 	nRules := countDirFiles(filepath.Join(base, "rules"), "*.md")
 	r.addInfo(w, fmt.Sprintf("agents: %d | skills: %d | rules: %d", nAgents, nSkills, nRules))
 
@@ -200,7 +226,7 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 	}
 
 	// Validate frontmatter for agents, skills, and rules (excluding README/INDEX).
-	files := collectMDFiles(base, roots)
+	files := collectMDFiles(cfg, base, roots)
 	for _, f := range files {
 		if _, err := parseFrontmatter(f); err != nil {
 			r.addErr(w, fmt.Sprintf("%s: bad YAML frontmatter", f))
@@ -244,11 +270,11 @@ func validateTree(cfg Config, r *Result, w io.Writer, label, base string) {
 
 // collectMDFiles returns agent .md, skills SKILL.md, and rules .md files under
 // base, excluding README.md and INDEX.md.  Files are sorted for stable output.
-func collectMDFiles(base string, roots []string) []string {
+func collectMDFiles(cfg Config, base string, roots []string) []string {
 	var files []string
 
 	// agents/*.md (not README.md)
-	agentsDir := filepath.Join(base, "agents")
+	agentsDir := agentsDirOf(cfg, base)
 	if fi, err := os.Stat(agentsDir); err == nil && fi.IsDir() {
 		_ = filepath.WalkDir(agentsDir, func(p string, de fs.DirEntry, err error) error {
 			if err != nil || de.IsDir() {
@@ -263,10 +289,10 @@ func collectMDFiles(base string, roots []string) []string {
 	}
 
 	// skills/*/SKILL.md
-	skillsDir := filepath.Join(base, "skills")
+	skillsDir := skillsDirOf(cfg, base)
 	if fi, err := os.Stat(skillsDir); err == nil && fi.IsDir() {
 		_ = filepath.WalkDir(skillsDir, func(p string, de fs.DirEntry, err error) error {
-			if err != nil || de.IsDir() {
+			if err != nil || de.IsDir() || isSpecialEntry(de) {
 				return nil
 			}
 			if de.Name() == "SKILL.md" {
@@ -280,7 +306,7 @@ func collectMDFiles(base string, roots []string) []string {
 	rulesDir := filepath.Join(base, "rules")
 	if fi, err := os.Stat(rulesDir); err == nil && fi.IsDir() {
 		_ = filepath.WalkDir(rulesDir, func(p string, de fs.DirEntry, err error) error {
-			if err != nil || de.IsDir() {
+			if err != nil || de.IsDir() || isSpecialEntry(de) {
 				return nil
 			}
 			name := de.Name()
@@ -293,6 +319,15 @@ func collectMDFiles(base string, roots []string) []string {
 
 	sort.Strings(files)
 	return files
+}
+
+// isSpecialEntry reports a directory entry that is a FIFO, a socket or a device.
+// The bash validator reads regular files only (find -type f), so the passes over
+// skills and rules leave these out as it does, instead of reporting the
+// frontmatter of a file they never read. (An agent file of that kind is
+// reported, once, by checkAgentEnums.)
+func isSpecialEntry(de fs.DirEntry) bool {
+	return de.Type()&(fs.ModeNamedPipe|fs.ModeSocket|fs.ModeDevice|fs.ModeCharDevice|fs.ModeIrregular) != 0
 }
 
 // countDirFiles counts files matching a glob pattern under dir, excluding
@@ -336,7 +371,7 @@ func isValidJSON(path string) bool {
 
 func checkLineBudgets(cfg Config, r *Result, w io.Writer, base string) {
 	agentRoots := agentRootsFor(cfg, base)
-	agentsDir := filepath.Join(base, "agents")
+	agentsDir := agentsDirOf(cfg, base)
 	_ = filepath.WalkDir(agentsDir, func(p string, de fs.DirEntry, err error) error {
 		if err != nil || de.IsDir() {
 			return nil
@@ -351,9 +386,9 @@ func checkLineBudgets(cfg Config, r *Result, w io.Writer, base string) {
 		return nil
 	})
 
-	skillsDir := filepath.Join(base, "skills")
+	skillsDir := skillsDirOf(cfg, base)
 	_ = filepath.WalkDir(skillsDir, func(p string, de fs.DirEntry, err error) error {
-		if err != nil || de.IsDir() {
+		if err != nil || de.IsDir() || isSpecialEntry(de) {
 			return nil
 		}
 		if de.Name() != "SKILL.md" {
@@ -368,7 +403,7 @@ func checkLineBudgets(cfg Config, r *Result, w io.Writer, base string) {
 
 	rulesDir := filepath.Join(base, "rules")
 	_ = filepath.WalkDir(rulesDir, func(p string, de fs.DirEntry, err error) error {
-		if err != nil || de.IsDir() {
+		if err != nil || de.IsDir() || isSpecialEntry(de) {
 			return nil
 		}
 		name := de.Name()
@@ -404,14 +439,15 @@ func checkPlaybookReferences(cfg Config, r *Result, w io.Writer, base string) {
 
 	// Collect all referenced playbook names across agents, rules, skills.
 	refSet := map[string]struct{}{}
+	agentsDir := agentsDirOf(cfg, base)
 	roots := []string{
-		filepath.Join(base, "agents"),
+		agentsDir,
 		filepath.Join(base, "rules"),
-		filepath.Join(base, "skills"),
+		skillsDirOf(cfg, base),
 	}
 	agentRoots := agentRootsFor(cfg, base)
 	for _, root := range roots {
-		isAgents := root == filepath.Join(base, "agents")
+		isAgents := root == agentsDir
 		_ = filepath.WalkDir(root, func(p string, de fs.DirEntry, err error) error {
 			if err != nil || de.IsDir() {
 				return nil
@@ -907,7 +943,7 @@ func validateEvalCaseFile(path string) error {
 // checkEvalDirs validates golden-case eval directories for each agent .md.
 // Mirrors check_eval_dirs in validate.sh.
 func checkEvalDirs(cfg Config, r *Result, w io.Writer, root string) {
-	agentsDir := filepath.Join(root, "agents")
+	agentsDir := agentsDirOf(cfg, root)
 	if _, err := os.Stat(agentsDir); os.IsNotExist(err) {
 		return
 	}
@@ -1004,8 +1040,8 @@ func min(a, b int) int {
 // lib/decisions/*.yaml. Jev is a decision provider, not a runtime: no agent
 // may name it as one, and no agent that can write may reference a provider.
 // It reports errors only; a clean tree adds no output lines.
-func checkDecisionGuards(r *Result, w io.Writer, base string, roots []string) {
-	agentsDir := filepath.Join(base, "agents")
+func checkDecisionGuards(cfg Config, r *Result, w io.Writer, base string, roots []string) {
+	agentsDir := agentsDirOf(cfg, base)
 	var agentFiles []string
 	_ = filepath.WalkDir(agentsDir, func(p string, de fs.DirEntry, err error) error {
 		if err != nil || de.IsDir() {
@@ -1087,7 +1123,7 @@ func runtimeKnown(id string) bool {
 // model-policy made `yakos dispatch` die with "invalid model tier".
 // Mirrors check_agent_enums in cli/lib/validate.sh.
 func checkAgentEnums(cfg Config, r *Result, w io.Writer, base string, roots []string) {
-	agentsDir := filepath.Join(base, "agents")
+	agentsDir := agentsDirOf(cfg, base)
 	entries, err := os.ReadDir(agentsDir)
 	if err != nil {
 		return

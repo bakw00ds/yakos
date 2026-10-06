@@ -13,10 +13,18 @@
 #                               project's .claude/agents (not the project's .env or
 #                               .git/config), and an extends: that is a bare agent id
 #                               (sec-324; the second fixture project below)
+#   agent/skill directory       a project's .claude/agents or .claude/skills that is a
+#                               symlink, or sits under a symlinked .claude, must resolve
+#                               to a directory inside the project (rev-324)
+#   FIFO among the files        a FIFO in the agents, rules or skills directory must not
+#                               hang validate: bash's playbook pass read every file
+#                               with `grep -r`, which blocks on a pipe for good
 #
 # Asserts on both implementations (Go half only when bin/yakos exists), that
 # their findings are byte-identical, and that the shipped framework agents pass
-# `validate --strict`. Run under both `bash` and `/bin/bash`.
+# `validate --strict`. Run under both `bash` and `/bin/bash`. CI sets
+# YAKOS_REQUIRE_GO_BINARY=1, so a missing bin/yakos fails the run instead of
+# quietly checking only the bash half.
 set -u
 
 REPO_ROOT="$(cd "$(dirname -- "$0")/.." && pwd -P)"
@@ -25,6 +33,39 @@ unset YAKOS_ROOT YAKOS_LIB
 pass=0; fail=0
 ok()  { printf '  OK   %s\n' "$1"; pass=$((pass + 1)); }
 bad() { printf '  FAIL %s\n' "$1"; fail=$((fail + 1)); }
+
+# Every validator run below has a time limit: a pass that blocks (bash's playbook
+# pass once read a FIFO with grep -r and never returned) must fail the test, not
+# hang CI until the job times out.
+# limited <seconds> <file> <command...> runs a command with a time limit, its output
+# in <file>, and returns 124 on a timeout. There is no timeout(1) on macOS. The
+# command gets its own process group (set -m), so the kill takes a stuck grep with it.
+limited() {
+    local secs="$1" out="$2" pid ticks=0
+    shift 2
+    set -m
+    "$@" < /dev/null > "$out" 2>&1 &
+    pid=$!
+    set +m
+    while kill -0 "$pid" 2>/dev/null; do
+        ticks=$((ticks + 1))
+        if [ "$ticks" -gt $((secs * 5)) ]; then
+            { kill -9 -- "-$pid"; kill -9 "$pid"; wait "$pid"; } 2>/dev/null
+            return 124
+        fi
+        sleep 0.2
+    done
+    wait "$pid"
+}
+# vlim <seconds> <file> <command...>: limited, where only a timeout is a failure (a
+# validate that finds errors exits 1, and that is what most fixtures want).
+vlim() {
+    local secs="$1" out="$2" rc=0
+    shift 2
+    limited "$secs" "$out" "$@" || rc=$?
+    if [ "$rc" -eq 124 ]; then bad "$1 $2: did not finish in $secs seconds"; fi
+    return 0
+}
 
 TMP="$(mktemp -d -t yakos-agent-enums-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT INT TERM
@@ -54,8 +95,13 @@ want_err() { # <output> <substr> <label>
     printf '%s' "$1" | grep -q -- "\[err\].*$2" && ok "$3" || bad "$3 (no [err] matching: $2)"
 }
 sides="bash"; [ -x "$GO_BINARY" ] && sides="bash go"
+if [ "$sides" = "bash" ] && [ "${YAKOS_REQUIRE_GO_BINARY:-}" = 1 ]; then
+    printf 'agent-enums: YAKOS_REQUIRE_GO_BINARY=1 but %s is not executable; run make build\n' "$GO_BINARY" >&2
+    exit 1
+fi
 for side in $sides; do
-    out="$(run_$side "$P" | norm)"
+    vlim 60 "$TMP/p.out" "run_$side" "$P"
+    out="$(norm < "$TMP/p.out")"
     want_err "$out" 'bad-runtime.md: runtime: "gemni" is not a known runtime'      "$side: unknown runtime rejected"
     want_err "$out" 'bad-fallback.md: runtime-fallback: "bard" is not a known'     "$side: unknown inline fallback rejected"
     want_err "$out" 'bad-fallback-bl.md: runtime-fallback: "nope" is not a known'  "$side: unknown block fallback rejected"
@@ -122,7 +168,8 @@ run_bash2() { YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$REPO_ROOT/cli/lib" "${BASH:-ba
 run_go2()   { YAKOS_ROOT="$REPO_ROOT" YAKOS_IMPL=go "$GO_BINARY" validate "$@" 2>&1; }
 SKIP='the Go dispatcher skips it'
 for side in $sides; do
-    out="$(run_${side}2 "$Q" | norm2)"
+    vlim 60 "$TMP/q.out" "run_${side}2" "$Q"
+    out="$(norm2 < "$TMP/q.out")"
     want_err "$out" "agents/bound.md: line 6 is longer than 1048576 bytes; $SKIP; split the line"       "$side: a line of the bound is rejected"
     want_err "$out" "agents/crlf.md: line 6 is longer than 1048576 bytes; $SKIP; split the line"        "$side: a CRLF line of the bound is rejected"
     want_err "$out" "agents/tail-bound.md: line 96 is longer than 1048576 bytes; $SKIP; split the line" "$side: a last line of the bound is rejected"
@@ -162,9 +209,158 @@ if [ "$sides" = "bash go" ]; then
     if diff "$TMP/out2-bash.txt" "$TMP/out2-go.txt" >/dev/null; then ok "bash and Go agent-file findings identical"; else bad "bash/go agent-file findings differ:"; diff "$TMP/out2-bash.txt" "$TMP/out2-go.txt"; fi
 fi
 
+# ---- project agent and skill directories that are links (rev-324) -----------
+# A file seen through a linked directory is a regular file and never reaches the
+# rule for symlinked files, so the directory is checked itself: `.claude/agents` or
+# `.claude/skills` that is a symlink, or a `.claude` that is one, must resolve to a
+# directory inside the project, or the dispatcher skips it whole and validate says
+# so, once. Neither twin walks into a linked agents or skills directory (find and
+# filepath.WalkDir both stop at a link given as the starting point), so what is in
+# one is not validated, as it never was; a linked `.claude` is walked, and is where
+# the rule for files meets an accepted directory.
+#
+# vrun <side> <project>: validate the project; VOUT is the findings, with the project
+# path as <D>, and VHUNG is 1 when the run did not finish in 30 seconds.
+vrun() {
+    local rc=0
+    VHUNG=0
+    limited 30 "$TMP/vrun.out" "run_${1}2" "$2" || rc=$?
+    [ "$rc" -eq 124 ] && VHUNG=1
+    VOUT="$(sed "s|$2|<D>|g" "$TMP/vrun.out" | grep -E '\[err\]|\[warn\]|Summary' | sort)"
+}
+dirs_ok=1
+lnk() { ln -s "$1" "$2" 2>/dev/null || dirs_ok=0; }
+agent_md() { # <dir> <id> [extra frontmatter]
+    { printf -- '---\nid: %s\nrole: specialist\n%s---\n# %s\n' "$2" "${3:-}" "$2"; printf '%s\n' "$filler"; } > "$1/$2.md"
+}
+skill_md() { # <dir> <name>
+    mkdir -p "$1/$2"
+    { printf -- '---\nname: %s\ndescription: a test skill\n---\n# %s\n' "$2" "$2"; printf '%s\n' "$filler"; } > "$1/$2/SKILL.md"
+}
+DIROUT="symlink resolves outside the project directory; $SKIP"
+DIRGONE="symlink does not resolve to a directory; $SKIP"
+
+# outside_tree <dir>: an agent and a skill that every pass reading them has something
+# to say about: a runtime that is not one, a short file (the line budget), a playbook
+# reference, and a model-policy with no eval/ directory. One good rule is there too:
+# with agents and skills both refused it is all that is left to validate, and
+# validate stops early when there is nothing, which would hide whether the passes
+# after that point read what was refused.
+outside_tree() {
+    mkdir -p "$1/agents" "$1/skills/evil" "$1/rules"
+    { printf -- '---\nname: note\n---\n# note\n'; awk 'BEGIN { for (i = 0; i < 70; i++) print "filler" }'; } > "$1/rules/note.md"
+    printf -- '---\nid: evil\nrole: specialist\nruntime: gemni\nmodel-policy: haiku\n---\n# evil\n- playbook:evil-agent-ref\n' > "$1/agents/evil.md"
+    printf -- '---\nname: evil\ndescription: a test skill\n---\n# evil\n- playbook:evil-skill-ref\n' > "$1/skills/evil/SKILL.md"
+}
+# D1: both directories are links to directories outside the project
+D1="$TMP/d1"; mkdir -p "$D1/.claude"; outside_tree "$TMP/out1"
+lnk "$TMP/out1/agents" "$D1/.claude/agents"; lnk "$TMP/out1/skills" "$D1/.claude/skills"
+# D2: `.claude` itself is a link to a directory outside the project, so the two
+# directories are real ones that a pass would walk if it were not told to skip them
+D2="$TMP/d2"; mkdir -p "$D2"; outside_tree "$TMP/out2"
+lnk "$TMP/out2" "$D2/.claude"
+# D3: both are links to directories inside the project
+D3="$TMP/d3"; mkdir -p "$D3/config/agents" "$D3/.claude"
+agent_md "$D3/config/agents" mine; skill_md "$D3/config/skills" mine
+lnk ../config/agents "$D3/.claude/agents"; lnk ../config/skills "$D3/.claude/skills"
+# D4: `.claude` is a link to a directory inside the project, and the rule for files
+# applies inside it: a link to the project's .env is refused, a bad runtime is found
+D4="$TMP/d4"; mkdir -p "$D4/dotclaude/agents"
+agent_md "$D4/dotclaude/agents" good; agent_md "$D4/dotclaude/agents" bad $'runtime: gemni\n'
+printf 'OPENAI_API_KEY=sk-TOPSECRET-1234\n' > "$D4/.env"
+lnk ../../.env "$D4/dotclaude/agents/dotenv.md"; lnk dotclaude "$D4/.claude"
+# D5: links to nothing, and to a file
+D5="$TMP/d5"; mkdir -p "$D5/.claude"; printf 'not a directory\n' > "$D5/notes.txt"
+lnk "$D5/does-not-exist" "$D5/.claude/agents"; lnk "$D5/notes.txt" "$D5/.claude/skills"
+# D6: a linked `.claude` that has no skills directory says nothing about it
+D6="$TMP/d6"; mkdir -p "$D6/dotclaude/agents"; agent_md "$D6/dotclaude/agents" good; lnk dotclaude "$D6/.claude"
+
+if [ "$dirs_ok" = 1 ]; then
+    for side in $sides; do
+        vrun "$side" "$D1"; o1="$VOUT"; h1=$VHUNG; printf '%s' "$VOUT" > "$TMP/d1-$side.txt"
+        want_err_f "$o1" "<D>/.claude/agents: $DIROUT" "$side: an agents directory linked outside the project is rejected"
+        want_err_f "$o1" "<D>/.claude/skills: $DIROUT" "$side: a skills directory linked outside the project is rejected"
+        printf '%s' "$o1" | grep -q 'Summary: 2 error(s), 0 warning(s)' && ok "$side: the two linked directories are the only findings" || bad "$side: wrong findings for the outside links: $o1"
+        vrun "$side" "$D2"; o2="$VOUT"; h2=$VHUNG; printf '%s' "$VOUT" > "$TMP/d2-$side.txt"
+        want_err_f "$o2" "<D>/.claude/agents: $DIROUT" "$side: agents under a .claude linked outside the project is rejected"
+        want_err_f "$o2" "<D>/.claude/skills: $DIROUT" "$side: skills under a .claude linked outside the project is rejected"
+        if printf '%s' "$o2" | grep -q 'evil'; then bad "$side: a file under the rejected .claude was read: $o2"; else ok "$side: no pass reads a file under the rejected .claude"; fi
+        printf '%s' "$o2" | grep -q 'Summary: 2 error(s), 0 warning(s)' && ok "$side: the two rejected directories are the only findings" || bad "$side: wrong findings for a .claude linked outside: $o2"
+        grep -qF 'agents: 0 | skills: 0 | rules: 1' "$TMP/vrun.out" && ok "$side: the rejected directories are not counted" || bad "$side: the rejected directories were counted: $(grep -F 'agents:' "$TMP/vrun.out")"
+        vrun "$side" "$D3"; o3="$VOUT"; h3=$VHUNG; printf '%s' "$VOUT" > "$TMP/d3-$side.txt"
+        printf '%s' "$o3" | grep -q 'Summary: 0 error(s), 0 warning(s)' && ok "$side: directories linked inside the project are accepted" || bad "$side: a directory linked inside the project was refused: $o3"
+        vrun "$side" "$D4"; o4="$VOUT"; h4=$VHUNG; printf '%s' "$VOUT" > "$TMP/d4-$side.txt"
+        want_err "$o4" 'agents/bad.md: runtime: "gemni" is not a known runtime'  "$side: a file under a .claude linked inside the project is validated"
+        want_err_f "$o4" "<D>/.claude/agents/dotenv.md: $OUTSIDE"                 "$side: a link to .env under a .claude linked inside the project is refused"
+        printf '%s' "$o4" | grep -q 'Summary: 2 error(s), 0 warning(s)' && ok "$side: a linked .claude inside the project has exactly two findings" || bad "$side: wrong findings for a .claude linked inside: $o4"
+        if printf '%s' "$o4" | grep -q 'TOPSECRET'; then bad "$side: text of the project's .env was printed"; else ok "$side: nothing from the project's .env is printed through a linked .claude"; fi
+        vrun "$side" "$D5"; o5="$VOUT"; h5=$VHUNG; printf '%s' "$VOUT" > "$TMP/d5-$side.txt"
+        want_err_f "$o5" "<D>/.claude/agents: $DIRGONE" "$side: an agents directory linked to nothing is rejected"
+        want_err_f "$o5" "<D>/.claude/skills: $DIRGONE" "$side: a skills directory linked to a file is rejected"
+        vrun "$side" "$D6"; o6="$VOUT"; h6=$VHUNG; printf '%s' "$VOUT" > "$TMP/d6-$side.txt"
+        printf '%s' "$o6" | grep -q 'Summary: 0 error(s), 0 warning(s)' && ok "$side: a linked .claude without a skills directory is silent about it" || bad "$side: wrong findings for a .claude with no skills directory: $o6"
+        if [ "$h1$h2$h3$h4$h5$h6" = 000000 ]; then ok "$side: every directory fixture finished"; else bad "$side: a directory fixture did not finish in 30 seconds"; fi
+    done
+    # The framework's own lib/agents is never subject to the rule, even as a link:
+    # framework mode (no project path) does not apply it.
+    FW="$TMP/fw"; mkdir -p "$FW/lib/rules" "$TMP/fw-elsewhere/agents"
+    agent_md "$TMP/fw-elsewhere/agents" real
+    { printf -- '---\nname: r\n---\n# r\n'; awk 'BEGIN { for (i = 0; i < 70; i++) print "filler" }'; } > "$FW/lib/rules/r.md"
+    lnk "$TMP/fw-elsewhere/agents" "$FW/lib/agents"
+    for side in $sides; do
+        case "$side" in
+            bash) YAKOS_ROOT="$FW" YAKOS_LIB="$REPO_ROOT/cli/lib" "${BASH:-bash}" "$REPO_ROOT/cli/lib/validate.sh" > "$TMP/fw-$side.out" 2>&1 < /dev/null ;;
+            go)   YAKOS_ROOT="$FW" YAKOS_IMPL=go "$GO_BINARY" validate > "$TMP/fw-$side.out" 2>&1 < /dev/null ;;
+        esac
+        if grep -Eq 'symlink resolves outside the project directory|symlink does not resolve to a directory' "$TMP/fw-$side.out"; then
+            bad "$side: the directory rule was applied in framework mode: $(grep -E 'symlink (resolves|does not)' "$TMP/fw-$side.out" | head -2)"
+        else
+            ok "$side: framework mode does not apply the directory rule to a linked lib/agents"
+        fi
+    done
+    if [ "$sides" = "bash go" ]; then
+        for d in d1 d2 d3 d4 d5 d6; do
+            if diff "$TMP/$d-bash.txt" "$TMP/$d-go.txt" >/dev/null; then ok "bash and Go findings identical for $d"; else bad "bash/go findings differ for $d:"; diff "$TMP/$d-bash.txt" "$TMP/$d-go.txt"; fi
+        done
+    fi
+else
+    printf '  SKIP the directory fixtures: this file system refused symlinks\n'
+fi
+
+# ---- a FIFO among the files must not hang validate (rev-324) -------------------
+# bash's playbook-reference pass read every file under agents, rules and skills with
+# `grep -r`, which opens a FIFO and waits for a writer that never comes. The Go
+# validator returned at once. Now the pass reads regular files only, and the run
+# finishes with the same findings on both sides: the FIFO that is an agent file is
+# an error, the others are ignored. Each FIFO is named differently, since grep -r
+# reads any name.
+F="$TMP/fifo"; mkdir -p "$F/.claude/agents" "$F/.claude/rules" "$F/.claude/skills/x"
+agent_md "$F/.claude/agents" ok
+fifos=1
+mkfifo "$F/.claude/agents/pipe.md" "$F/.claude/agents/notes.txt" "$F/.claude/rules/pipe.md" "$F/.claude/skills/x/SKILL.md" "$F/.claude/skills/x/NOTES" 2>/dev/null || fifos=0
+if [ "$fifos" = 1 ]; then
+    for side in $sides; do
+        vrun "$side" "$F"; printf '%s' "$VOUT" > "$TMP/fifo-$side.txt"
+        if [ "$VHUNG" = 1 ]; then
+            bad "$side: validate blocked on a FIFO among the agent, rule and skill files"
+        else
+            ok "$side: validate finishes with a FIFO in the agents, rules and skills directories"
+            want_err_f "$VOUT" "<D>/.claude/agents/pipe.md: not a regular file; $SKIP" "$side: a FIFO that is an agent file is rejected"
+            printf '%s' "$VOUT" | grep -q 'Summary: 1 error(s), 0 warning(s)' && ok "$side: the FIFO agent file is the only finding" || bad "$side: wrong findings with FIFOs present: $VOUT"
+        fi
+    done
+    if [ "$sides" = "bash go" ]; then
+        if diff "$TMP/fifo-bash.txt" "$TMP/fifo-go.txt" >/dev/null; then ok "bash and Go findings identical with FIFOs present"; else bad "bash/go findings differ with FIFOs present:"; diff "$TMP/fifo-bash.txt" "$TMP/fifo-go.txt"; fi
+    fi
+else
+    printf '  SKIP the FIFO fixtures: mkfifo is not available here\n'
+fi
+
 # The shipped framework passes strict on both sides.
+run_strict() { (cd "$REPO_ROOT" && "run_$1" --strict); }
 for side in $sides; do
-    out="$(cd "$REPO_ROOT" && run_$side --strict)"
+    vlim 180 "$TMP/strict.out" run_strict "$side"
+    out="$(cat "$TMP/strict.out")"
     if printf '%s' "$out" | grep -q 'Summary: 0 error(s), 0 warning(s)'; then ok "$side: framework validate --strict clean"; else bad "$side: framework validate --strict not clean"; printf '%s\n' "$out" | grep -E '\[err\]|Summary' | head; fi
 done
 
