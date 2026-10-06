@@ -221,9 +221,13 @@ change the decision.
 
 The bash hook never reads the CLI's stderr: it carries text a project controls,
 and a hook that took it for evidence could be made to fail open by a project's own
-config. The Go twin evaluates in-process, so only `read_error` exists there. A budget
-that is switched off (a limit of 0) is not a failure and logs nothing, and neither
-is a CLI that prints nothing and exits 0: it has no budget to report.
+config. A CLI built before the `read_failed` field existed is a normal CLI to the
+hook: the absence of the field is an ordinary read, so everything still works, and
+the bash hook simply cannot report an unreadable spend log then (the Go twin still
+does, in-process). The Go twin evaluates in-process, so only `read_error` exists
+there. A budget that is switched off (a limit of 0) is not a failure and logs
+nothing, and neither is a CLI that prints nothing and exits 0: it has no budget to
+report.
 
 ## Where it is enforced
 
