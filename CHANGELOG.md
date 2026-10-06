@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.62.0.0] — 2026-10-06
+
+Minor release: the multi-harness routing wave. Go dispatch honors agent
+`runtime:` pins and picks a runtime that is installed and signed in (K-132);
+Go dispatch runs codex in an OS sandbox by default, and agy gets `--sandbox`
+but is not contained (K-133); the MCP tool and the JSON-RPC method return the
+agent's text, token usage and session id (K-135); in Go dispatch tokens are the
+primary accounting unit and dollars count only for API runs, with built-in
+monthly token limits for the supervisor and librarian (K-136); the Agent SDK
+sidecar needs an API key (K-137); `yakos models` lists the model registry
+(K-138); the supervisor hook holds its lock only for the counter update
+(K-128); and `gemini` is gone from the Go runtime registry. Existing projects
+need one `yakos refresh --project <path>` so the supervisor hook reads tokens;
+see UPGRADING.md, which marks the changes that alter behavior.
+
 Routing P0a (K-132): the Go dispatcher now honors agent runtime pins, picks a
 runtime that is installed and signed in, and resolves models per runtime.
 Agents that declare `runtime:` (`general-codex`, `general-agy` and any project
@@ -344,9 +359,9 @@ below lists them); see UPGRADING.md.
   test keeps every recording free of home directories, temporary paths, `@`
   handles and the name of the account running the test.
 
-- **Every dispatch transport returns the agent's text, its token usage and the
-  runtime's session id (K-135).** Until now `dispatch.Run` handed back the
-  runtime's raw stdout (claude stream-json, codex JSONL), the MCP
+- **The MCP tool and the JSON-RPC method return the agent's text, its token
+  usage and the runtime's session id (K-135).** Until now `dispatch.Run` handed
+  back the runtime's raw stdout (claude stream-json, codex JSONL), the MCP
   `yakos.dispatch` tool and JSON-RPC `yakos.dispatch.run` discarded it, Flows
   spliced the raw NDJSON into `${nodes.<id>.output}`, and the console showed
   raw codex JSONL. A new `runtime.LineParser` (selected by `ParserFor`)
