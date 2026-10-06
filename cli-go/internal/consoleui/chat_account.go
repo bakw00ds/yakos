@@ -25,6 +25,7 @@ package consoleui
 // own when it used tokens, and ignored when it used none.
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 
@@ -61,17 +62,35 @@ func newTurnLedger() *turnLedger {
 }
 
 // register records the template of an interactive session: the agent, project,
-// model and identity every turn of the conversation is attributed to. Calling it
-// again for a live conversation refreshes the template and keeps the turns in
-// flight.
-func (l *turnLedger) register(conversationID string, tmpl dispatch.Request) {
+// model and identity every turn of the conversation is attributed to. It returns
+// the template in force.
+//
+// The agent is pinned for the life of the session: calling register again for a
+// live conversation (a second dispatch on it, naming whatever agent the client
+// likes) changes nothing, because the running process keeps the persona it started
+// with, so its turns must keep being accounted, and budget-checked, as that agent.
+// Otherwise an owner could relabel later turns to dodge a per-agent limit.
+func (l *turnLedger) register(conversationID string, tmpl dispatch.Request) dispatch.Request {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if c := l.convs[conversationID]; c != nil {
-		c.tmpl = tmpl
-		return
+		return c.tmpl
 	}
 	l.convs[conversationID] = &convTurns{tmpl: tmpl}
+	return tmpl
+}
+
+// sessionOf reports the agent a live conversation's session is pinned to and the
+// operator that owns it. ok is false when the conversation has no registered
+// session.
+func (l *turnLedger) sessionOf(conversationID string) (agent, owner string, ok bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	c := l.convs[conversationID]
+	if c == nil {
+		return "", "", false
+	}
+	return c.tmpl.AgentName, c.tmpl.OperatorID, true
 }
 
 // begin notes that a user frame for conversationID is about to be delivered and
@@ -79,12 +98,14 @@ func (l *turnLedger) register(conversationID string, tmpl dispatch.Request) {
 // its size and a short preview are kept. sessionID, when non-empty, replaces the
 // template's console session id (a follow-up may come from another tab). It
 // returns nil when the conversation was never registered, in which case nothing
-// is accounted (there is no agent to attribute the turn to).
-func (l *turnLedger) begin(conversationID, task, sessionID string) *pendingTurn {
+// is accounted (there is no agent to attribute the turn to), and when operatorID
+// is not the session's owner: the engine will refuse that frame, and a refused
+// frame must never sit pending where a later result could be pinned on it.
+func (l *turnLedger) begin(conversationID, task, sessionID, operatorID string) *pendingTurn {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	c := l.convs[conversationID]
-	if c == nil || len(c.pending) >= maxPendingTurns {
+	if c == nil || c.tmpl.OperatorID != operatorID || len(c.pending) >= maxPendingTurns {
 		return nil
 	}
 	req := c.tmpl
@@ -232,4 +253,41 @@ func (ch *chatHandlers) interactiveTurnTemplate(agent, model, conversationID, op
 		SessionID:      sessionID,
 		Surface:        dispatch.SurfaceConsoleChat,
 	}
+}
+
+// interactivePreflight is the budget pre-flight for an interactive turn (K-136): a
+// new session, a dispatch on a live one, or a follow-up send. Run and RunStream run
+// the same check for one-shot turns; without it a persistent session was the one
+// launch path that ignored a hard stop. It is keyed on the agent the session is
+// pinned to when the conversation is live (the client's requestedAgent is only
+// used to start a new session), so naming another agent cannot dodge the limit.
+// It returns the *budget.RefusedError a one-shot dispatch gets.
+func (ch *chatHandlers) interactivePreflight(conversationID, requestedAgent string) error {
+	agent := requestedAgent
+	if pinned, _, ok := ch.turns.sessionOf(conversationID); ok {
+		agent = pinned
+	}
+	return dispatch.PreflightBudget(agent, ch.workspaceRoot)
+}
+
+// failInteractiveStart reports a refused interactive start the way the one-shot
+// path reports a failed dispatch: an error turn in the transcript and an error
+// frame on the pane's stream, with the same "dispatch failed: " text.
+func (ch *chatHandlers) failInteractiveStart(sessionID, conversationID, operatorID string, err error) {
+	slog.Warn("consoleui: interactive chat refused", "session", sessionID, "conversation", conversationID, "err", err)
+	errText := "dispatch failed: " + err.Error()
+	_ = ch.transcripts.Append(TranscriptEntry{
+		SessionID:      sessionID,
+		ConversationID: conversationID,
+		OperatorID:     operatorID,
+		Role:           RoleError,
+		Text:           errText,
+	})
+	ch.hub.Route(SSEEvent{
+		SessionID:      sessionID,
+		ConversationID: conversationID,
+		Type:           "error",
+		Text:           errText,
+		TS:             time.Now().UTC().Format(time.RFC3339Nano),
+	})
 }

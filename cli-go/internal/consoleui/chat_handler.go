@@ -964,6 +964,16 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				return
 			}
 
+			// Budget pre-flight (K-136): the refusal a one-shot turn gets, before the
+			// sidecar is started or a turn is delivered to a live one.
+			if perr := ch.interactivePreflight(conversationID, dispReq.Agent); perr != nil {
+				exitStatus = dispatch.StatusFailed
+				exitCode = -1
+				ch.failInteractiveStart(dispReq.SessionID, conversationID, capturedOperatorID, perr)
+				sharedAtFinish = ch.hub.IsShared(dispReq.SessionID)
+				return
+			}
+
 			sdkParams := interactive.SDKEngineParams{
 				ConversationID:  conversationID,
 				OwnerOperatorID: capturedOperatorID,
@@ -999,7 +1009,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			// is written, so a fast engine cannot answer before the turn is known,
 			// and dropped if the frame is not delivered (K-136).
 			ch.turns.register(conversationID, ch.interactiveTurnTemplate(dispReq.Agent, modelName, conversationID, capturedOperatorID, dispReq.SessionID))
-			turn := ch.turns.begin(conversationID, dispReq.Task, dispReq.SessionID)
+			turn := ch.turns.begin(conversationID, dispReq.Task, dispReq.SessionID, capturedOperatorID)
 			frame := runtime.EncodeUserTurn(dispReq.Task)
 			if sendErr := ch.interactiveMgr.Send(conversationID, capturedOperatorID, frame); sendErr != nil {
 				ch.turns.drop(conversationID, turn)
@@ -1055,6 +1065,16 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				project = capturedWorktreeOverride
 			}
 
+			// Budget pre-flight (K-136): the refusal a one-shot turn gets, before the
+			// claude process is started or a turn is delivered to a live one.
+			if perr := ch.interactivePreflight(conversationID, dispReq.Agent); perr != nil {
+				exitStatus = dispatch.StatusFailed
+				exitCode = -1
+				ch.failInteractiveStart(dispReq.SessionID, conversationID, capturedOperatorID, perr)
+				sharedAtFinish = ch.hub.IsShared(dispReq.SessionID)
+				return
+			}
+
 			// Resolve the agent system prompt from the roster (same as RunStream).
 			capturedModel := modelName
 			capturedEffort := dispReq.Effort
@@ -1098,7 +1118,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			// Deliver the first turn (ledger entry opened before the write, dropped
 			// if it fails; see the SDK branch above).
 			ch.turns.register(conversationID, ch.interactiveTurnTemplate(dispReq.Agent, capturedModel, conversationID, capturedOperatorID, dispReq.SessionID))
-			turn := ch.turns.begin(conversationID, dispReq.Task, dispReq.SessionID)
+			turn := ch.turns.begin(conversationID, dispReq.Task, dispReq.SessionID, capturedOperatorID)
 			frame := runtime.EncodeUserTurn(dispReq.Task)
 			if sendErr := ch.interactiveMgr.Send(conversationID, capturedOperatorID, frame); sendErr != nil {
 				ch.turns.drop(conversationID, turn)
@@ -1717,10 +1737,32 @@ func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		effectiveOperatorID = req.OperatorID
 	}
 
+	// Budget pre-flight (K-136): every follow-up turn is a launch, so an agent in
+	// hard_stop is refused here as a one-shot turn is, keyed on the agent the
+	// session is pinned to. Only the session's owner is checked: anyone else falls
+	// through to the engine's own refusal (403) and learns nothing about the
+	// owner's agent or budget. The refusal is a 429 whose body the pane shows, and
+	// an error turn in the transcript, like the one-shot path's.
+	if agent, owner, ok := ch.turns.sessionOf(req.ConversationID); ok && owner == effectiveOperatorID {
+		if perr := dispatch.PreflightBudget(agent, ch.workspaceRoot); perr != nil {
+			slog.Warn("consoleui: interactive chat send refused", "conversation", req.ConversationID, "agent", agent, "err", perr)
+			errText := "dispatch failed: " + perr.Error()
+			_ = ch.transcripts.Append(TranscriptEntry{
+				SessionID:      req.SessionID,
+				ConversationID: req.ConversationID,
+				OperatorID:     effectiveOperatorID,
+				Role:           RoleError,
+				Text:           errText,
+			})
+			http.Error(w, errText, http.StatusTooManyRequests)
+			return
+		}
+	}
+
 	// The turn's ledger entry is opened before the frame is written and dropped
 	// when the engine refuses it, so a refused send (404/403/409/500) leaves no
 	// event and a delivered one always finishes as a pair (K-136).
-	turn := ch.turns.begin(req.ConversationID, req.Text, req.SessionID)
+	turn := ch.turns.begin(req.ConversationID, req.Text, req.SessionID, effectiveOperatorID)
 	frame := runtime.EncodeUserTurn(req.Text)
 	err := ch.interactiveSend.Send(req.ConversationID, effectiveOperatorID, frame)
 	if err != nil {

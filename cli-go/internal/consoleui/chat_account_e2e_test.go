@@ -52,14 +52,30 @@ done
 `
 
 type ledgerServer struct {
-	ts      *httptest.Server
-	tok     string
-	logDir  string
-	workDir string
-	mgr     *interactive.Manager
+	ts       *httptest.Server
+	tok      string
+	logDir   string
+	workDir  string
+	mgr      *interactive.Manager
+	launches string // the fake claude appends a line here each time it is started
 }
 
-func newLedgerServer(t *testing.T) ledgerServer {
+// launchCount is how many times the fake claude has been started. A turn refused
+// before it launches anything leaves it unchanged.
+func (s ledgerServer) launchCount(t *testing.T) int {
+	t.Helper()
+	data, err := os.ReadFile(s.launches)
+	if err != nil {
+		return 0
+	}
+	return strings.Count(string(data), "\n")
+}
+
+func newLedgerServer(t *testing.T) ledgerServer { return newLedgerServerWith(t, nil) }
+
+// newLedgerServerWith is newLedgerServer with an Agent SDK engine factory wired
+// into the chat handlers (nil: the SDK engine is not configured).
+func newLedgerServerWith(t *testing.T, sdk *interactive.SDKEngineFactory) ledgerServer {
 	t.Helper()
 	if goruntime.GOOS == "windows" {
 		t.Skip("shell stub")
@@ -68,7 +84,9 @@ func newLedgerServer(t *testing.T) ledgerServer {
 	t.Setenv("YAKOS_DISPATCH_LOG", logDir)
 
 	binDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(fakeClaudeScript), 0o755); err != nil { //nolint:gosec
+	launches := filepath.Join(t.TempDir(), "launches")
+	script := strings.Replace(fakeClaudeScript, "#!/bin/sh\n", "#!/bin/sh\nprintf 'x\\n' >> '"+launches+"'\n", 1)
+	if err := os.WriteFile(filepath.Join(binDir, "claude"), []byte(script), 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -80,6 +98,18 @@ func newLedgerServer(t *testing.T) ledgerServer {
 
 	workspace := t.TempDir()
 	yakosRoot := t.TempDir()
+	// A roster with two agents, for the tests that name an agent other than a
+	// bare runtime (the budget tests pin a session to one and name the other).
+	agentsDir := filepath.Join(yakosRoot, "lib", "agents")
+	if err := os.MkdirAll(agentsDir, 0o755); err != nil { //nolint:gosec
+		t.Fatal(err)
+	}
+	for _, name := range []string{"alpha", "beta"} {
+		body := "---\nid: " + name + "\n---\n\n## Purpose\n\nTest agent " + name + ".\n"
+		if err := os.WriteFile(filepath.Join(agentsDir, name+".md"), []byte(body), 0o644); err != nil { //nolint:gosec
+			t.Fatal(err)
+		}
+	}
 	workDir := t.TempDir()
 	tok, err := consoleui.LoadOrCreateToken(t.TempDir())
 	if err != nil {
@@ -99,10 +129,11 @@ func newLedgerServer(t *testing.T) ledgerServer {
 		YakosRoot:          yakosRoot,
 		DispatchService:    dispatch.NewService(dispatch.ServiceConfig{YakosRoot: yakosRoot, WorkspaceRoot: workspace, OperatorID: "alice"}),
 		InteractiveManager: mgr,
+		SDKEngineFactory:   sdk,
 	})
 	ts := httptest.NewServer(consoleui.RequireTokenForNonStatic(tok, consoleui.RequireJSONForMutations(srv.HandlerForTest())))
 	t.Cleanup(ts.Close)
-	return ledgerServer{ts: ts, tok: tok, logDir: logDir, workDir: workDir, mgr: mgr}
+	return ledgerServer{ts: ts, tok: tok, logDir: logDir, workDir: workDir, mgr: mgr, launches: launches}
 }
 
 func (s ledgerServer) post(t *testing.T, path string, body map[string]any) *http.Response {
