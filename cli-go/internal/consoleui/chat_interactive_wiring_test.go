@@ -11,12 +11,14 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/consoleui"
+	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/interactive"
 )
 
@@ -188,6 +190,7 @@ func TestInteractiveChat_SDKSessionClosedMidTurnFinishesTheTurnAsFailed(t *testi
 func TestInteractiveChat_SDKTurnIsAccountedAsAnAPITurnWithTokens(t *testing.T) {
 	sidecar := `printf '%s\n' '{"v":1,"kind":"ready"}'
 while read -r _line; do
+  case "$_line" in *'"shutdown"'*) exit 0 ;; esac
   printf '%s\n' '{"v":1,"kind":"token","text":"reply"}'
   printf '%s\n' '{"v":1,"kind":"summary","totalCostUsd":0.5,"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20}}'
 done
@@ -290,4 +293,62 @@ func TestInteractiveChat_DispatchFrameTheEngineRefusesIsNotAccounted(t *testing.
 			}
 		})
 	}
+}
+
+// An interactive engine's read loop can hand the handler a summary after the session has
+// closed and the dispatch goroutine has returned, because neither engine waits for its
+// read loop before it signals the close. The callback then wrote the dispatch's outcome
+// while the goroutine's deferred fleet.finished had read it, and `go test -race` reported
+// that as a data race in CI (K-136, #330). The callback is the one the handler gives the
+// engine, so a factory that keeps it can deliver a late summary on demand, which makes the
+// race deterministic under -race instead of a matter of timing. The CLI engine's callback
+// is the same closure.
+func TestInteractiveChat_ASummaryAfterTheDispatchEndedDoesNotRace(t *testing.T) {
+	sidecar := `printf '%s\n' '{"v":1,"kind":"ready"}'
+while read -r _line; do
+  case "$_line" in *'"shutdown"'*) exit 0 ;; esac
+done
+`
+	t.Setenv("ANTHROPIC_API_KEY", "fake-key-for-the-late-chunk-test")
+	var f interactive.SDKEngineFactory = func(p interactive.SDKEngineParams) (*interactive.SDKEngine, error) {
+		onChunk := p.OnChunk
+		go func() {
+			time.Sleep(600 * time.Millisecond) // after the session below has closed
+			onChunk(dispatch.StreamChunk{Type: "summary", ExitCode: 0, RuntimeResolved: "claude", ModelResolved: "claude-sonnet-4-5-20250929"})
+		}()
+		return interactive.NewSDKEngineWithProvider(p, func() *exec.Cmd {
+			return exec.Command("sh", "-c", sidecar) //nolint:gosec
+		})
+	}
+	s := newLedgerServerWith(t, &f)
+	resp := s.post(t, "/api/chat/dispatch", map[string]any{
+		"agent": "claude", "task": "hello", "sessionId": "sess-late-1", "operatorId": "alice",
+		"conversationId": "conv-late-1", "interactive": true, "structuredQuestions": true,
+	})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("dispatch: %d", resp.StatusCode)
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for s.mgr.ActiveCount() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the session never started")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	s.mgr.Close("conv-late-1") // the dispatch goroutine returns; the late summary comes after
+
+	for time.Now().Before(deadline) {
+		entries, err := consoleui.NewTranscripts(s.workDir).Read("conv-late-1", "alice")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			if e.Role == consoleui.RoleSummary {
+				return // the late summary was handled
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatal("the late summary was never handled")
 }

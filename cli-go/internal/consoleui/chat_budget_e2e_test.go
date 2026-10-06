@@ -28,9 +28,12 @@ import (
 )
 
 // fakeSDKSidecarScript speaks the sidecar protocol: ready, then one token and one
-// summary (135 tokens of usage) per user turn.
+// summary (135 tokens of usage) per user turn, and it exits on the shutdown frame as the
+// real sidecar does (a script that answered the shutdown frame as a turn would hand the
+// engine a summary while the session closes, which is not what the real one does).
 const fakeSDKSidecarScript = `printf '%s\n' '{"v":1,"kind":"ready"}'
 while read -r _line; do
+  case "$_line" in *'"shutdown"'*) exit 0 ;; esac
   printf '%s\n' '{"v":1,"kind":"token","text":"reply"}'
   printf '%s\n' '{"v":1,"kind":"summary","totalCostUsd":0,"usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20}}'
 done

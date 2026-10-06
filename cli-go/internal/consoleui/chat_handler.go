@@ -753,10 +753,11 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	//      entry, preserving consistency during the short window between hub
 	//      close and fleet remove.
 	go func() {
-		// exitCode captures the RunStream result for fleet.finished.
-		// Default 0; overridden to -1 on non-cancel error path.
-		exitCode := 0
-		exitStatus := dispatch.StatusFinished
+		// outcome captures how the dispatch ended, for fleet.finished: finished with
+		// exit code 0 by default, failed with -1 on a non-cancel error path, and the
+		// exit code of each turn's summary. The chunk callback writes it from the
+		// engine's goroutine, so it has a lock (see dispatchOutcome).
+		outcome := newDispatchOutcome()
 
 		// sharedAtFinish is updated to the session's final shared flag just before
 		// RunStream returns (while the hub entry is still open).  The fleet.finished
@@ -776,7 +777,8 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			if ch.bus != nil {
 				finishedAt := time.Now().UTC()
 				finishedStatus := "finished"
-				if exitStatus == dispatch.StatusFailed {
+				status, exitCode := outcome.get()
+				if status == dispatch.StatusFailed {
 					finishedStatus = "failed"
 				}
 				ch.bus.PublishMeta(wsbus.TopicFleetFinished, wsbus.FleetFinishedPayload{
@@ -845,10 +847,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 						ch.registry.UpdateStatus(dispReq.SessionID, dispatch.StatusFailed)
 					}
 				}
-				exitCode = code
-				if code != 0 {
-					exitStatus = dispatch.StatusFailed
-				}
+				outcome.summary(code)
 				if interactiveTurns {
 					ch.turns.finish(conversationID, chunk)
 				}
@@ -948,8 +947,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		// node + bundle present).  If nil → 503 immediately.
 		if dispReq.Interactive && dispReq.StructuredQuestions {
 			if ch.sdkEngineFactory == nil {
-				exitStatus = dispatch.StatusFailed
-				exitCode = -1
+				outcome.fail(-1)
 				errText := "structured questions require --console-structured-questions (and node ≥18 + sidecar bundle)"
 				_ = ch.transcripts.Append(TranscriptEntry{
 					SessionID:      dispReq.SessionID,
@@ -972,8 +970,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			// Budget pre-flight (K-136): the refusal a one-shot turn gets, before the
 			// sidecar is started or a turn is delivered to a live one.
 			if perr := ch.interactivePreflight(conversationID, dispReq.Agent); perr != nil {
-				exitStatus = dispatch.StatusFailed
-				exitCode = -1
+				outcome.fail(-1)
 				ch.failInteractiveStart(dispReq.SessionID, conversationID, capturedOperatorID, perr)
 				sharedAtFinish = ch.hub.IsShared(dispReq.SessionID)
 				return
@@ -989,8 +986,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			// Ensure the SDK session exists (create if new, return existing if same owner).
 			sess, ensureErr := ch.interactiveMgr.EnsureSDK(conversationID, capturedOperatorID, sdkParams, *ch.sdkEngineFactory)
 			if ensureErr != nil {
-				exitStatus = dispatch.StatusFailed
-				exitCode = -1
+				outcome.fail(-1)
 				errText := fmt.Sprintf("interactive: SDK start failed: %s", ensureErr.Error())
 				_ = ch.transcripts.Append(TranscriptEntry{
 					SessionID:      dispReq.SessionID,
@@ -1018,8 +1014,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			frame := runtime.EncodeUserTurn(dispReq.Task)
 			if sendErr := ch.sendFrame(conversationID, capturedOperatorID, frame); sendErr != nil {
 				ch.turns.drop(conversationID, turn)
-				exitStatus = dispatch.StatusFailed
-				exitCode = -1
+				outcome.fail(-1)
 				errText := fmt.Sprintf("interactive: SDK send failed: %s", sendErr.Error())
 				_ = ch.transcripts.Append(TranscriptEntry{
 					SessionID:      dispReq.SessionID,
@@ -1073,8 +1068,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			// Budget pre-flight (K-136): the refusal a one-shot turn gets, before the
 			// claude process is started or a turn is delivered to a live one.
 			if perr := ch.interactivePreflight(conversationID, dispReq.Agent); perr != nil {
-				exitStatus = dispatch.StatusFailed
-				exitCode = -1
+				outcome.fail(-1)
 				ch.failInteractiveStart(dispReq.SessionID, conversationID, capturedOperatorID, perr)
 				sharedAtFinish = ch.hub.IsShared(dispReq.SessionID)
 				return
@@ -1099,8 +1093,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			// Ensure the session exists (create if new, return existing if same owner).
 			sess, ensureErr := ch.interactiveMgr.Ensure(conversationID, capturedOperatorID, sessParams)
 			if ensureErr != nil {
-				exitStatus = dispatch.StatusFailed
-				exitCode = -1
+				outcome.fail(-1)
 				errText := fmt.Sprintf("interactive: start failed: %s", ensureErr.Error())
 				_ = ch.transcripts.Append(TranscriptEntry{
 					SessionID:      dispReq.SessionID,
@@ -1127,8 +1120,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			frame := runtime.EncodeUserTurn(dispReq.Task)
 			if sendErr := ch.sendFrame(conversationID, capturedOperatorID, frame); sendErr != nil {
 				ch.turns.drop(conversationID, turn)
-				exitStatus = dispatch.StatusFailed
-				exitCode = -1
+				outcome.fail(-1)
 				errText := fmt.Sprintf("interactive: send failed: %s", sendErr.Error())
 				_ = ch.transcripts.Append(TranscriptEntry{
 					SessionID:      dispReq.SessionID,
@@ -1214,8 +1206,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 					"agent", dispReq.Agent,
 					"err", err,
 				)
-				exitStatus = dispatch.StatusFailed
-				exitCode = -1
+				outcome.fail(-1)
 
 				// Emit an SSE error frame so the client UI shows an error
 				// instead of hanging forever.  The error message is kept terse
