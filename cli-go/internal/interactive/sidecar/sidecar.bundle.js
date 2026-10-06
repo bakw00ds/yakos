@@ -19755,11 +19755,50 @@ function startStdinReader(onUserTurn, onAnswer, onShutdown) {
     });
   });
 }
+var EXIT_API_KEY_REQUIRED = 78;
+var SUBSCRIPTION_TOKEN_PREFIXES = ["sk-ant-oat", "sk-ant-ort"];
+function apiKeyRefusal(env) {
+  const key = String(env.ANTHROPIC_API_KEY ?? "").trim();
+  if (key === "") {
+    return "ANTHROPIC_API_KEY is not set; the Agent SDK engine does not run on a claude.ai subscription login (set an API key, or use the CLI engine for interactive chat)";
+  }
+  const lower = key.toLowerCase();
+  if (SUBSCRIPTION_TOKEN_PREFIXES.some((prefix) => lower.includes(prefix))) {
+    return "ANTHROPIC_API_KEY holds a subscription OAuth token, not an API key; the Agent SDK engine does not accept those (set an API key, or use the CLI engine for interactive chat)";
+  }
+  return "";
+}
+function oauthEnvNames(env) {
+  return Object.keys(env).filter((name) => {
+    if (name.toUpperCase().startsWith("CLAUDE_CODE_OAUTH")) return true;
+    if (name.startsWith("YAKOS_")) return false;
+    const value = env[name];
+    if (typeof value !== "string") return false;
+    const lower = value.toLowerCase();
+    return SUBSCRIPTION_TOKEN_PREFIXES.some((prefix) => lower.includes(prefix));
+  });
+}
+function scrubOAuthEnv(env) {
+  for (const name of oauthEnvNames(env)) {
+    delete env[name];
+  }
+}
 async function main() {
+  const refusal = apiKeyRefusal(process.env);
+  if (refusal !== "") {
+    process.stderr.write(`[sidecar] refusing to start: ${refusal}
+`);
+    process.exitCode = EXIT_API_KEY_REQUIRED;
+    return;
+  }
+  scrubOAuthEnv(process.env);
+  if (process.argv.includes("--check-env")) {
+    process.stdout.write(JSON.stringify({ names: Object.keys(process.env).sort() }) + "\n");
+    return;
+  }
   const options = {
     permissionMode: "bypassPermissions",
     includePartialMessages: true,
-    apiKeySource: "none",
     canUseTool
   };
   for (let i = 2; i < process.argv.length; i++) {

@@ -91,6 +91,14 @@ handle the question/answer protocol. If Node or the sidecar bundle is
 missing, the daemon still starts normally, but any dispatch request that
 enables structured questions returns 503 rather than hanging.
 
+**API key:** the sidecar is the Anthropic Agent SDK, and Anthropic does not
+allow a subscription login there, so it refuses to start unless
+`ANTHROPIC_API_KEY` holds an API key in the daemon's environment. Without one, a
+dispatch that enables structured questions fails with an error naming the
+variable, and nothing falls back to your login. Subscription users use the CLI
+engine (interactive chat without structured questions). `yakos doctor --policy`
+flags a missing key.
+
 **Security model:** questions are owner-private — only the originating
 operator's session receives the `ask_user_question` SSE event, never
 shared-session watchers. Answers are guarded by `toolUseId` match,

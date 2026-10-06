@@ -541,6 +541,25 @@ Partial streaming is a claude-specific capability. The Chat UI labels buffered
 runtimes clearly so operators know to expect a single response rather than a
 live stream.
 
+## Interactive chat engines (K-137)
+
+The console Chat pane's interactive mode has two engines, both for claude. The
+CLI engine runs `claude --print --input-format stream-json` itself, so it is
+Claude Code under your own login and works for subscription users. The SDK
+engine (`yakos serve --console-structured-questions`) runs a Node sidecar built
+on the Anthropic Agent SDK so `AskUserQuestion` can be answered in the browser.
+Anthropic's terms of 2026-02-19 allow a subscription login only in Claude Code
+and claude.ai, not in the Agent SDK, so the SDK engine is hard-gated: it starts
+only when `ANTHROPIC_API_KEY` holds an API key, it never receives
+`CLAUDE_CODE_OAUTH*` variables or OAuth tokens, and without a key the console
+shows the refusal instead of falling back to the CLI engine or to your login.
+Subscription users stay on the CLI engine. `yakos doctor --policy` reports an SDK
+engine that can be selected without a key. The bash `claude-sdk` runtime (the
+Python Agent SDK, `yakos dispatch --runtime claude-sdk`) follows the same rule:
+its dispatch refuses unless `ANTHROPIC_API_KEY` holds an API key, and the python
+it starts inherits no OAuth variables; its `launch` is claude.sh and is
+unchanged.
+
 ## Jev is not a runtime
 
 TypeSafe's Jev is deliberately absent from this matrix. It has no session, no
