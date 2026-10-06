@@ -95,6 +95,14 @@ func isBudgetForceGo(args []string) bool {
 	return len(args) > 0 && args[0] == "budget"
 }
 
+// isModelsForceGo reports whether this invocation is `yakos models ...`. The model
+// registry (K-138) has no bash equivalent: shadow-mode routing would hand it to
+// the bash CLI, which prints "unknown command". Like budget and decide, it is
+// always Go-native.
+func isModelsForceGo(args []string) bool {
+	return len(args) > 0 && args[0] == "models"
+}
+
 // selectImpl encodes the YAKOS_IMPL gate decision as a pure function so it
 // can be unit-tested without touching the filesystem or spawning processes.
 //
@@ -183,7 +191,7 @@ func main() {
 	//
 	// `doctor` is a deliberate exception to this gate (unless YAKOS_IMPL=bash
 	// is explicit): see isDoctorForceGo's doc comment.
-	if !isDoctorForceGo(os.Getenv("YAKOS_IMPL"), args) && !isHookForceGo(args) && !isDecideForceGo(args) && !isBudgetForceGo(args) {
+	if !isDoctorForceGo(os.Getenv("YAKOS_IMPL"), args) && !isHookForceGo(args) && !isDecideForceGo(args) && !isBudgetForceGo(args) && !isModelsForceGo(args) {
 		switch selectImpl(os.Getenv("YAKOS_IMPL"), passthrough.BashYakosExists(yakosRoot)) {
 		case implPassthrough:
 			// The bash dispatch has no dollar budget; enforce it here (K-119).
@@ -213,6 +221,8 @@ func main() {
 		runDecide(yakosRoot, args[1:])
 	case "budget":
 		runBudget(args[1:])
+	case "models":
+		runModels(args[1:])
 	case "cost":
 		runCost(args[1:])
 	case "status":
