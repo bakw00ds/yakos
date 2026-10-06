@@ -481,7 +481,7 @@ _ss_risk_reason() {
 
 # --- K-117: supervisor launch gate (coalesce, cap, interval, deadline) ------
 # The supervisor run takes 1-4 minutes, so triggers routinely arrive while one
-# is in flight. Per session key, under the counter's lock dir, the gate:
+# is in flight. Per session key, under the counter's lock, the gate:
 #   - IN FLIGHT  records the trigger (redacted preview appended to a per-session
 #                pending file) and launches nothing; the running wrapper starts
 #                exactly ONE follow-up when it ends and hands it that file;
@@ -857,7 +857,7 @@ _ss_wlog=""         # the wrapper's log path, resolved before the lock is taken
 # production. The clock is $EPOCHREALTIME (bash 5); an older shell forks perl per
 # probe, which inflates the holds it reports. Go twin: lockStat.
 _ss_stats=""
-if [ "${YAKOS_TEST_SEAMS:-}" = 1 ] && [ "${YAKOS_TEST_LOCK_STATS:-}" = 1 ]; then _ss_stats="$current_dir/.supervisor-lock-stats"; fi
+if [ "${YAKOS_TEST_SEAMS:-}" = 1 ] && [ "${YAKOS_TEST_LOCK_STATS:-}" = 1 ] && [ ! -L "$current_dir/.supervisor-lock-stats" ]; then _ss_stats="$current_dir/.supervisor-lock-stats"; fi
 _ss_us=0; _ss_t0=0; _ss_t1=0; _ss_tries=0; _ss_label=lock
 _ss_now_us() { # sets _ss_us
     if [ -n "${EPOCHREALTIME:-}" ]; then _ss_us="${EPOCHREALTIME//[.,]/}"
@@ -1007,7 +1007,7 @@ _ss_lock_take() { # [label for the stats seam]
     _ss_lock_loop || rc=1
     if [ -n "$_ss_stats" ]; then
         _ss_now_us; _ss_t1=$_ss_us
-        if [ "$rc" = 1 ]; then printf 'H %s %s FAIL wait_us=%s tries=%s\n' "$$" "$_ss_label" "$((_ss_t1 - _ss_t0))" "$_ss_tries" >> "$_ss_stats" 2>/dev/null || true; fi
+        if [ "$rc" = 1 ]; then ( umask 077; printf 'H %s %s FAIL wait_us=%s tries=%s\n' "$$" "$_ss_label" "$((_ss_t1 - _ss_t0))" "$_ss_tries" >> "$_ss_stats" ) 2>/dev/null || true; fi
     fi
     return "$rc"
 }
@@ -1016,7 +1016,7 @@ _ss_lock_drop() {
         rm -f "$_ss_lock" 2>/dev/null || true
         if [ -n "$_ss_stats" ]; then
             _ss_now_us
-            printf 'H %s %s OK wait_us=%s tries=%s hold_us=%s got_us=%s\n' "$$" "$_ss_label" "$((_ss_t1 - _ss_t0))" "$_ss_tries" "$((_ss_us - _ss_t1))" "$_ss_t1" >> "$_ss_stats" 2>/dev/null || true
+            ( umask 077; printf 'H %s %s OK wait_us=%s tries=%s hold_us=%s got_us=%s\n' "$$" "$_ss_label" "$((_ss_t1 - _ss_t0))" "$_ss_tries" "$((_ss_us - _ss_t1))" "$_ss_t1" >> "$_ss_stats" ) 2>/dev/null || true
         fi
     fi
     _ss_locked=0
@@ -1035,11 +1035,11 @@ _ss_paths() {
 # threshold and a lost high-risk trigger is never recorded. A hook whose wait
 # ceiling expired therefore leaves a small owner-only record that the next lock
 # holder folds in (docs/supervisor-mode.md, "Lock protocol"):
-#   <counter>.add.<pid>.<n>   "1": one increment owed to the counter. The holder
+#   <counter>.add.<pid>.<id>  "1": one increment owed to the counter. The holder
 #                             that folds it counts it and, if that moves the
 #                             counter past a score-every multiple, covers the
 #                             crossing (the hook that owed it is long gone).
-#   <state>.add.<pid>.<n>     "high=<0|1>", then the event preview: one trigger
+#   <state>.add.<pid>.<id>    "high=<0|1>", then the event preview: one trigger
 #                             owed to the session's run state (pending +1, high
 #                             +1 when flagged, preview appended to the pending
 #                             file). Folded by the next gate holder of the
@@ -1057,13 +1057,13 @@ _ss_paths() {
 _ss_journal_full() { # <base>: 0 when 512 records or more already wait (the storage is bounded)
     local f n=0
     for f in "$1".add.*; do
-        [ -e "$f" ] || continue
+        { [ -f "$f" ] && [ ! -L "$f" ]; } || continue
         n=$((n + 1))
         [ "$n" -lt 512 ] || return 0
     done
     return 1
 }
-_ss_journal_write() { # <base> <body>: a new record <base>.add.<pid>.<n>; 0 when it was written. A name taken (a recycled pid) gets a new one.
+_ss_journal_write() { # <base> <body>: a new record <base>.add.<pid>.<id>; 0 when it was written. A name taken (a recycled pid) gets a new one.
     local i=0
     if _ss_journal_full "$1"; then return 1; fi
     while [ "$i" -lt 5 ]; do
@@ -1182,6 +1182,46 @@ EOF_BUD
     case "$_ss_bud_hard$_ss_bud_over" in [01][01]) : ;; *) _ss_bud_state=off; _ss_bud_hard=0; _ss_bud_over=0 ;; esac
     return 0
 }
+# _ss_ledger_stamp: a freshness token for the spend ledger, the dispatch log the budget is
+# computed from: its size in bytes ("none" while it does not exist). Every dispatch event,
+# spend records included, is appended to it, so the stamp changes whenever spend may have been
+# recorded. The directory is the CLI's own ($YAKOS_DISPATCH_LOG, else ~/.yakos-state). One `wc`
+# fork; skipped when there is no CLI to read a budget from. Go twin: ledgerStamp.
+_ss_ledger_stamp() {
+    _ss_stamp_v=""
+    [ -n "${yakos_cli:-}" ] || return 0
+    local d="${YAKOS_DISPATCH_LOG:-}"
+    if [ -z "$d" ]; then
+        if [ -n "${HOME:-}" ]; then d="$HOME/.yakos-state"; else d="${TMPDIR:-/tmp}/.yakos-state"; fi
+    fi
+    # A regular file only: wc would block on a FIFO planted in its place (and the Go twin's stat never does).
+    if [ -f "$d/dispatch-log.ndjson" ]; then _ss_stamp_v="$({ wc -c < "$d/dispatch-log.ndjson"; } 2>/dev/null)" || true; fi
+    _ss_stamp_v="${_ss_stamp_v//[[:space:]]/}"
+    [ -n "$_ss_stamp_v" ] || _ss_stamp_v=none
+    return 0
+}
+# _ss_budget_read: read the budget, stamping the ledger BEFORE the read, so that anything
+# recorded after the stamp is noticed by the comparison under the lock (see _ss_gate).
+_ss_budget_read() {
+    _ss_ledger_stamp
+    _ss_bud_stamp="$_ss_stamp_v"
+    _ss_budget
+    _ss_bud_ready=1
+    return 0
+}
+# Test seam (K-128): with YAKOS_TEST_SEAMS=1 and a file .supervisor-test-pause in the work
+# directory, a hook about to take the gate lock creates .supervisor-test-reached there and waits
+# (20 s at most) for the pause file to be removed, so a test can change the world between the
+# budget read and the lock without racing the hook. Fixed names in the directory the hook already
+# writes, never a path from the environment; a no-op without the toggle. The marker is created
+# exclusively (noclobber), so a planted link is never followed. Go twin: gatePause.
+_ss_test_pause() {
+    local i=0
+    [ "${YAKOS_TEST_SEAMS:-}" = 1 ] && [ -e "$current_dir/.supervisor-test-pause" ] || return 0
+    ( set -C; true > "$current_dir/.supervisor-test-reached" ) 2>/dev/null || true
+    while [ -e "$current_dir/.supervisor-test-pause" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i + 1)); done
+    return 0
+}
 # _ss_allow <routine|high> <now>: sets _ss_deny to "" (allow) or the reason:
 # backoff, ceiling, budgetceil, budget, cap, interval. The one gate decision.
 # The dollar budget exempts high-risk launches the same way the cap does:
@@ -1246,7 +1286,10 @@ _ss_synth_budget_finding() {
 # _ss_gate_report after it is dropped, with the same records in the same order as
 # when it all ran under the lock. Only the wrapper spawn stays inside, so a launch
 # is claimed and started together (the Go twin rolls a failed spawn back there).
-# Go twin: launchGate.
+# The budget read taken before the lock is stamped with the size of the dispatch log and
+# compared under the lock: a run that started, spent and ended while this hook waited
+# leaves nothing in flight, so only the grown log says the read is stale, and the budget is
+# then read again under the lock. Go twin: launchGate.
 _ss_gate() {
     local crossed="$1" now stale kind delay nsec
     _ss_paths
@@ -1266,15 +1309,16 @@ _ss_gate() {
     stale=$((sup_deadline + sup_interval + 60))
     _ss_bud_state=off; _ss_bud_hard=0; _ss_bud_over=0
     _ss_bud_spent=0; _ss_bud_limit=0; _ss_bud_stop=0
-    _ss_bud_ready=0
+    _ss_bud_ready=0; _ss_bud_stamp=""
     while :; do
         # The budget read forks the CLI (up to ~2 s) and only a launch decision
         # needs it: a crossing with no live run in flight. Peek at the state
         # without the lock (it is replaced by rename, never torn) to find out ...
         if [ "$crossed" = 1 ] && [ "$_ss_bud_ready" = 0 ]; then
             _ss_load_state
-            if [ -z "$st_start" ] || [ $((now - st_start)) -gt "$stale" ]; then _ss_budget; _ss_bud_ready=1; fi
+            if [ -z "$st_start" ] || [ $((now - st_start)) -gt "$stale" ]; then _ss_budget_read; fi
         fi
+        _ss_test_pause
         if ! _ss_lock_take gate; then
             if _ss_journal_gate; then _ss_note="trigger journaled for the next lock holder"; else _ss_note="could not journal the trigger"; fi
             ho_log "supervisor-stream" "WARN" "pass" \
@@ -1293,12 +1337,23 @@ _ss_gate() {
         if [ -n "$st_start" ] && [ $((now - st_start)) -gt "$stale" ]; then
             _ss_stale_age=$((now - st_start)); st_start=""
         fi
-        # ... and re-check under it: if the run ended in between, a launch is on
-        # the table after all, so read the budget (outside the lock) and retry.
-        if [ "$crossed" = 1 ] && [ -z "$st_start" ] && [ "$_ss_bud_ready" = 0 ]; then
-            _ss_lock_drop
-            _ss_budget; _ss_bud_ready=1
-            continue
+        if [ "$crossed" = 1 ] && [ -z "$st_start" ]; then
+            # ... and re-check under it. If the run ended in between, a launch is on
+            # the table after all, so read the budget (outside the lock) and retry.
+            if [ "$_ss_bud_ready" = 0 ]; then
+                _ss_lock_drop
+                _ss_budget_read
+                continue
+            fi
+            # The read was taken before the lock. If the dispatch log has grown since (a
+            # run started, spent and ended while this hook read and waited; of this session
+            # or another) the read may be stale, and the state shows nothing in flight: read
+            # again, here, under the lock, as before K-128 (the one case the CLI runs under it).
+            _ss_ledger_stamp
+            if [ "$_ss_stamp_v" != "$_ss_bud_stamp" ]; then
+                _ss_bud_stamp="$_ss_stamp_v"
+                _ss_budget
+            fi
         fi
         break
     done
@@ -1553,17 +1608,28 @@ if ! _ss_lock_take counter; then
 fi
 # Release the lock on every exit path (kill, error) after this point.
 trap 'rm -f "$_ss_lock" 2>/dev/null || true' EXIT
+# The counter cannot be written (a directory in its place, say), so this tick cannot be counted.
+# Say so (it used to be dropped without a word) and still record a high-risk trigger in the
+# session's run state. Never returns: it ends the hook. Go twin: the counterWriteFailed case.
+_ss_counter_unwritable() {
+    _ss_lock_drop
+    ho_log "supervisor-stream" "WARN" "pass" \
+        "counter not writable; skipping this escalation tick" \
+        "$(jq -nc --arg p "$counter" '{counter: $p}')"
+    if [ "$trigger_high" = 1 ]; then _ss_gate 0 || true; fi
+    exit 0
+}
 cur=0
 if [ -f "$counter" ]; then { read -r cur < "$counter"; } 2>/dev/null || true; fi
 case "$cur" in ''|*[!0-9]*) cur=0 ;; esac
 _ss_fold_adds
 cur=$((10#$cur + _ss_fold_n + 1))
 _ss_ctmp="$counter.tmp.$$"
-if [ -d "$counter" ]; then exit 0; fi
+if [ -d "$counter" ]; then _ss_counter_unwritable; fi
 if ! { printf '%d\n' "$cur" > "$_ss_ctmp" && mv -f "$_ss_ctmp" "$counter"; } 2>/dev/null; then
     rm -f "$_ss_ctmp" 2>/dev/null || true
     # No rename (a failed fork, say): a direct write still beats losing the tick.
-    if ! { printf '%d\n' "$cur" > "$counter"; } 2>/dev/null; then exit 0; fi
+    if ! { printf '%d\n' "$cur" > "$counter"; } 2>/dev/null; then _ss_counter_unwritable; fi
 fi
 _ss_folded=$_ss_fold_n
 _ss_fold_done
