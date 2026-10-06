@@ -9,6 +9,7 @@ package consoleui_test
 // text delta and a result frame (usage, cost, session id), the way the CLI does.
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -307,6 +308,107 @@ func TestInteractiveChat_OneShotTurnOnALiveInteractiveConversationIsNotCountedTw
 	if ev := s.events(t); len(ev) != 4 {
 		t.Fatalf("an interactive turn and a one-shot turn are two pairs (4 events), got %d: %v", len(ev), ev)
 	}
+}
+
+// sseFrames opens the chat SSE stream for operator and delivers each data frame.
+func (s ledgerServer) sseFrames(t *testing.T, ctx context.Context, operator string) <-chan map[string]any {
+	t.Helper()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.ts.URL+"/api/chat/stream?operatorId="+operator, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+s.tok)
+	resp, err := s.ts.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make(chan map[string]any, 64)
+	go func() {
+		defer close(out)
+		defer resp.Body.Close()
+		sc := bufio.NewScanner(resp.Body)
+		sc.Buffer(make([]byte, 64*1024), 1<<20)
+		for sc.Scan() {
+			line := sc.Text()
+			if !strings.HasPrefix(line, "data: ") {
+				continue
+			}
+			var ev map[string]any
+			if json.Unmarshal([]byte(line[len("data: "):]), &ev) == nil {
+				out <- ev
+			}
+		}
+	}()
+	return out
+}
+
+// The persistent CLI engine used to parse claude's result line and drop it, so the
+// browser never received an end-of-turn event for an interactive turn and the Chat pane
+// stayed "streaming". Every turn, the first and each follow-up, now ends with a summary
+// frame on the operator's stream, after the turn's text.
+func TestInteractiveChat_EveryTurnEndsWithASummaryFrameInTheBrowserStream(t *testing.T) {
+	s := newLedgerServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	frames := s.sseFrames(t, ctx, "alice")
+	time.Sleep(100 * time.Millisecond) // the stream registers before the first turn starts
+
+	resp := s.post(t, "/api/chat/dispatch", map[string]any{
+		"agent": "claude", "runtime": "claude", "task": "first", "sessionId": "sess-sse-1",
+		"operatorId": "alice", "conversationId": "conv-sse-1", "interactive": true,
+	})
+	resp.Body.Close()
+	t.Cleanup(func() { s.mgr.Close("conv-sse-1") })
+
+	// nextTurn reads frames until the turn's summary and returns the frame types it saw.
+	nextTurn := func(label string) (types []string, summary map[string]any) {
+		deadline := time.After(15 * time.Second)
+		for {
+			select {
+			case ev, ok := <-frames:
+				if !ok {
+					t.Fatalf("%s: the stream closed before a summary", label)
+				}
+				typ, _ := ev["type"].(string)
+				types = append(types, typ)
+				if typ == "summary" {
+					return types, ev
+				}
+			case <-deadline:
+				t.Fatalf("%s: no summary frame arrived (saw %v): the pane would never learn the turn ended", label, types)
+			}
+		}
+	}
+
+	types, sum := nextTurn("first turn")
+	if types[len(types)-1] != "summary" || !contains(types, "token") {
+		t.Errorf("first turn frames = %v, want text then a summary", types)
+	}
+	if sum["exit_code"] != float64(0) || sum["runtime_resolved"] != "claude" || sum["conversation_id"] != "conv-sse-1" ||
+		sum["model_resolved"] != "claude-sonnet-4-5-20250929" {
+		t.Errorf("first summary = %v", sum)
+	}
+
+	resp = s.post(t, "/api/chat/send", map[string]any{
+		"conversationId": "conv-sse-1", "operatorId": "alice", "sessionId": "sess-sse-1", "text": "second",
+	})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("send: %d", resp.StatusCode)
+	}
+	types, sum = nextTurn("follow-up turn")
+	if types[len(types)-1] != "summary" || sum["exit_code"] != float64(0) {
+		t.Errorf("follow-up frames = %v, summary = %v", types, sum)
+	}
+}
+
+func contains(ss []string, want string) bool {
+	for _, s := range ss {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 // A one-shot chat turn is accounted once, inside RunStream, and must not be counted
