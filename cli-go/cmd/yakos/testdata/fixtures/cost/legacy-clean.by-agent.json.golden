@@ -1,0 +1,1 @@
+{"events":7,"rows":[{"key":"frontend","count":2,"ok":2,"fail":0,"total_duration_s":140,"total_in_tokens":105,"total_out_tokens":725},{"key":"architect","count":3,"ok":3,"fail":0,"total_duration_s":145,"total_in_tokens":124,"total_out_tokens":700},{"key":"backend","count":2,"ok":1,"fail":1,"total_duration_s":80,"total_in_tokens":70,"total_out_tokens":375}]}

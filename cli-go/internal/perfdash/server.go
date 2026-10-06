@@ -295,10 +295,10 @@ func (s *Server) handleTimeseries(w http.ResponseWriter, r *http.Request) {
 		metric = "dispatches"
 	}
 	switch metric {
-	case "cost", "latency", "dispatches":
+	case "cost", "latency", "dispatches", "tokens":
 		// valid
 	default:
-		writeErr(w, http.StatusBadRequest, "metric must be cost|latency|dispatches")
+		writeErr(w, http.StatusBadRequest, "metric must be cost|latency|dispatches|tokens")
 		return
 	}
 

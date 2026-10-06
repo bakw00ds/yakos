@@ -4,6 +4,11 @@
  * All API calls attach "Authorization: Bearer <token>" header.
  * Auto-refresh every 30 seconds.
  * SVG timeseries chart implemented inline (no CDN dependency).
+ *
+ * Tokens are the primary measure (K-136). Dollars are API spend only, so the
+ * Cost (USD) card, table columns and chart series exist only while some
+ * displayed row has spend; subscription and local runs show tokens and no
+ * dollars. API-equivalent dollars are informational, muted, never spend.
  */
 
 'use strict';
@@ -59,7 +64,9 @@ async function apiFetch(path, tok) {
 function el(id) { return document.getElementById(id); }
 function setText(id, v) { const e = el(id); if (e) e.textContent = v; }
 
-function buildRows(tbody, rows) {
+// buildRows fills tbody with one <tr> per entry of rows (each entry is the
+// cell HTML of a row, built with td()). ncols sizes the placeholder row.
+function buildRows(tbody, rows, ncols) {
   tbody.innerHTML = '';
   rows.forEach(r => {
     const tr = document.createElement('tr');
@@ -68,17 +75,42 @@ function buildRows(tbody, rows) {
   });
   if (rows.length === 0) {
     const tr = document.createElement('tr');
-    tr.innerHTML = '<td colspan="10" style="text-align:center;color:#6b7280;padding:20px">No data</td>';
+    tr.innerHTML = '<td colspan="' + (Number(ncols) || 10) + '" style="text-align:center;color:#6b7280;padding:20px">No data</td>';
     tbody.appendChild(tr);
   }
 }
 
-function td(v, cls) {
-  return '<td' + (cls ? ' class="' + cls + '"' : '') + '>' + escapeHTML(String(v)) + '</td>';
+// td and th are the only places a value becomes HTML, and both escape it.
+// cls must be a literal from this file (never data). title is an optional
+// tooltip, escaped for use inside an attribute.
+function td(v, cls, title) {
+  return '<td' + (cls ? ' class="' + cls + '"' : '') +
+    (title ? ' title="' + escapeHTML(title) + '"' : '') + '>' + escapeHTML(v) + '</td>';
 }
 
+function th(label, cls) {
+  return '<th' + (cls ? ' class="' + cls + '"' : '') + '>' + escapeHTML(label) + '</th>';
+}
+
+// escapeHTML is safe for text content and for double- or single-quoted
+// attribute values.
 function escapeHTML(s) {
-  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// num coerces an API number to a finite number (0 when absent or malformed).
+function num(v) {
+  const n = Number(v);
+  return isFinite(n) ? n : 0;
+}
+
+function fmtInt(v) {
+  return num(v).toLocaleString('en-US');
 }
 
 function fmtMs(ms) {
@@ -87,9 +119,73 @@ function fmtMs(ms) {
 }
 
 function fmtCost(c) {
+  c = num(c);
   if (c === 0) return '$0.00';
   if (c < 0.0001) return '<$0.0001';
   return '$' + c.toFixed(4);
+}
+
+// fmtTokensCompact abbreviates a token count for chart axis labels: 1.2k, 3M.
+function fmtTokensCompact(v) {
+  v = num(v);
+  const units = [[1e9, 'B'], [1e6, 'M'], [1e3, 'k']];
+  for (let i = 0; i < units.length; i++) {
+    if (v >= units[i][0]) return (v / units[i][0]).toFixed(1).replace(/\.0$/, '') + units[i][1];
+  }
+  return String(Math.round(v));
+}
+
+// tokenTitle is the tooltip of a tokens cell: the per-kind split as logged.
+// Only the total is comparable across rows from different writers.
+function tokenTitle(d) {
+  if (!d) return '';
+  return 'input ' + fmtInt(d.input) + ' \u00b7 output ' + fmtInt(d.output) +
+    ' \u00b7 cache read ' + fmtInt(d.cache_read) + ' \u00b7 cache creation ' +
+    fmtInt(d.cache_creation) + ' (as logged)';
+}
+
+function toggle(id, visible) {
+  const e = el(id);
+  if (!e) return;
+  if (visible) e.classList.remove('hidden'); else e.classList.add('hidden');
+}
+
+// ---- tables -----------------------------------------------------------------
+// Each table is described by column specs { head, cell(row), cls, show }. A
+// column with show === false is left out of the header and of every row
+// together, so the two can never disagree.
+
+function renderTable(headId, bodyId, cols, rows) {
+  const visible = cols.filter(c => c.show !== false);
+  el(headId).innerHTML = '<tr>' + visible.map(c => th(c.head, c.cls)).join('') + '</tr>';
+  buildRows(el(bodyId), rows.map(r => visible.map(c => c.cell(r)).join('')), visible.length);
+}
+
+function anyPositive(rows, key) {
+  return rows.some(r => num(r[key]) > 0);
+}
+
+function tokensCol() {
+  return { head: 'Tokens', cell: r => td(fmtInt(r.tokens), '', tokenTitle(r.token_detail)) };
+}
+
+// usdCol is the Cost (USD) column: API spend only, so it appears only when some
+// row in the table has any. A row with none (a subscription or local run) shows
+// an em dash, not $0.00: it was not billed per call, it is not a free API call.
+function usdCol(rows) {
+  return {
+    head: 'Cost (USD)', show: anyPositive(rows, 'cost_usd'),
+    cell: r => td(num(r.cost_usd) > 0 ? fmtCost(r.cost_usd) : '\u2014'),
+  };
+}
+
+// apiEquivCol is the muted API-equivalent column: what subscription runs would
+// have cost at API rates. Informational, never spend.
+function apiEquivCol(rows) {
+  return {
+    head: 'API equiv. (USD)', cls: 'muted', show: anyPositive(rows, 'api_equivalent_usd'),
+    cell: r => td(num(r.api_equivalent_usd) > 0 ? fmtCost(r.api_equivalent_usd) : '\u2014', 'muted'),
+  };
 }
 
 function fmtTs(ts) {
@@ -217,6 +313,7 @@ function renderChart(svg, points, metric) {
 function fmtAxisVal(v, metric) {
   if (metric === 'cost') return '$' + v.toFixed(3);
   if (metric === 'latency') return Math.round(v) + 'ms';
+  if (metric === 'tokens') return fmtTokensCompact(v);
   return Math.round(v).toString();
 }
 
@@ -239,30 +336,66 @@ function formatBucketLabel(ts) {
 let currentToken = null;
 let refreshTimer = null;
 
+// renderCards fills the summary cards. Tokens lead; the cost card exists only
+// while the window has API spend, and the API-equivalent note only when some
+// subscription run reported one.
+function renderCards(summary, hasSpend) {
+  const d = summary.token_detail || {};
+  setText('card-tokens', fmtInt(summary.total_tokens));
+  setText('card-tokens-detail', 'in ' + fmtInt(d.input) + ' \u00b7 out ' + fmtInt(d.output) +
+    ' \u00b7 cache ' + fmtInt(num(d.cache_read) + num(d.cache_creation)));
+  setText('card-dispatches', fmtInt(summary.total_dispatches));
+  setText('card-cost', fmtCost(summary.total_cost_usd));
+  toggle('card-cost-wrap', hasSpend);
+  const eq = num(summary.api_equivalent_usd);
+  setText('card-apieq', eq > 0 ? '\u2248 ' + fmtCost(eq) + ' at API rates (not spend)' : '');
+  toggle('card-apieq', eq > 0);
+  setText('card-avg-latency', fmtMs(summary.avg_latency_ms));
+  setText('card-p95-latency', fmtMs(summary.p95_latency_ms));
+}
+
+// syncMetricSelect offers the Cost (USD) series only while the window has API
+// spend. With none it is hidden, and if it was selected the chart falls back
+// to tokens.
+function syncMetricSelect(hasSpend) {
+  const opt = el('metric-opt-cost');
+  if (opt) { opt.hidden = !hasSpend; opt.disabled = !hasSpend; }
+  const sel = el('metric-select');
+  if (!hasSpend && sel.value === 'cost') sel.value = 'tokens';
+}
+
 async function loadAll() {
   const tok = currentToken;
   const win = el('window-select').value;
-  const metric = el('metric-select').value;
   const bucket = el('bucket-select').value;
   const axis = el('axis-select').value;
 
   try {
     // Summary
     const summary = await apiFetch('api/perf/summary?window=' + win, tok);
-    setText('card-dispatches', summary.total_dispatches.toLocaleString());
-    setText('card-cost', fmtCost(summary.total_cost_usd));
-    setText('card-avg-latency', fmtMs(summary.avg_latency_ms));
-    setText('card-p95-latency', fmtMs(summary.p95_latency_ms));
+    // total_cost_usd is API spend only (subscription and local runs add none).
+    const hasSpend = num(summary.total_cost_usd) > 0;
+    renderCards(summary, hasSpend);
+    syncMetricSelect(hasSpend);
+    const metric = el('metric-select').value;
 
     // Top agents
-    buildRows(el('top-agents-body'), (summary.top_agents || []).map(a =>
-      td(a.key) + td(a.dispatches) + td(fmtCost(a.cost_usd))
-    ));
+    const topAgents = summary.top_agents || [];
+    renderTable('top-agents-head', 'top-agents-body', [
+      { head: 'Agent', cell: a => td(a.key) },
+      { head: 'Dispatches', cell: a => td(a.dispatches) },
+      tokensCol(),
+      usdCol(topAgents),
+    ], topAgents);
 
     // Top runtimes
-    buildRows(el('top-runtimes-body'), (summary.top_runtimes || []).map(r =>
-      td(r.key) + td(r.dispatches) + td(fmtCost(r.cost_usd))
-    ));
+    const topRuntimes = summary.top_runtimes || [];
+    renderTable('top-runtimes-head', 'top-runtimes-body', [
+      { head: 'Runtime', cell: r => td(r.key) },
+      { head: 'Dispatches', cell: r => td(r.dispatches) },
+      tokensCol(),
+      usdCol(topRuntimes),
+    ], topRuntimes);
 
     // Timeseries
     const ts = await apiFetch(
@@ -271,27 +404,31 @@ async function loadAll() {
     renderChart(el('timeseries-svg'), ts, metric);
 
     // By axis
-    const byAxis = await apiFetch('api/perf/by_axis?axis=' + axis + '&window=' + win, tok);
-    buildRows(el('breakdown-body'), (byAxis || []).map(row =>
-      td(row.key) +
-      td(row.dispatches) +
-      td(fmtCost(row.cost_usd)) +
-      td(fmtMs(row.avg_latency_ms)) +
-      td(fmtMs(row.p95_latency_ms))
-    ));
+    const byAxis = (await apiFetch('api/perf/by_axis?axis=' + axis + '&window=' + win, tok)) || [];
+    renderTable('breakdown-head', 'breakdown-body', [
+      { head: 'Key', cell: row => td(row.key) },
+      { head: 'Dispatches', cell: row => td(row.dispatches) },
+      tokensCol(),
+      usdCol(byAxis),
+      apiEquivCol(byAxis),
+      { head: 'Avg Latency', cell: row => td(fmtMs(row.avg_latency_ms)) },
+      { head: 'p95 Latency', cell: row => td(fmtMs(row.p95_latency_ms)) },
+    ], byAxis);
 
     // Recent
-    const recent = await apiFetch('api/perf/recent?limit=50', tok);
-    const rows = (recent || []).slice().reverse(); // most recent first
-    buildRows(el('recent-body'), rows.map(r =>
-      td(fmtTs(r.ts)) +
-      td(r.agent || '—') +
-      td(r.runtime || '—') +
-      td(r.project || '—') +
-      td(r.exit_code, r.exit_code === 0 ? 'exit-ok' : 'exit-err') +
-      td(fmtMs(r.latency_ms)) +
-      td(fmtCost(r.cost_usd))
-    ));
+    const recent = (await apiFetch('api/perf/recent?limit=50', tok)) || [];
+    const rows = recent.slice().reverse(); // most recent first
+    renderTable('recent-head', 'recent-body', [
+      { head: 'Time', cell: r => td(fmtTs(r.ts)) },
+      { head: 'Agent', cell: r => td(r.agent || '\u2014') },
+      { head: 'Runtime', cell: r => td(r.runtime || '\u2014') },
+      { head: 'Project', cell: r => td(r.project || '\u2014') },
+      { head: 'Exit', cell: r => td(r.exit_code, r.exit_code === 0 ? 'exit-ok' : 'exit-err') },
+      { head: 'Duration', cell: r => td(fmtMs(r.latency_ms)) },
+      tokensCol(),
+      { head: 'Billing', cell: r => td(r.billing || '\u2014') },
+      usdCol(rows),
+    ], rows);
 
     setText('last-updated', 'Updated ' + new Date().toLocaleTimeString());
 

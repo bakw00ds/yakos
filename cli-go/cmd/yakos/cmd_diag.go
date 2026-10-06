@@ -230,7 +230,10 @@ func runCost(args []string) {
 	}
 
 	ch := cost.StreamFiles(files, since)
-	rpt := cost.Aggregate(ch, axis, 0)
+	// AggregateLedger: when the log holds ledger events (K-136) the report adds
+	// real token and dollar columns and ranks by real tokens; any other log
+	// aggregates and prints exactly as the bash twin does.
+	rpt := cost.AggregateLedger(ch, axis, 0)
 
 	if rpt.Events == 0 {
 		if err := cost.PrintNoEvents(os.Stdout, emitJSON, since); err != nil {

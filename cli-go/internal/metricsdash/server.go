@@ -284,7 +284,9 @@ func (s *Server) loadHistory() ([]metrics.Snapshot, error) {
 
 // ---- live cost loader -------------------------------------------------------
 
-// loadLiveCost returns the aggregated total_cost_usd from the dispatch-log.
+// loadLiveCost returns the aggregated spend and token totals from the
+// dispatch-log. Dollars are API spend only (Event.SpendUSD): a subscription
+// or local run adds tokens but no dollars (K-136).
 // Returns (nil, nil) when DispatchLogDir is not configured (feature disabled).
 // Uses an mtime+size cache so the log is re-parsed only when it changes.
 func (s *Server) loadLiveCost() (*LiveCostResult, error) {
@@ -302,7 +304,8 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	latest := LatestSnapshot(snaps)
 	if latest == nil {
 		// No history.ndjson snapshots yet.  Fall back to live dispatch-log cost
-		// when DispatchLogDir is configured, so the Cost tab is not empty.
+		// (API spend only) when DispatchLogDir is configured, so the Cost tab is
+		// not empty.
 		live, err := s.loadLiveCost()
 		if err != nil || live == nil {
 			writeJSON(w, http.StatusOK, map[string]string{"message": "no snapshots yet — run: yakos metrics collect"})
@@ -332,9 +335,11 @@ func (s *Server) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 
 // ---- GET /api/metrics/live_cost ---------------------------------------------
 
-// handleLiveCost returns the current total_cost_usd aggregated from the
-// dispatch-log.  It does not require a `yakos metrics collect` run.
-// Returns {"total_cost_usd": 0, "event_count": 0} when no dispatch-log exists.
+// handleLiveCost returns the current spend and token totals aggregated from
+// the dispatch-log (see LiveCostResult).  It does not require a `yakos
+// metrics collect` run. total_cost_usd is API spend only; tokens, the
+// per-runtime breakdown and api_equivalent_usd are additive (K-136).
+// Returns zero totals and "runtimes": [] when no dispatch-log exists.
 // Returns {"message": "..."} when DispatchLogDir is not configured.
 func (s *Server) handleLiveCost(w http.ResponseWriter, r *http.Request) {
 	live, err := s.loadLiveCost()

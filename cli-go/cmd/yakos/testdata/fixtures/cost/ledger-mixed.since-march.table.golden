@@ -1,0 +1,7 @@
+yakos cost — 1 dispatch event(s) since 2026-03-01 by agent
+
+  key                       count    ok  fail   dur(s) est_in_tok est_out_tok
+  ------------------------ ------ ----- ----- -------- ---------- ----------
+  architect                     1     1     0       30         25        125
+
+  TOTAL                         1                   30         25        125

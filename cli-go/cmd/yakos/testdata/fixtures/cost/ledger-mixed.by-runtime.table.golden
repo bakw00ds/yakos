@@ -1,0 +1,12 @@
+yakos cost — 11 dispatch event(s) by runtime
+
+  key                       count    ok  fail   dur(s) est_in_tok est_out_tok         in        out      cache     tokens        usd  api_equiv
+  ------------------------ ------ ----- ----- -------- ---------- ---------- ---------- ---------- ---------- ---------- ---------- ----------
+  claude                        6     5     1      172        330        915       7210       1500      73500      82210     0.8012     0.6106
+  codex                         3     3     0      200        437       1575      31838       1442      19424      52704          -          -
+  agy                           2     2     0       30         55        160      12863          1          0      12864          -          -
+
+  TOTAL                        11                  402        822       2650      51911       2943      92924     147778     0.8012     0.6106
+
+  tokens = in + out + cache, as logged; est_in_tok and est_out_tok are size estimates and are not counted.
+  api_equiv = what subscription runs would have cost at API rates; it is not spend and is not part of usd.

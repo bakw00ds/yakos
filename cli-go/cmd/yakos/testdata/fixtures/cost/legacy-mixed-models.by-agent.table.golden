@@ -1,0 +1,8 @@
+yakos cost — 4 dispatch event(s) by agent
+
+  key                       count    ok  fail   dur(s) est_in_tok est_out_tok
+  ------------------------ ------ ----- ----- -------- ---------- ----------
+  new-agent                     2     2     0       35        300        150
+  old-agent                     2     1     1       15         15         50
+
+  TOTAL                         4                   50        315        200

@@ -1,0 +1,8 @@
+yakos cost — 7 dispatch event(s) by runtime
+
+  key                       count    ok  fail   dur(s) est_in_tok est_out_tok
+  ------------------------ ------ ----- ----- -------- ---------- ----------
+  claude                        5     4     1      225        194       1075
+  codex                         2     2     0      140        105        725
+
+  TOTAL                         7                  365        299       1800

@@ -1,0 +1,10 @@
+yakos cost — 4 dispatch event(s) by runtime
+
+  key                       count    ok  fail   dur(s) est_in_tok est_out_tok         in        out      cache     tokens
+  ------------------------ ------ ----- ----- -------- ---------- ---------- ---------- ---------- ---------- ----------
+  codex                         2     1     1       75        380        920      12000        750      16000      28750
+  agy                           2     2     0       30         55        160      12863          1          0      12864
+
+  TOTAL                         4                  105        435       1080      24863        751      16000      41614
+
+  tokens = in + out + cache, as logged; est_in_tok and est_out_tok are size estimates and are not counted.

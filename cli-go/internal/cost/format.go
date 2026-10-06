@@ -33,6 +33,12 @@ func PrintTable(w io.Writer, rpt Report, since, by string) error {
 		return err
 	}
 
+	// K-136: a log with ledger events prints the real token and dollar columns
+	// after the seven below. Any other log prints exactly what it always did.
+	if rpt.Ledger {
+		return printLedgerTable(w, rpt)
+	}
+
 	// Column headers.
 	if _, err := fmt.Fprintf(w, "  %-24s %6s %5s %5s %8s %10s %10s\n",
 		"key", "count", "ok", "fail", "dur(s)", "est_in_tok", "est_out_tok"); err != nil {
@@ -112,15 +118,34 @@ type JSONRow struct {
 
 // PrintJSON writes machine-readable JSON output to w.
 // Format matches bash: {"events": N, "rows": [...]}
+//
+// A report with ledger events (K-136) keeps those keys and adds the real token
+// and dollar keys to every row; see LedgerJSONRow.
 func PrintJSON(w io.Writer, rpt Report) error {
-	rows := make([]JSONRow, len(rpt.Rows))
-	for i, r := range rpt.Rows {
-		rows[i] = JSONRow(r)
-	}
-	out := JSONOutput{Events: rpt.Events, Rows: rows}
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
+	if rpt.Ledger {
+		return enc.Encode(ledgerJSON(rpt))
+	}
+	rows := make([]JSONRow, len(rpt.Rows))
+	for i, r := range rpt.Rows {
+		rows[i] = legacyJSONRow(r)
+	}
+	out := JSONOutput{Events: rpt.Events, Rows: rows}
 	return enc.Encode(out)
+}
+
+// legacyJSONRow is the bash-compatible subset of a Row.
+func legacyJSONRow(r Row) JSONRow {
+	return JSONRow{
+		Key:            r.Key,
+		Count:          r.Count,
+		OK:             r.OK,
+		Fail:           r.Fail,
+		TotalDurationS: r.TotalDurationS,
+		TotalInTokens:  r.TotalInTokens,
+		TotalOutTokens: r.TotalOutTokens,
+	}
 }
 
 // PrintNoFiles writes the "no log files found" message (bash: files array empty).

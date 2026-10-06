@@ -30,6 +30,8 @@ button#refresh-btn:hover { background: #4a5568; }
 .card { background: #1a202c; border: 1px solid #2d3748; border-radius: .5rem; padding: 1rem; }
 .card-label { font-size: .75rem; color: #718096; text-transform: uppercase; letter-spacing: .05em; margin-bottom: .5rem; }
 .card-value { font-size: 1.75rem; font-weight: 700; color: #90cdf4; font-variant-numeric: tabular-nums; }
+.card-sub { font-size: .7rem; color: #718096; margin-top: .4rem; line-height: 1.35; font-variant-numeric: tabular-nums; }
+.muted { color: #718096; }
 
 /* Sections */
 section { background: #1a202c; border: 1px solid #2d3748; border-radius: .5rem; padding: 1rem; margin-bottom: 1.25rem; }
@@ -47,6 +49,7 @@ select { background: #2d3748; border: 1px solid #4a5568; color: #e2e8f0; padding
 .data-table tr:hover td { background: #2d3748; }
 .data-table .mono { font-family: monospace; font-size: .75rem; }
 .data-table .null-val { color: #4a5568; }
+.data-table th.muted, .data-table td.muted { color: #718096; font-weight: 400; }
 
 /* SVG chart */
 .chart-wrap { overflow-x: auto; }
@@ -90,8 +93,14 @@ svg.chart { display: block; }
     <!-- Latest snapshot cards -->
     <div class="cards" id="snapshot-cards">
       <div class="card">
+        <div class="card-label">Tokens</div>
+        <div class="card-value" id="card-tokens">—</div>
+        <div class="card-sub" id="card-tokens-sub"></div>
+      </div>
+      <div class="card">
         <div class="card-label">Total Cost (USD)</div>
         <div class="card-value" id="card-cost">—</div>
+        <div class="card-sub">API-billed runs only</div>
       </div>
       <div class="card">
         <div class="card-label">Task Count</div>
@@ -114,6 +123,18 @@ svg.chart { display: block; }
         <div class="card-value" id="card-lint">—</div>
       </div>
     </div>
+
+    <!-- Usage by runtime: tokens first. The USD column exists only when some
+         runtime has API spend, so a subscription runtime shows tokens and no
+         dollars. The thead is built by renderRuntimes() so columns always match. -->
+    <section id="runtime-section" class="hidden">
+      <h2>Usage by Runtime</h2>
+      <div id="runtime-msg" class="msg"></div>
+      <table class="data-table" id="runtime-table" style="display:none">
+        <thead id="runtime-head"></thead>
+        <tbody id="runtime-body"></tbody>
+      </table>
+    </section>
 
     <!-- Trend section -->
     <section id="trend-section">
@@ -243,6 +264,14 @@ function fmt2(v) { return v == null ? '—' : v.toFixed(2); }
 function fmtPct(v) { return v == null ? '—' : (v * 100).toFixed(1) + '%'; }
 function fmtInt(v) { return v == null ? '—' : String(v); }
 function fmtCommit(s) { return s ? s.slice(0, 8) : '—'; }
+// Tokens are the primary unit: whole numbers, grouped (en-US so the grouping is
+// the same for every viewer). A non-numeric value from the server shows a dash.
+function fmtTokens(v) {
+  if (v == null || !Number.isFinite(Number(v))) return '—';
+  return Number(v).toLocaleString('en-US');
+}
+// Dollars here are API spend (or, in the muted column, the API-equivalent figure).
+function fmtUSD(v) { return '$' + Number(v).toFixed(4); }
 // esc() escapes untrusted server strings before injection into innerHTML.
 // Branch names, project names, and error messages can contain <>"& in CI.
 function esc(s) {
@@ -343,6 +372,81 @@ function renderSnapshotCards(snap) {
   }
 }
 
+// ---- live usage: tokens first, dollars only for API-billed runs --------------
+// GET api/metrics/live_cost is fetched tolerantly: a failure, an unconfigured
+// log directory ({message}) or an older server without the token fields all
+// yield null, and the page shows dashes instead of breaking.
+async function fetchLive(tok) {
+  try {
+    const resp = await fetch('api/metrics/live_cost', buildFetchOpts(tok));
+    if (!resp.ok) return null;
+    const j = await resp.json();
+    if (!j || j.message || typeof j.total_tokens !== 'number') return null;
+    return j;
+  } catch (e) {
+    return null;
+  }
+}
+
+function renderLive(live) {
+  if (!live) {
+    setText('card-tokens', '—');
+    setText('card-tokens-sub', '');
+    hide('runtime-section');
+    return;
+  }
+  setText('card-tokens', fmtTokens(live.total_tokens));
+  // The per-kind split is "as logged": a legacy codex row keeps its cached
+  // tokens inside input while newer rows split them out, so only the total is
+  // comparable across rows. textContent never parses markup.
+  const t = live.tokens || {};
+  const cache = (t.cache_read || 0) + (t.cache_creation || 0);
+  let sub = 'in ' + fmtTokens(t.input || 0) + ' · out ' + fmtTokens(t.output || 0) +
+    ' · cache ' + fmtTokens(cache) + ' (as logged)';
+  if (live.api_equivalent_usd > 0) {
+    sub += ' · ~' + fmtUSD(live.api_equivalent_usd) + ' at API rates (not spend)';
+  }
+  setText('card-tokens-sub', sub);
+  renderRuntimes(live.runtimes);
+}
+
+// renderRuntimes builds the per-runtime table. The USD column exists only when
+// some runtime row has API spend, so a subscription runtime (codex) shows tokens
+// and no dollars; the API-equivalent column is informational and likewise only
+// appears when there is something to show. Header and cells are built together
+// from the same two flags, so they can never disagree. Every interpolated value,
+// numbers included, goes through esc(): runtime names come from the log.
+function renderRuntimes(all) {
+  const head = el('runtime-head');
+  const body = el('runtime-body');
+  const table = el('runtime-table');
+  const msg = el('runtime-msg');
+  show('runtime-section');
+  // Tolerate a malformed payload: only object rows are rendered.
+  const rows = (Array.isArray(all) ? all : []).filter(r => r && typeof r === 'object');
+  if (!rows.length) {
+    msg.textContent = 'No dispatches yet.';
+    table.style.display = 'none';
+    return;
+  }
+  msg.textContent = '';
+  const showUSD = rows.some(r => r.usd > 0);
+  const showEq = rows.some(r => r.api_equivalent_usd > 0);
+  head.innerHTML = '<tr><th>Runtime</th><th>Dispatches</th><th>Tokens</th>' +
+    (showUSD ? '<th>USD</th>' : '') +
+    (showEq ? '<th class="muted">API equiv. (not spend)</th>' : '') +
+    '</tr>';
+  body.innerHTML = rows.map(r =>
+    '<tr><td>' + esc(r.runtime == null ? '(unknown)' : r.runtime) + '</td>' +
+    '<td>' + esc(fmtInt(r.dispatches)) + '</td>' +
+    '<td>' + esc(fmtTokens(r.tokens)) + '</td>' +
+    (showUSD ? '<td>' + esc(r.usd > 0 ? fmtUSD(r.usd) : '—') + '</td>' : '') +
+    (showEq ? '<td class="muted">' + esc(r.api_equivalent_usd > 0 ? fmtUSD(r.api_equivalent_usd) : '—') + '</td>' : '') +
+    '</tr>'
+  ).join('');
+  table.style.display = '';
+}
+
 // ---- history table ----------------------------------------------------------
 function renderHistory(headers) {
   const tbody = el('history-body');
@@ -414,12 +518,14 @@ function renderProjects(projects) {
 
 // ---- main load --------------------------------------------------------------
 async function loadAll(tok) {
-  const [snap, history, trend] = await Promise.all([
+  const [snap, history, trend, live] = await Promise.all([
     apiFetch('api/metrics/snapshot', tok),
     apiFetch('api/metrics/history', tok),
     apiFetch('api/metrics/trend?metric=' + el('trend-metric').value + '&last=' + el('trend-last').value, tok),
+    fetchLive(tok),
   ]);
   renderSnapshotCards(snap);
+  renderLive(live);
   renderHistory(history);
   renderTrend(trend);
 

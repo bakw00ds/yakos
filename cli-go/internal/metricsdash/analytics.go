@@ -2,7 +2,9 @@ package metricsdash
 
 import (
 	"fmt"
+	"math"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -138,15 +140,122 @@ func parseISO(s string) (time.Time, error) {
 
 // ---- Live cost from dispatch-log --------------------------------------------
 
-// LiveCostResult is returned by LiveTotalCostUSD.
+// LiveCostResult is returned by GET /api/metrics/live_cost.
+//
+// Dollars follow the K-136 rule: TotalCostUSD is Event.SpendUSD summed, so only
+// runs billed per API call (and rows that predate the billing field) count; a
+// subscription or local run never adds to it. Tokens are the primary unit: they
+// come from the usage object only (Event.Tokens), and the est_input_tokens and
+// est_output_tokens size estimates are never mixed in.
+//
+// TotalCostUSD and EventCount keep their original names and meaning. Everything
+// after them is additive (K-136) and absent from an older server.
 type LiveCostResult struct {
 	TotalCostUSD float64 `json:"total_cost_usd"`
 	EventCount   int     `json:"event_count"`
+
+	// Tokens is the sum of reported token counts by kind, as logged. A legacy
+	// bash-written codex row keeps its cached tokens inside input while a Go row
+	// splits them into cache_read, so only TotalTokens is comparable across rows.
+	Tokens      cost.TokenTotals `json:"tokens"`
+	TotalTokens int64            `json:"total_tokens"`
+	// APIEquivalentUSD is what subscription runs would have cost at API rates, as
+	// the harness reported it. It is informational: never spend, never added to
+	// TotalCostUSD.
+	APIEquivalentUSD float64 `json:"api_equivalent_usd"`
+	// Runtimes is the per-runtime breakdown. It is always an array, ordered by
+	// tokens (then dispatches, then runtime name) so the output is deterministic.
+	Runtimes []LiveRuntimeRow `json:"runtimes"`
+}
+
+// LiveRuntimeRow is one runtime's share of a LiveCostResult. USD is API spend
+// only, so a subscription runtime such as codex shows tokens and 0 dollars.
+type LiveRuntimeRow struct {
+	Runtime          string  `json:"runtime"`
+	Dispatches       int64   `json:"dispatches"`
+	Tokens           int64   `json:"tokens"`
+	USD              float64 `json:"usd"`
+	APIEquivalentUSD float64 `json:"api_equivalent_usd"`
+}
+
+// unknownRuntime labels events whose runtime field is empty.
+const unknownRuntime = "(unknown)"
+
+// roundUSD trims float summation noise (0.1 + 0.2) to micro-dollars.
+func roundUSD(v float64) float64 { return math.Round(v*1e6) / 1e6 }
+
+// aggregateLive rolls the events up into a LiveCostResult. Dollars come from
+// Event.SpendUSD and tokens from Event.Tokens, the only sanctioned readers.
+func aggregateLive(events <-chan cost.Event) *LiveCostResult {
+	type acc struct {
+		dispatches int64
+		tokens     int64
+		usd        float64
+		apiEquiv   float64
+	}
+	byRuntime := make(map[string]*acc)
+	var total cost.TokenTotals
+	var spend, apiEquiv float64
+	n := 0
+
+	for ev := range events {
+		n++
+		tok := ev.Tokens()
+		usd := ev.SpendUSD()
+		eq := cost.APIEquivalentUSD(ev)
+		total = total.Add(tok)
+		spend += usd
+		apiEquiv += eq
+
+		key := ev.Runtime
+		if key == "" {
+			key = unknownRuntime
+		}
+		a := byRuntime[key]
+		if a == nil {
+			a = &acc{}
+			byRuntime[key] = a
+		}
+		a.dispatches++
+		a.tokens += tok.Total()
+		a.usd += usd
+		a.apiEquiv += eq
+	}
+
+	rows := make([]LiveRuntimeRow, 0, len(byRuntime))
+	for k, a := range byRuntime {
+		rows = append(rows, LiveRuntimeRow{
+			Runtime:          k,
+			Dispatches:       a.dispatches,
+			Tokens:           a.tokens,
+			USD:              roundUSD(a.usd),
+			APIEquivalentUSD: roundUSD(a.apiEquiv),
+		})
+	}
+	// Map order is random; a total order keeps the response deterministic.
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Tokens != rows[j].Tokens {
+			return rows[i].Tokens > rows[j].Tokens
+		}
+		if rows[i].Dispatches != rows[j].Dispatches {
+			return rows[i].Dispatches > rows[j].Dispatches
+		}
+		return rows[i].Runtime < rows[j].Runtime
+	})
+
+	return &LiveCostResult{
+		TotalCostUSD:     roundUSD(spend),
+		EventCount:       n,
+		Tokens:           total,
+		TotalTokens:      total.Total(),
+		APIEquivalentUSD: roundUSD(apiEquiv),
+		Runtimes:         rows,
+	}
 }
 
 // liveCostCache is an mtime+size-keyed cache for the aggregated dispatch-log
-// cost total.  It mirrors the eventsCache pattern in perfdash/server.go:
-// re-reads only when a log file changes.
+// spend and token totals.  It mirrors the eventsCache pattern in
+// perfdash/server.go: re-reads only when a log file changes.
 type liveCostCache struct {
 	mu        sync.Mutex
 	maxMtime  time.Time
@@ -190,17 +299,7 @@ func (c *liveCostCache) load(dispatchLogDir string) (*LiveCostResult, error) {
 	}
 
 	// Cache miss: re-aggregate.
-	ch := cost.StreamFiles(paths, "")
-	var total float64
-	var n int
-	for ev := range ch {
-		if ev.Usage != nil {
-			total += ev.Usage.TotalCostUSD
-		}
-		n++
-	}
-
-	r := &LiveCostResult{TotalCostUSD: total, EventCount: n}
+	r := aggregateLive(cost.StreamFiles(paths, ""))
 	c.maxMtime = maxMtime
 	c.totalSize = totalSize
 	c.result = r

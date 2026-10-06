@@ -74,6 +74,20 @@ func sinceISO(window time.Duration) string {
 
 // ---- data types -------------------------------------------------------------
 
+// Tokens and dollars (K-136). Tokens are the primary unit: every tokens figure
+// in these responses is a sum of real usage counts (cost.Event.Tokens). The
+// est_* size estimates are never mixed in, and an event with no usage object
+// reports none. Dollars (cost_usd, total_cost_usd) are API spend only
+// (cost.Event.SpendUSD): a subscription or local run reports tokens and $0, and
+// nothing is ever estimated from a price. api_equivalent_usd is what
+// subscription runs would have cost at API rates, as the harness reported it;
+// it is informational, shown beside spend and never added to it.
+//
+// token_detail is the per-kind split AS LOGGED. It is not comparable across rows
+// from different writers: a legacy bash-written codex row keeps its cached
+// tokens inside input, while the Go dispatcher splits them out into cache_read.
+// Only the total (tokens, total_tokens) is comparable.
+
 // DispatchRow represents a single dispatch_finished event for the recent list.
 type DispatchRow struct {
 	Ts        string  `json:"ts"`
@@ -84,6 +98,13 @@ type DispatchRow struct {
 	DurationS float64 `json:"duration_s"`
 	CostUSD   float64 `json:"cost_usd"`
 	LatencyMs int64   `json:"latency_ms"`
+
+	// Additive K-136 keys. Billing is subscription, api or local; it is absent
+	// on rows written before K-136.
+	Tokens           int64            `json:"tokens"`
+	TokenDetail      cost.TokenTotals `json:"token_detail"`
+	Billing          string           `json:"billing,omitempty"`
+	APIEquivalentUSD float64          `json:"api_equivalent_usd,omitempty"`
 }
 
 // SummaryResponse is the response shape for GET /api/perf/summary.
@@ -95,6 +116,11 @@ type SummaryResponse struct {
 	P95LatencyMs    int64         `json:"p95_latency_ms"`
 	TopAgents       []TopAxisItem `json:"top_agents"`
 	TopRuntimes     []TopAxisItem `json:"top_runtimes"`
+
+	// Additive K-136 keys.
+	TotalTokens      int64            `json:"total_tokens"`
+	TokenDetail      cost.TokenTotals `json:"token_detail"`
+	APIEquivalentUSD float64          `json:"api_equivalent_usd,omitempty"`
 }
 
 // TopAxisItem is an entry in top-N lists.
@@ -102,6 +128,10 @@ type TopAxisItem struct {
 	Key        string  `json:"key"`
 	Dispatches int64   `json:"dispatches"`
 	CostUSD    float64 `json:"cost_usd"`
+
+	// Additive K-136 keys.
+	Tokens      int64            `json:"tokens"`
+	TokenDetail cost.TokenTotals `json:"token_detail"`
 }
 
 // TimeseriesPoint is one bucket in a timeseries response.
@@ -117,6 +147,11 @@ type AxisRow struct {
 	CostUSD      float64 `json:"cost_usd"`
 	AvgLatencyMs int64   `json:"avg_latency_ms"`
 	P95LatencyMs int64   `json:"p95_latency_ms"`
+
+	// Additive K-136 keys.
+	Tokens           int64            `json:"tokens"`
+	TokenDetail      cost.TokenTotals `json:"token_detail"`
+	APIEquivalentUSD float64          `json:"api_equivalent_usd,omitempty"`
 }
 
 // ---- event collection -------------------------------------------------------
@@ -130,18 +165,37 @@ func collectEvents(ch <-chan cost.Event) []cost.Event {
 	return evs
 }
 
-// eventCostUSD returns the cost in USD for a single event.
-// Prefers the structured Usage.TotalCostUSD field; falls back to estimating
-// from token counts at the Sonnet-class rate ($3/M input, $15/M output).
-func eventCostUSD(ev cost.Event) float64 {
-	if ev.Usage != nil && ev.Usage.TotalCostUSD > 0 {
-		return ev.Usage.TotalCostUSD
-	}
-	// Rough estimate from estimated token counts.
-	inputCost := float64(ev.EstInputTokens) / 1_000_000 * 3.0
-	outputCost := float64(ev.EstOutputTokens) / 1_000_000 * 15.0
-	return inputCost + outputCost
+// tally adds up one group of events: all of them, one agent, one runtime, one
+// day. Dollars are API spend only (cost.Event.SpendUSD); there is no price table
+// and no estimate, so an event with no reported cost adds nothing. Tokens are
+// the real usage counts (cost.Event.Tokens), never the est_* size estimates.
+// apiEquiv is informational and is never added to spend.
+type tally struct {
+	n        int64
+	tokens   cost.TokenTotals
+	spend    float64
+	apiEquiv float64
 }
+
+func (t *tally) add(ev cost.Event) {
+	t.n++
+	t.tokens = t.tokens.Add(ev.Tokens())
+	t.spend += ev.SpendUSD()
+	t.apiEquiv += cost.APIEquivalentUSD(ev)
+}
+
+// tallyFor returns the tally of key in m, creating it on first use.
+func tallyFor(m map[string]*tally, key string) *tally {
+	t, ok := m[key]
+	if !ok {
+		t = &tally{}
+		m[key] = t
+	}
+	return t
+}
+
+// roundUSD rounds a dollar figure to the four decimals the API reports.
+func roundUSD(v float64) float64 { return math.Round(v*10000) / 10000 }
 
 // eventLatencyMs returns the dispatch latency in milliseconds.
 // Uses Usage.DurationMs if present, otherwise converts DurationS.
@@ -160,26 +214,18 @@ func ComputeSummary(events []cost.Event, topN int) SummaryResponse {
 		topN = 5
 	}
 
-	var totalCost float64
+	var total tally
 	latencies := make([]int64, 0, len(events))
-	agentCounts := make(map[string]int64)
-	agentCost := make(map[string]float64)
-	runtimeCounts := make(map[string]int64)
-	runtimeCost := make(map[string]float64)
+	byAgent := make(map[string]*tally)
+	byRuntime := make(map[string]*tally)
 
 	for _, ev := range events {
-		c := eventCostUSD(ev)
-		l := eventLatencyMs(ev)
-		totalCost += c
-		latencies = append(latencies, l)
-
-		agentCounts[ev.Agent]++
-		agentCost[ev.Agent] += c
-		runtimeCounts[ev.Runtime]++
-		runtimeCost[ev.Runtime] += c
+		total.add(ev)
+		latencies = append(latencies, eventLatencyMs(ev))
+		tallyFor(byAgent, ev.Agent).add(ev)
+		tallyFor(byRuntime, ev.Runtime).add(ev)
 	}
 
-	n := int64(len(events))
 	var avgLatency, p50, p95 int64
 	if len(latencies) > 0 {
 		sort.Slice(latencies, func(i, j int) bool { return latencies[i] < latencies[j] })
@@ -193,25 +239,30 @@ func ComputeSummary(events []cost.Event, topN int) SummaryResponse {
 	}
 
 	return SummaryResponse{
-		TotalDispatches: n,
-		TotalCostUSD:    math.Round(totalCost*10000) / 10000,
-		AvgLatencyMs:    avgLatency,
-		P50LatencyMs:    p50,
-		P95LatencyMs:    p95,
-		TopAgents:       topAxisItems(agentCounts, agentCost, topN),
-		TopRuntimes:     topAxisItems(runtimeCounts, runtimeCost, 3),
+		TotalDispatches:  total.n,
+		TotalCostUSD:     roundUSD(total.spend),
+		AvgLatencyMs:     avgLatency,
+		P50LatencyMs:     p50,
+		P95LatencyMs:     p95,
+		TopAgents:        topAxisItems(byAgent, topN),
+		TopRuntimes:      topAxisItems(byRuntime, 3),
+		TotalTokens:      total.tokens.Total(),
+		TokenDetail:      total.tokens,
+		APIEquivalentUSD: roundUSD(total.apiEquiv),
 	}
 }
 
-// topAxisItems builds a top-N list from counts and costs maps, sorted
-// descending by dispatch count then ascending by key for ties.
-func topAxisItems(counts map[string]int64, costs map[string]float64, n int) []TopAxisItem {
-	items := make([]TopAxisItem, 0, len(counts))
-	for k, c := range counts {
+// topAxisItems builds a top-N list from per-key tallies, sorted descending by
+// dispatch count then ascending by key for ties.
+func topAxisItems(groups map[string]*tally, n int) []TopAxisItem {
+	items := make([]TopAxisItem, 0, len(groups))
+	for k, g := range groups {
 		items = append(items, TopAxisItem{
-			Key:        k,
-			Dispatches: c,
-			CostUSD:    math.Round(costs[k]*10000) / 10000,
+			Key:         k,
+			Dispatches:  g.n,
+			CostUSD:     roundUSD(g.spend),
+			Tokens:      g.tokens.Total(),
+			TokenDetail: g.tokens,
 		})
 	}
 	sort.Slice(items, func(i, j int) bool {
@@ -267,7 +318,7 @@ func bucketDuration(s string) time.Duration {
 }
 
 // ComputeTimeseries aggregates events into a time-bucketed series.
-// metric is one of "cost", "latency", "dispatches".
+// metric is one of "cost" (API spend), "latency", "dispatches" or "tokens".
 // Always returns the full sequence of bucket start times for the window
 // even when there are no events (all values will be 0).
 func ComputeTimeseries(events []cost.Event, window, bucket time.Duration, metric string) []TimeseriesPoint {
@@ -306,7 +357,9 @@ func ComputeTimeseries(events []cost.Event, window, bucket time.Duration, metric
 		bk := ts.Truncate(bucket).Unix()
 		switch metric {
 		case "cost":
-			buckets[bk] += eventCostUSD(ev)
+			buckets[bk] += ev.SpendUSD()
+		case "tokens":
+			buckets[bk] += float64(ev.Tokens().Total())
 		case "latency":
 			buckets[bk] += float64(eventLatencyMs(ev))
 			bucketCounts[bk]++
@@ -339,9 +392,8 @@ func ComputeTimeseries(events []cost.Event, window, bucket time.Duration, metric
 // axis is one of "agent", "runtime", "project", "day".
 func ComputeByAxis(events []cost.Event, axis string) []AxisRow {
 	type acc struct {
-		dispatches int64
-		totalCost  float64
-		latencies  []int64
+		tally
+		latencies []int64
 	}
 	keys := make([]string, 0, 32)
 	byKey := make(map[string]*acc, 32)
@@ -354,8 +406,7 @@ func ComputeByAxis(events []cost.Event, axis string) []AxisRow {
 			byKey[k] = a
 			keys = append(keys, k)
 		}
-		a.dispatches++
-		a.totalCost += eventCostUSD(ev)
+		a.add(ev)
 		a.latencies = append(a.latencies, eventLatencyMs(ev))
 	}
 
@@ -373,11 +424,14 @@ func ComputeByAxis(events []cost.Event, axis string) []AxisRow {
 			p95 = percentile(a.latencies, 95)
 		}
 		rows = append(rows, AxisRow{
-			Key:          k,
-			Dispatches:   a.dispatches,
-			CostUSD:      math.Round(a.totalCost*10000) / 10000,
-			AvgLatencyMs: avg,
-			P95LatencyMs: p95,
+			Key:              k,
+			Dispatches:       a.n,
+			CostUSD:          roundUSD(a.spend),
+			AvgLatencyMs:     avg,
+			P95LatencyMs:     p95,
+			Tokens:           a.tokens.Total(),
+			TokenDetail:      a.tokens,
+			APIEquivalentUSD: roundUSD(a.apiEquiv),
 		})
 	}
 
@@ -432,15 +486,20 @@ func RecentDispatches(events []cost.Event, limit int) []DispatchRow {
 	}
 	rows := make([]DispatchRow, 0, len(events)-start)
 	for _, ev := range events[start:] {
+		tok := ev.Tokens()
 		rows = append(rows, DispatchRow{
-			Ts:        ev.Ts,
-			Agent:     ev.Agent,
-			Runtime:   ev.Runtime,
-			Project:   ev.Project,
-			ExitCode:  ev.ExitCode,
-			DurationS: ev.DurationS,
-			CostUSD:   math.Round(eventCostUSD(ev)*10000) / 10000,
-			LatencyMs: eventLatencyMs(ev),
+			Ts:               ev.Ts,
+			Agent:            ev.Agent,
+			Runtime:          ev.Runtime,
+			Project:          ev.Project,
+			ExitCode:         ev.ExitCode,
+			DurationS:        ev.DurationS,
+			CostUSD:          roundUSD(ev.SpendUSD()),
+			LatencyMs:        eventLatencyMs(ev),
+			Tokens:           tok.Total(),
+			TokenDetail:      tok,
+			Billing:          ev.Billing,
+			APIEquivalentUSD: roundUSD(cost.APIEquivalentUSD(ev)),
 		})
 	}
 	return rows
