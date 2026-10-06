@@ -54,7 +54,10 @@ Subcommands:
 
 Flags:
     --json                Machine-readable output.
-    --window <w>          monthly (calendar month, local time; default) or lifetime.
+    --window <w>          monthly (calendar month, local time) or lifetime. Without
+                          it, set keeps the agent's current window (monthly for an
+                          agent that has none): the dollar and token limits share
+                          one window, so changing one never changes the other's.
     --by-project          status: list spend per project under each agent.
     --tokens <n>          set: token limit (see set).
     --max-model <tier>    set: model-tier ceiling applied at dispatch.
@@ -81,7 +84,7 @@ func runBudget(args []string) {
 		help      bool
 		asJSON    bool
 		byProject bool
-		window    = "monthly"
+		window    string // set: "" keeps the agent's current window
 		maxModel  string
 		project   string
 		tokensArg string
@@ -176,18 +179,25 @@ func runBudget(args []string) {
 			}
 			fmt.Printf("model ceiling for %s set to %s\n", pos[0], maxModel)
 		}
+		// Say which window the limit now counts in: the one just given, or the
+		// agent's current one that a set without --window kept.
+		shownWindow := window
+		if shownWindow == "" {
+			pol, _ := budget.LoadPolicy(opts.StateDirOrDefault())
+			shownWindow = string(budget.Resolve(pos[0], pol, nil).Window)
+		}
 		if len(pos) == 2 {
 			if usd == 0 {
 				fmt.Printf("dollar budget for %s turned off\n", pos[0])
 			} else {
-				fmt.Printf("budget for %s set to $%.2f (%s)\n", pos[0], usd, window)
+				fmt.Printf("budget for %s set to $%.2f (%s)\n", pos[0], usd, shownWindow)
 			}
 		}
 		if tokensArg != "" {
 			if tokens == 0 {
 				fmt.Printf("token budget for %s turned off\n", pos[0])
 			} else {
-				fmt.Printf("token budget for %s set to %d tokens (%s)\n", pos[0], tokens, window)
+				fmt.Printf("token budget for %s set to %d tokens (%s)\n", pos[0], tokens, shownWindow)
 			}
 		}
 		// A dollar limit turned off while a token limit remains (the supervisor and

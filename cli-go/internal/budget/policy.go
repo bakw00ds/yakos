@@ -207,6 +207,11 @@ func SavePolicy(stateDir string, p Policy) error {
 // SetLimit records a limit for agent in the policy file. usd 0 turns the
 // limit off for that agent (overriding a built-in default). The read-modify-
 // write runs under the budget lock so parallel sets never lose an update.
+//
+// w is the agent's window. The empty window keeps the agent's current one (its
+// policy entry's, else the global default's, else monthly): the dollar and token
+// limits share one window, so changing one must not silently change what the
+// other means, for example turn a lifetime cap into one that re-opens every month.
 func SetLimit(stateDir, agent string, usd float64, w Window) error {
 	if err := ValidateAgent(agent); err != nil {
 		return err
@@ -214,15 +219,26 @@ func SetLimit(stateDir, agent string, usd float64, w Window) error {
 	if math.IsNaN(usd) || math.IsInf(usd, 0) || usd < 0 {
 		return fmt.Errorf("budget: limit must be a non-negative number of dollars")
 	}
-	if w != Monthly && w != Lifetime {
+	if w != "" && w != Monthly && w != Lifetime {
 		return fmt.Errorf("budget: window must be %s or %s", Monthly, Lifetime)
 	}
 	return updatePolicy(stateDir, func(p *Policy) {
 		prev := p.Agents[agent]
 		prev.LimitUSD = &usd
-		prev.Window = string(w)
+		prev.Window = string(windowOrCurrent(*p, agent, w))
 		p.Agents[agent] = prev
 	})
+}
+
+// windowOrCurrent returns w, or, when w is empty, the window agent counts in now
+// (its policy entry's, else the global default's, else monthly). The set
+// functions store the result explicitly, as they always have, so a policy file
+// written by this version reads the same under an older one.
+func windowOrCurrent(p Policy, agent string, w Window) Window {
+	if w != "" {
+		return w
+	}
+	return Resolve(agent, p, nil).Window
 }
 
 // maxTokenLimit bounds a configured token limit; a larger number is a typo.
@@ -230,8 +246,10 @@ const maxTokenLimit = int64(1) << 50
 
 // SetTokenLimit records a token limit for agent in the policy file. tokens 0
 // turns the token limit off. The window is the agent's one window: it also
-// applies to the agent's dollar limit. The read-modify-write runs under the
-// budget lock so parallel sets never lose an update.
+// applies to the agent's dollar limit, so the empty window keeps the agent's
+// current one (see SetLimit) rather than resetting it to monthly. The
+// read-modify-write runs under the budget lock so parallel sets never lose an
+// update.
 func SetTokenLimit(stateDir, agent string, tokens int64, w Window) error {
 	if err := ValidateAgent(agent); err != nil {
 		return err
@@ -239,13 +257,13 @@ func SetTokenLimit(stateDir, agent string, tokens int64, w Window) error {
 	if tokens < 0 || tokens > maxTokenLimit {
 		return fmt.Errorf("budget: token limit must be between 0 and %d", maxTokenLimit)
 	}
-	if w != Monthly && w != Lifetime {
+	if w != "" && w != Monthly && w != Lifetime {
 		return fmt.Errorf("budget: window must be %s or %s", Monthly, Lifetime)
 	}
 	return updatePolicy(stateDir, func(p *Policy) {
 		prev := p.Agents[agent]
 		prev.LimitTokens = &tokens
-		prev.Window = string(w)
+		prev.Window = string(windowOrCurrent(*p, agent, w))
 		p.Agents[agent] = prev
 	})
 }
