@@ -608,11 +608,17 @@ _ssw_log() {
 # done by the shell (noclobber, no fork), a builtin [ -e ] probe while it is held,
 # exponential backoff with jitter (5..160 ms), age check on the fifth miss and
 # every 8th after. Each wait step is one sleep fork.
+# The file is created owner-only (0600) whatever the caller's umask, the way the hook does it
+# (K-128, S5): the mask is read once, by the first create, then set and put back with builtins.
+_ssw_um=""
 _ssw_try_lock() {
     local rc=0
+    if [ -z "$_ssw_um" ]; then _ssw_um="$(umask 2>/dev/null)" || _ssw_um=""; fi
+    if [ -n "$_ssw_um" ]; then umask 077; fi
     set -C
     { true > "$_SSW_LOCK"; } 2>/dev/null || rc=1
     set +C
+    if [ -n "$_ssw_um" ]; then umask "$_ssw_um"; fi
     return "$rc"
 }
 _ssw_nap() {
@@ -984,11 +990,19 @@ _ss_lock_step() { # one wait step; n and bo are _ss_lock_take's locals
 # failed redirection on a POSIX SPECIAL builtin ends a non-interactive shell in
 # POSIX mode (bash --posix, POSIXLY_CORRECT, run as sh), and losing the create
 # race is exactly when this fails; `true` is a regular builtin, so it just returns 1.
+# The file is created owner-only (0600, as the Go twin's is) whatever the caller's umask
+# (K-128, S5): the mask is read once, by the first create (one fork, before the lock is
+# held), and then set and put back with builtins, so taking the lock still forks nothing.
+# If the mask cannot be read the create keeps the caller's, as it always did.
+_ss_um=""
 _ss_try_lock() {
     local rc=0
+    if [ -z "$_ss_um" ]; then _ss_um="$(umask 2>/dev/null)" || _ss_um=""; fi
+    if [ -n "$_ss_um" ]; then umask 077; fi
     set -C
     { true > "$_ss_lock"; } 2>/dev/null || rc=1
     set +C
+    if [ -n "$_ss_um" ]; then umask "$_ss_um"; fi
     return "$rc"
 }
 _ss_lock_loop() { # 0 when the lock is taken, 1 when the ceiling expired

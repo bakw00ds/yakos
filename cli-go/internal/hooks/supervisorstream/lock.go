@@ -136,12 +136,21 @@ func lockStat(lock, label string, ok bool, wait time.Duration, tries int, hold t
 		line = fmt.Sprintf("H %d %s OK wait_us=%d tries=%d hold_us=%d got_us=%d\n",
 			os.Getpid(), label, wait.Microseconds(), tries, hold.Microseconds(), got.UnixMicro())
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec
+	f, err := openStatsFile(path)
 	if err != nil {
 		return
 	}
 	_, _ = f.WriteString(line)
 	_ = f.Close()
+}
+
+// openStatsFile opens the lock-stats file for appending, owner-only, and never
+// through a link: the check above is check-then-open, so O_NOFOLLOW closes the
+// window between them (K-128, S6). Where the platform has no O_NOFOLLOW (Windows)
+// the check above is all there is. The lock itself needs no flag: an O_EXCL
+// create already fails on any existing path, a link included.
+func openStatsFile(path string) (*os.File, error) {
+	return os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY|openNoFollow, 0o600) //nolint:gosec
 }
 
 // ---- counter -----------------------------------------------------------------
