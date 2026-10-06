@@ -22,6 +22,9 @@ set -eu
 : "${YAKOS_LIB:?YAKOS_LIB must be set; run via 'yakos validate'}"
 # shellcheck source=./compat.sh
 . "$YAKOS_LIB/compat.sh"
+# The agent-file rules (bare extends ids, symlinks) are the composer's own.
+# shellcheck source=./agents-compose.sh
+. "$YAKOS_LIB/agents-compose.sh"
 
 ALL=0
 STRICT=0
@@ -148,9 +151,33 @@ validate_tree() {
         info "directory does not exist; nothing to validate"
         return 0
     fi
+    # The project's agent and skill directories are checked themselves: one that
+    # is a symlink, or has a symlinked .claude above it, is skipped whole by the
+    # dispatcher, wherever it leads. A rejected directory is reported here, once,
+    # and read by no pass below: those passes use $VALIDATE_AGENTS_DIR and
+    # $VALIDATE_SKILLS_DIR, which name a path that never exists for a rejected
+    # one. The framework's own directories are never checked (label is not
+    # "project"). Go twin: validateTree in validate.go.
+    local project_dir="" agents_dir="$base/agents" skills_dir="$base/skills" dir_kind dir_reason
+    if [ "$label" = "project" ]; then
+        project_dir="$(dirname -- "$base")"
+        for dir_kind in agents skills; do
+            dir_reason="$(yk_agents_dir_problem "$project_dir" "$base/$dir_kind")"
+            if [ -n "$dir_reason" ]; then
+                err "$base/$dir_kind: $dir_reason; the Go dispatcher skips it"
+                case "$dir_kind" in
+                    agents) agents_dir="$base/.rejected-agents" ;;
+                    skills) skills_dir="$base/.rejected-skills" ;;
+                esac
+            fi
+        done
+    fi
+    VALIDATE_AGENTS_DIR="$agents_dir"
+    VALIDATE_SKILLS_DIR="$skills_dir"
+
     local n_agents n_skills n_rules
-    n_agents="$(count_dir_files "$base/agents" '*.md')"
-    n_skills="$(count_dir_files "$base/skills" 'SKILL.md')"
+    n_agents="$(count_dir_files "$agents_dir" '*.md')"
+    n_skills="$(count_dir_files "$skills_dir" 'SKILL.md')"
     n_rules="$(count_dir_files "$base/rules" '*.md')"
     info "agents: $n_agents | skills: $n_skills | rules: $n_rules"
 
@@ -174,8 +201,8 @@ validate_tree() {
             fi
         fi
         ok "$f"
-    done < <(find "$base/agents" -type f -name '*.md' ! -name 'README.md' 2>/dev/null
-             find "$base/skills" -type f -name 'SKILL.md' 2>/dev/null
+    done < <(find "$agents_dir" -type f -name '*.md' ! -name 'README.md' 2>/dev/null
+             find "$skills_dir" -type f -name 'SKILL.md' 2>/dev/null
              find "$base/rules"  -type f -name '*.md' ! -name 'README.md' ! -name 'INDEX.md' 2>/dev/null)
 
     # settings.json (project-only)
@@ -195,8 +222,9 @@ validate_tree() {
         fi
     fi
 
-    # Agent frontmatter enums: runtime / runtime-fallback / model-policy.
-    check_agent_enums "$base"
+    # Agent frontmatter enums: runtime / runtime-fallback / model-policy, and the
+    # agent files the Go dispatcher would skip.
+    check_agent_enums "$base" "$project_dir"
 
     # Line-budget WARNs (per Phase 1.5 §10 + STYLE.md §7)
     check_line_budgets "$base"
@@ -205,7 +233,7 @@ validate_tree() {
     check_playbook_references "$base"
 
     # Golden-case eval validation (project mode)
-    check_eval_dirs "$base"
+    check_eval_dirs "$base" "$agents_dir"
 }
 
 # ---- standards checks (framework-mode only; STYLE.md §1-§7) ----------------
@@ -256,23 +284,75 @@ _validate_fm_values() {
     '
 }
 
+# _validate_agent_file_problem <file> <framework-agents-dir> <project-agents-dir or empty>
+#   Prints why the Go dispatcher would skip the agent file, or nothing when it
+#   would read it. Go twin: agentFileFinding in
+#   cli-go/internal/validate/agentfiles.go, which calls agentscompose; the rules
+#   are InspectAgentFile's and LongLine's and the text is byte-identical. The
+#   symlink rule is yk_agents_symlink_problem's, the composer's own. A line is
+#   refused when it is 1048576 bytes or longer, a carriage return before the
+#   newline counted, which is what awk's length() sees with LC_ALL=C.
+_validate_agent_file_problem() {
+    local f="$1" fw_dir="$2" project_dir="${3:-}" reason size n
+    if [ -L "$f" ]; then
+        reason="$(yk_agents_symlink_problem "$f" "$fw_dir" "$project_dir")"
+        if [ -n "$reason" ]; then
+            echo "$reason; the Go dispatcher skips it"
+            return 0
+        fi
+    elif [ ! -f "$f" ]; then
+        echo "not a regular file; the Go dispatcher skips it"
+        return 0
+    fi
+    size="$(wc -c < "$f" 2>/dev/null | tr -d ' ')" || size=0
+    if [ "${size:-0}" -gt 4194304 ]; then
+        echo "file is larger than 4194304 bytes; the Go dispatcher skips it"
+        return 0
+    fi
+    n="$(LC_ALL=C awk 'length($0) >= 1048576 { print NR; exit }' "$f" 2>/dev/null)" || n=""
+    if [ -n "$n" ]; then
+        echo "line $n is longer than 1048576 bytes; the Go dispatcher skips it; split the line"
+    fi
+    return 0
+}
+
 check_agent_enums() {
-    local base="$1" agent_file name fm v
-    [ -d "$base/agents" ] || return 0
+    local base="$1" project_dir="${2:-}" agent_file name fm v problem ext
+    local agents_dir="${VALIDATE_AGENTS_DIR:-$base/agents}"
+    [ -d "$agents_dir" ] || return 0
     while IFS= read -r agent_file; do
         [ -n "$agent_file" ] || continue
         name="$(basename -- "$agent_file")"
         case "$name" in README.md|INDEX.md) continue ;; esac
+        # An agent named after a runtime would shadow `yakos dispatch <runtime>`
+        # and the console's default pane. The Go dispatcher skips it (K-132).
+        case "${name%.md}" in
+            claude|codex|agy) err "$agent_file: agent id \"${name%.md}\" is a runtime name and is skipped by the Go dispatcher; rename it" ;;
+        esac
+        # A file the dispatcher would skip is an error, and nothing else is read
+        # from it: its frontmatter says nothing about what runs.
+        problem="$(_validate_agent_file_problem "$agent_file" "$YAKOS_ROOT/lib/agents" "${project_dir:+$project_dir/.claude/agents}")"
+        if [ -n "$problem" ]; then
+            err "$agent_file: $problem"
+            continue
+        fi
         fm="$(awk '
             NR==1 && /^---[[:space:]]*$/ { in_fm=1; next }
             in_fm==1 && /^---[[:space:]]*$/ { exit }
             in_fm==1 { print }
         ' "$agent_file")"
+        # extends: is a bare agent id and nothing else (the composer's rule, with
+        # the same raw reading of the value), or the dispatcher skips the agent.
+        ext="$(yk_agents_fm_get "$fm" "extends")"
+        if [ -n "$ext" ] && ! yk_agents_bare_id "$ext"; then
+            err "$agent_file: extends value $(yk_agents_display_value "$ext") is not a bare agent id ($YK_AGENTS_BARE_ID_RULE); the Go dispatcher skips it"
+            continue
+        fi
         for key in runtime runtime-fallback; do
             while IFS= read -r v; do
                 [ -n "$v" ] || continue
                 if [ "$v" = "gemini" ]; then
-                    warn "$agent_file: $key: gemini is a deprecated shim for agy; use agy"
+                    warn "$agent_file: $key: gemini was removed; use agy"
                 elif ! _validate_runtime_known "$v"; then
                     err "$agent_file: $key: \"$v\" is not a known runtime (known: ${_VALIDATE_KNOWN_RUNTIMES// /, })"
                 fi
@@ -285,7 +365,7 @@ check_agent_enums() {
                 *) err "$agent_file: model-policy: $v is not a model tier (want one of: ${_VALIDATE_MODEL_TIERS// /, }); it is the tier \`yakos model-routing promote\` wrote, not a policy name" ;;
             esac
         done < <(_validate_fm_values "$fm" "model-policy")
-    done < <(find "$base/agents" -maxdepth 1 -type f -name '*.md' 2>/dev/null | sort)
+    done < <(find "$agents_dir" -maxdepth 1 ! -type d -name '*.md' 2>/dev/null | sort)
 }
 
 check_line_budgets() {
@@ -300,7 +380,7 @@ check_line_budgets() {
         if [ "$n" -lt 80 ] || [ "$n" -gt 140 ]; then
             warn "$f: agent file is $n lines (budget 80-140)"
         fi
-    done < <(find "$base/agents" -type f -name '*.md' ! -name 'README.md' 2>/dev/null)
+    done < <(find "${VALIDATE_AGENTS_DIR:-$base/agents}" -type f -name '*.md' ! -name 'README.md' 2>/dev/null)
 
     while IFS= read -r f; do
         [ -n "$f" ] || continue
@@ -314,7 +394,7 @@ check_line_budgets() {
         if [ "$n" -lt 80 ] || [ "$n" -gt 350 ]; then
             warn "$f: skill is $n lines (budget 80-350)"
         fi
-    done < <(find "$base/skills" -type f -name 'SKILL.md' 2>/dev/null)
+    done < <(find "${VALIDATE_SKILLS_DIR:-$base/skills}" -type f -name 'SKILL.md' 2>/dev/null)
 
     while IFS= read -r f; do
         [ -n "$f" ] || continue
@@ -340,10 +420,11 @@ check_playbook_references() {
 
     local pb_dir="$YAKOS_ROOT/lib/playbooks"
 
-    # Collect referenced playbooks across all md files in the base
+    # Collect referenced playbooks across all md files in the base. Regular files
+    # only: `grep -r` reads a FIFO among them, and never returns.
     local refs
-    refs="$(grep -rhE '^[[:space:]]*-[[:space:]]*playbook:[A-Za-z0-9._/-]+' \
-                  "$base/agents" "$base/rules" "$base/skills" 2>/dev/null \
+    refs="$(find "${VALIDATE_AGENTS_DIR:-$base/agents}" "$base/rules" "${VALIDATE_SKILLS_DIR:-$base/skills}" \
+                  -type f -exec grep -hE '^[[:space:]]*-[[:space:]]*playbook:[A-Za-z0-9._/-]+' {} + 2>/dev/null \
             | sed -E 's/.*playbook:([A-Za-z0-9._/-]+).*/\1/' \
             | sort -u || true)"
 
@@ -600,7 +681,9 @@ check_eval_dirs() {
     # Walk agent search roots provided as arguments.  For each agent .md
     # file that has a sibling eval/ directory, validate every case-*.json
     # therein.  Also warn when model-policy: is set but eval/ is absent.
-    local root="$1"
+    # <agents-dir> defaults to <root>/agents; validate_tree passes a path that
+    # never exists for a project agent directory the dispatcher refuses.
+    local root="$1" agents_dir="${2:-$1/agents}"
     [ -d "$root" ] || return 0
 
     while IFS= read -r agent_file; do
@@ -655,7 +738,7 @@ check_eval_dirs() {
         if [ "$case_count" -eq 0 ]; then
             warn "$eval_dir: eval/ directory exists but contains no case-*.json files"
         fi
-    done < <(find "$root/agents" -maxdepth 1 -name '*.md' -type f 2>/dev/null)
+    done < <(find "$agents_dir" -maxdepth 1 -name '*.md' -type f 2>/dev/null)
 }
 
 run_standards_checks() {

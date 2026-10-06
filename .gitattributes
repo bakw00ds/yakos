@@ -47,3 +47,10 @@ tests/fixtures/hooks/yakos-invalid-utf8.yml binary
 lib/rules/*.md text eol=lf
 tests/fixtures/refresh/**/.claude/rules/*.md text eol=lf
 cli-go/cmd/yakos/testdata/fixtures/refresh/**/.claude/rules/*.md text eol=lf
+
+# Byte-exact test fixtures (K-132). The cache-stability golden is compared with
+# the generated --agents JSON byte for byte, and the routing reader's fixtures
+# are compared with the bash reader's reading of the same bytes. Force LF so a
+# Windows autocrlf checkout cannot turn the compare into a CRLF mismatch.
+cli-go/internal/agentscompose/testdata/cachestable/** text eol=lf
+cli-go/internal/projectcfg/testdata/*.yml text eol=lf

@@ -1,0 +1,49 @@
+{
+  "_doc": "Semantic model aliases per runtime. Override per-project via .yakos.yml.",
+  "_note_claude_sdk": "claude-sdk inherits whatever model the bundled Claude Code CLI defaults to; the SDK README does not document a model parameter at v0.24. Aliases listed for forward compatibility; SDK ignores them today.",
+  "_note_antigravity_sdk": "antigravity-sdk inherits the SDK's default Gemini model; the README does not document a model parameter at v0.25. Aliases listed for forward compatibility; SDK ignores them today.",
+  "_note_codex": "codex aliases are empty on purpose: an empty string means 'use the harness default' (no -m flag). The ChatGPT-login catalog (`codex debug models` on 2026-10-05: gpt-6-astra, gpt-5.6-sol/terra/luna, gpt-5.5) has undocumented tier semantics, and codex rejects an id outside the catalog with HTTP 400, so the old gpt-5 / gpt-5-mini / gpt-5-nano / o4-mini mapping was removed. The P1 model registry will populate these from the live catalog. Pin a concrete id in an agent's model: field to override.",
+  "_note_agy": "agy ids come from `agy models` on 2026-10-05. The reasoning effort is part of the id (the -low/-medium/-high suffix), and agy rejects --effort combined with such an id, so the adapter does not pass --effort when the id carries a suffix.",
+  "aliases": {
+    "cheap": {
+      "claude": "haiku",
+      "claude-sdk": "haiku",
+      "codex": "",
+      "gemini": "gemini-2.5-flash",
+      "agy": "gemini-3.8-flash-low",
+      "antigravity-sdk": "gemini-3.8-flash-low"
+    },
+    "balanced": {
+      "claude": "sonnet",
+      "claude-sdk": "sonnet",
+      "codex": "",
+      "gemini": "gemini-2.5-pro",
+      "agy": "gemini-3.8-flash-high",
+      "antigravity-sdk": "gemini-3.8-flash-high"
+    },
+    "best": {
+      "claude": "opus",
+      "claude-sdk": "opus",
+      "codex": "",
+      "gemini": "gemini-2.5-pro",
+      "agy": "claude-opus-5-5-medium",
+      "antigravity-sdk": "claude-opus-5-5-medium"
+    },
+    "reasoning": {
+      "claude": "opus",
+      "claude-sdk": "opus",
+      "codex": "",
+      "gemini": "gemini-2.5-pro",
+      "agy": "gemini-3.1-pro-high",
+      "antigravity-sdk": "gemini-3.1-pro-high"
+    },
+    "frontier": {
+      "claude": "fable",
+      "claude-sdk": "fable",
+      "codex": "",
+      "gemini": "gemini-2.5-pro",
+      "agy": "claude-opus-5-5-high",
+      "antigravity-sdk": "claude-opus-5-5-high"
+    }
+  }
+}

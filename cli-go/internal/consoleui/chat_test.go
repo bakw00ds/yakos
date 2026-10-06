@@ -2122,9 +2122,15 @@ func TestChatDispatch_202OnBareRuntimeName(t *testing.T) {
 	yakosRoot := buildMinimalYakosRootForConsoleTest(t)
 	ts, tok := newChatTestServerWithValidation(t, yakosRoot)
 
-	for _, rt := range []string{"claude", "codex", "agy", "gemini"} {
+	for _, rt := range []string{"claude", "codex", "agy"} {
 		sessID := "s-runtime-" + rt
-		body := `{"runtime":"` + rt + `","model":"sonnet","agent":"` + rt + `","task":"hi","sessionId":"` + sessID + `","operatorId":"alice"}`
+		// The model is judged against the runtime it resolves to (K-132): sonnet
+		// is a claude tier, so codex and agy panes send no model here.
+		model := ""
+		if rt == "claude" {
+			model = "sonnet"
+		}
+		body := `{"runtime":"` + rt + `","model":"` + model + `","agent":"` + rt + `","task":"hi","sessionId":"` + sessID + `","operatorId":"alice"}`
 		resp := post(t, ts.URL+"/api/chat/dispatch", tok, body)
 
 		// The server has no DispatchService configured → 503 after the agent check.
@@ -2135,6 +2141,14 @@ func TestChatDispatch_202OnBareRuntimeName(t *testing.T) {
 			continue
 		}
 		drainClose(resp)
+	}
+
+	// gemini was retired (K-132): it is neither a runtime nor a bare-runtime agent.
+	body := `{"runtime":"gemini","model":"","agent":"gemini","task":"hi","sessionId":"s-runtime-gemini","operatorId":"alice"}`
+	resp := post(t, ts.URL+"/api/chat/dispatch", tok, body)
+	defer drainClose(resp)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("POST /api/chat/dispatch (runtime=gemini): status=%d; want 400 (retired)", resp.StatusCode)
 	}
 }
 

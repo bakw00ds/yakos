@@ -1,0 +1,4 @@
+default-runtime: claude
+default-fallback:
+  - codex
+  - agy

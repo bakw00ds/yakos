@@ -85,45 +85,64 @@ import (
 
 // chatState is the in-process registry of active RunStream goroutines.
 // It maps sessionID → cancel function so pane-close can kill the subprocess.
+//
+// Each entry carries a generation. A cancel removes the session's entry at once
+// (so the pane can send its next turn right away, with the same sessionId), but
+// the cancelled turn's goroutine is still unwinding and removes "its" entry when
+// it ends. Keyed by sessionId alone, that late remove deleted the NEW turn's
+// entry: the new turn could no longer be cancelled, and a third turn on the same
+// session was accepted while it ran. A goroutine removes only the generation it
+// registered.
 type chatState struct {
 	mu      sync.Mutex
-	cancels map[string]context.CancelFunc
+	cancels map[string]chatEntry
+	nextGen uint64
+}
+
+type chatEntry struct {
+	cancel context.CancelFunc
+	gen    uint64
 }
 
 func newChatState() *chatState {
-	return &chatState{cancels: make(map[string]context.CancelFunc)}
+	return &chatState{cancels: make(map[string]chatEntry)}
 }
 
-// add registers a cancel function for a session.  Returns false if the
+// add registers a cancel function for a session and returns the entry's
+// generation, which its goroutine hands back to remove.  Returns false if the
 // sessionID already has an in-flight dispatch (caller returns 409).
-func (cs *chatState) add(sessionID string, cancel context.CancelFunc) bool {
+func (cs *chatState) add(sessionID string, cancel context.CancelFunc) (gen uint64, ok bool) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	if _, exists := cs.cancels[sessionID]; exists {
-		return false
+		return 0, false
 	}
-	cs.cancels[sessionID] = cancel
-	return true
+	cs.nextGen++
+	cs.cancels[sessionID] = chatEntry{cancel: cancel, gen: cs.nextGen}
+	return cs.nextGen, true
 }
 
-// remove deletes the cancel entry when the goroutine exits.
-func (cs *chatState) remove(sessionID string) {
+// remove deletes the entry registered under gen when its goroutine exits. An
+// entry of a later generation (the next turn on the same session) is left alone.
+func (cs *chatState) remove(sessionID string, gen uint64) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-	delete(cs.cancels, sessionID)
+	if e, ok := cs.cancels[sessionID]; ok && e.gen == gen {
+		delete(cs.cancels, sessionID)
+	}
 }
 
 // cancel cancels the in-flight dispatch and removes it.
 // No-op if the session is not active.
 func (cs *chatState) cancel(sessionID string) {
 	cs.mu.Lock()
-	fn, ok := cs.cancels[sessionID]
+	e, ok := cs.cancels[sessionID]
 	if ok {
 		delete(cs.cancels, sessionID)
 	}
 	cs.mu.Unlock()
 	if ok {
-		fn()
+		e.cancel()
 	}
 }
 
@@ -374,9 +393,10 @@ type DispatchResponse struct {
 //   - Agent system-prompt is resolved server-side via the roster.
 //   - A sessionId already owned by a DIFFERENT operatorId → 403.
 //   - A sessionId with an active in-flight dispatch → 409.
-//   - runtime must be in runtime.Known; model must pass ValidateTier after
-//     ResolveAlias; agent name must resolve in the roster (generic 400 on
-//     failure — no path/roster leak in error messages).
+//   - runtime must be in runtime.Known, or empty/"auto" to resolve from the
+//     agent's pin; the model must be valid for the runtime the request
+//     resolves to (K-132); agent name must resolve in the roster (generic 400
+//     on failure — no path/roster leak in error messages).
 func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -392,24 +412,19 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	}
 
 	// --- Validate runtime ---
-	runtimeName := req.Runtime
-	if runtimeName == "" {
-		runtimeName = "claude"
+	// An empty runtime (or "auto") asks the dispatcher to resolve the runtime
+	// from the agent's frontmatter pin and the project config. It is passed
+	// through as "" instead of being forced to claude (K-127: the pane could
+	// never reach a pinned agent's runtime). An explicit runtime must be known.
+	requestedRuntime := strings.TrimSpace(req.Runtime)
+	if requestedRuntime == "auto" {
+		requestedRuntime = ""
 	}
-	if !isKnownRuntime(runtimeName) {
+	if requestedRuntime != "" && !isKnownRuntime(requestedRuntime) {
 		http.Error(w, "invalid runtime", http.StatusBadRequest)
 		return
 	}
-
-	// --- Validate model ---
-	modelName := req.Model
-	if modelName != "" {
-		modelName = runtime.ResolveAlias(modelName)
-		if !runtime.ValidateTier(modelName) {
-			http.Error(w, "invalid model", http.StatusBadRequest)
-			return
-		}
-	}
+	requestedModel := strings.TrimSpace(req.Model)
 
 	// --- Validate effort ---
 	// Empty string is valid (means "no override — omit the flag").
@@ -429,7 +444,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	// This mirrors the resolution that RunStream performs internally, so an
 	// unknown agent name is rejected up front with a clear 400 instead of
 	// silently hanging after the 202.
-	// Bare runtime names (claude/codex/agy/gemini) are valid catch-alls and are
+	// Bare runtime names (claude/codex/agy) are valid catch-alls and are
 	// NOT rejected here — only names that resolve to nothing are rejected.
 	//
 	// When yakosRoot is empty the roster cannot be composed, so we only reject
@@ -441,6 +456,41 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"error": fmt.Sprintf("unknown agent %q; not in roster and not a known runtime", req.Agent),
 		})
+		return
+	}
+
+	// --- Resolve the runtime, then validate the model against it (K-132) ---
+	// A model id means something only to the runtime that runs it, and with an
+	// auto pane that runtime is known only once the agent's pin is read.
+	// PreferredRuntime names the runtime this request is headed for without
+	// touching the machine (no CLI or sign-in probe), so the model can be
+	// checked and a bad one rejected with 400 before the 202. RunStream makes
+	// the real choice, probe and fallbacks included, from the same inputs.
+	pref, prefErr := dispatch.PreferredRuntime(dispatch.RouteQuery{
+		YakosRoot: ch.yakosRoot,
+		Project:   ch.workspaceRoot,
+		Agent:     req.Agent,
+		Override:  requestedRuntime,
+	})
+	if prefErr != nil {
+		http.Error(w, "invalid runtime", http.StatusBadRequest)
+		return
+	}
+	runtimeName := pref.Runtime
+	modelName := requestedModel
+	if modelName != "" {
+		resolved, ok := dispatch.CheckModelOverride(runtimeName, modelName)
+		if !ok {
+			http.Error(w, "invalid model", http.StatusBadRequest)
+			return
+		}
+		modelName = resolved
+	}
+	// The persistent interactive session (CLI and SDK engines) is a claude
+	// process. Until codex/agy have their own engines, refuse the toggle for any
+	// other resolved runtime instead of quietly answering from claude.
+	if req.Interactive && runtimeName != "claude" {
+		http.Error(w, "interactive mode is only available for the claude runtime", http.StatusBadRequest)
 		return
 	}
 
@@ -495,6 +545,40 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// --- A conversation belongs to the operator who started it ---
+	// The transcript's first user turn names that operator (the same anchor the
+	// transcript and share endpoints use). Dispatching into someone else's
+	// conversation would append to their transcript and, on claude, resume their
+	// native session, which carries everything they said and every tool result
+	// (sec-324 F1). The hub's own check only covers a turn that is still running;
+	// this one holds after it has ended and after a restart, and after the owner
+	// unshared a conversation a watcher still has the id of. A conversation with
+	// no transcript yet is new and nobody's.
+	//
+	// The gate fails closed. A transcript that exists but cannot be read (a
+	// permissions problem, a damaged or replaced file) leaves the owner unknown,
+	// and passing would let anyone in, with only the stored-session owner check
+	// still standing between them and a resume. Only "there is no transcript"
+	// means a new conversation. It is a server-side fault, not a verdict about
+	// the caller, so the answer is 500, and the reason is logged once here.
+	{
+		convForOwner := req.ConversationID
+		if convForOwner == "" {
+			convForOwner = req.SessionID
+		}
+		owner, ownerErr := ch.transcripts.FirstUserOwner(convForOwner)
+		if ownerErr != nil {
+			slog.Error("consoleui: cannot establish the conversation owner; refusing the dispatch",
+				"conversation", convForOwner, "err", ownerErr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if owner != "" && owner != effectiveOperatorID {
+			http.Error(w, "forbidden: conversation owned by different operator", http.StatusForbidden)
+			return
+		}
+	}
+
 	// --- Hub: open session (ownership check + global session cap) ---
 	// Security priority: ownership 403 must fire even when svc is nil.
 	// This enforces per-operator isolation: 403 if session already owned by
@@ -527,7 +611,8 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	// immediately kill the dispatch goroutine.  The server-lifetime context is
 	// only cancelled on Server.Shutdown, keeping the goroutine alive as intended.
 	ctx, cancel := context.WithCancel(ch.serverCtx)
-	if !ch.state.add(req.SessionID, cancel) {
+	stateGen, registered := ch.state.add(req.SessionID, cancel)
+	if !registered {
 		cancel()
 		// Session already has an active dispatch — close the hub entry we just
 		// opened so the sessionId is not permanently squatted (H1 fix).
@@ -701,9 +786,9 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				})
 			}
 		}()
-		defer cancel()                               // 1. stop any pending RunStream
-		defer ch.state.remove(dispReq.SessionID)     // 2. release slot
-		defer ch.hub.CloseSession(dispReq.SessionID) // 3. remove hub entry
+		defer cancel()                                     // 1. stop any pending RunStream
+		defer ch.state.remove(dispReq.SessionID, stateGen) // 2. release slot
+		defer ch.hub.CloseSession(dispReq.SessionID)       // 3. remove hub entry
 		// 5. Remove the per-session worktree on session close (if any was provisioned).
 		// Registered after hub.CloseSession defer; in LIFO order this runs BEFORE
 		// hub.CloseSession — acceptable because the worktree path is independent of the
@@ -739,6 +824,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				ev.DurationS = &durationS
 				ev.TotalCostUSD = &totalCostUSD
 				ev.ModelResolved = chunk.ModelResolved
+				ev.RuntimeResolved = chunk.RuntimeResolved
 
 				// Update fleet registry status from summary exit_code.
 				if ch.registry != nil {
@@ -751,6 +837,16 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				exitCode = code
 				if code != 0 {
 					exitStatus = dispatch.StatusFailed
+				}
+
+				// Continuity (K-132): remember claude's own session id so the
+				// next one-shot turn of this conversation can --resume it. Not
+				// in worktree mode: a per-turn worktree is a different working
+				// directory each time, and claude files sessions by directory.
+				if chunk.NativeSessionID != "" && chunk.RuntimeResolved == "claude" && capturedWorktreeOverride == "" {
+					if err := ch.transcripts.SetNativeSession(conversationID, "claude", chunk.NativeSessionID, capturedOperatorID); err != nil {
+						slog.Warn("consoleui: store native session id", "conversation", conversationID, "err", err)
+					}
 				}
 
 				// Append coalesced assistant turn, then summary turn.
@@ -1009,14 +1105,26 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			return
 		}
 
+		// Continuity (K-132): a follow-up one-shot turn on claude resumes the
+		// conversation's native session, so it remembers the previous turn.
+		resumeID := ""
+		if runtimeName == "claude" && capturedWorktreeOverride == "" {
+			resumeID = ch.transcripts.NativeSession(conversationID, "claude", capturedOperatorID)
+		}
+
 		params := dispatch.Params{
-			Agent:          dispReq.Agent,
-			Task:           dispReq.Task,
-			Runtime:        runtimeName,
-			Model:          modelName,
-			OperatorID:     capturedOperatorID,
-			ConversationID: conversationID,
-			SessionID:      dispReq.SessionID,
+			Agent: dispReq.Agent,
+			Task:  dispReq.Task,
+			// The request's own runtime ("" for auto) and model, not the values
+			// resolved above for validation: the dispatcher resolves both again
+			// against the runtime it actually picks, so an alias follows a
+			// fallback and an auto pane lands where the agent's pin says.
+			Runtime:         requestedRuntime,
+			Model:           requestedModel,
+			ResumeSessionID: resumeID,
+			OperatorID:      capturedOperatorID,
+			ConversationID:  conversationID,
+			SessionID:       dispReq.SessionID,
 			// Effort was validated in the handler (ValidateEffort); empty = no flag.
 			Effort: dispReq.Effort,
 			// Project is intentionally omitted: Service.RunStream pins it to
@@ -1031,7 +1139,16 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			WorkDirOverride: capturedWorktreeOverride,
 		}
 
-		if _, err := ch.svc.RunStream(ctx, params, onChunk); err != nil {
+		res, err := ch.svc.RunStream(ctx, params, onChunk)
+		// A saved session can disappear (claude prunes old ones, or the project
+		// moved). The failed resume leaves the stored id pointing at nothing, so
+		// forget it and let the next turn start a fresh session rather than fail
+		// the same way forever. See forgetDeadResume for how a dead session is
+		// recognised.
+		if resumeID != "" && ctx.Err() == nil {
+			ch.forgetDeadResume(conversationID, capturedOperatorID, res)
+		}
+		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				slog.Error("consoleui: chat RunStream error",
 					"session", dispReq.SessionID,
@@ -1074,6 +1191,57 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(DispatchResponse{SessionID: dispReq.SessionID})
+}
+
+// resumeFailureLimit is how many turns in a row may fail while resuming a stored
+// session before the id is forgotten whatever the failure said.
+const resumeFailureLimit = 2
+
+// resumeTargetGone reports whether text (the CLI's stderr tail) says the
+// conversation or session it was asked to resume does not exist. claude 2.1.289
+// prints "No conversation found with session ID: <id>"; the match is on the
+// meaning, a "conversation" or "session" that is "not found", "unknown", gone or
+// missing, so a reworded message still counts. A false positive costs the
+// remembered context of one conversation, and only on a turn that already failed.
+func resumeTargetGone(text string) bool {
+	t := strings.ToLower(text)
+	if !strings.Contains(t, "conversation") && !strings.Contains(t, "session") {
+		return false
+	}
+	for _, marker := range []string{
+		"not found", "no conversation", "no session", "no such", "does not exist",
+		"doesn't exist", "unknown", "expired", "could not find", "couldn't find",
+		"cannot find", "can't find", "not exist", "no longer",
+	} {
+		if strings.Contains(t, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// forgetDeadResume is called after a turn that resumed the conversation's stored
+// claude session. A failed turn (non-zero exit) is counted; the stored id is
+// forgotten when the failure says the session is gone, or when
+// resumeFailureLimit turns in a row have failed, so a CLI that rewords its
+// message cannot leave a dead id failing every follow-up. One failure that does
+// not look like a missing session (a rate limit, a network error) keeps the id.
+// A successful turn stores its own id, which resets the count.
+func (ch *chatHandlers) forgetDeadResume(conversationID, operatorID string, res dispatch.Result) {
+	if res.ExitCode == 0 {
+		return
+	}
+	n, err := ch.transcripts.NoteResumeFailure(conversationID, "claude", operatorID)
+	if err != nil {
+		slog.Warn("consoleui: count resume failure", "conversation", conversationID, "err", err)
+		return
+	}
+	if !resumeTargetGone(res.StderrTail) && n < resumeFailureLimit {
+		return
+	}
+	if clrErr := ch.transcripts.ClearNativeSession(conversationID, "claude", operatorID); clrErr != nil {
+		slog.Warn("consoleui: clear native session id", "conversation", conversationID, "err", clrErr)
+	}
 }
 
 // ---- POST /api/chat/cancel --------------------------------------------------
@@ -1358,16 +1526,25 @@ func (ch *chatHandlers) handleChatShare(w http.ResponseWriter, r *http.Request) 
 	// (hub restarted, or this is the very first share call for this conversation):
 	// consult the transcript's first user-turn to determine the true owner.
 	// If the transcript exists and its owner does not match effectiveOperatorID,
-	// reject 403 before writing to the hub.  If the transcript is empty or
-	// unreadable (new conversation not yet dispatched), we allow the call —
+	// reject 403 before writing to the hub.  If there is no transcript (a new
+	// conversation not yet dispatched) or it has no user turn, we allow the call:
 	// SetConversationShared will record effectiveOperatorID as the owner and
 	// subsequent calls will enforce it.
+	//
+	// A transcript that exists but cannot be read fails closed, like the dispatch
+	// gate: passing would let any operator claim a conversation they do not own
+	// as the owner of its share state. 500, and the reason is logged once.
 	if _, _, hasEntry := ch.hub.GetConversationShared(req.ConversationID); !hasEntry {
-		if transcriptOwner, err := ch.transcripts.FirstUserOwner(req.ConversationID); err == nil && transcriptOwner != "" {
-			if transcriptOwner != effectiveOperatorID {
-				http.Error(w, "forbidden: conversation owned by different operator", http.StatusForbidden)
-				return
-			}
+		transcriptOwner, ownerErr := ch.transcripts.FirstUserOwner(req.ConversationID)
+		if ownerErr != nil {
+			slog.Error("consoleui: cannot establish the conversation owner; refusing the share call",
+				"conversation", req.ConversationID, "err", ownerErr)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+			return
+		}
+		if transcriptOwner != "" && transcriptOwner != effectiveOperatorID {
+			http.Error(w, "forbidden: conversation owned by different operator", http.StatusForbidden)
+			return
 		}
 	}
 

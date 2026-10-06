@@ -1,0 +1,5 @@
+default-runtime: "codex; rm -rf /"
+default-fallback: ["$(whoami)", "claude\nagy", "../../etc/passwd"]
+per-domain:
+  "../x": codex
+  ok-domain: "claude --dangerously-skip-permissions"

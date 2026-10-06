@@ -920,6 +920,10 @@ echo "fake $rt output"
 SHIM_EOF
         chmod +x "$t19/shim/$rt"
     done
+    # The shims stand in for signed-in CLIs. The Go dispatcher refuses a codex or agy
+    # that you name and that is not signed in (K-132), and HOME is empty here, so no
+    # login file exists. A test key counts as signed in.
+    export OPENAI_API_KEY="fixture-key" ANTIGRAVITY_API_KEY="fixture-key"
     t19_env() {
         env -u YAKOS_LIB HOME="$t19/home" YAKOS_DISPATCH_LOG="$t19/state" PATH="$t19/shim:$PATH" \
             YAKOS_IMPL=go YAKOS_ROOT="$REPO_ROOT" "$GO_BINARY" "$@"

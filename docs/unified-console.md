@@ -529,12 +529,23 @@ the ring are not available without restarting the daemon.
 The Chat tab provides per-model REPL panes. Each pane is independently
 configured:
 
-- **Runtime:** claude / codex / agy / gemini
-- **Model tier:** haiku / sonnet / opus / fable (fable requires explicit
-  opt-in; see [runtime-matrix.md](runtime-matrix.md))
+- **Runtime:** auto / claude / codex / agy (`auto` resolves from the agent's
+  `runtime:` pin, then the project's `.yakos.yml` defaults). A pane set to a
+  specific runtime means that runtime: if it is not installed or not signed
+  in, the turn fails with the reason and the fallbacks it did not use, and is
+  never answered from another vendor. The turn's summary event carries
+  `runtime_resolved`, the runtime that actually ran it, so an `auto` pane
+  shows where its agent went.
+- **Model:** `default` (the agent's own pin, else the runtime's own default:
+  `sonnet` on claude, none on codex and agy so the harness picks), or for
+  claude haiku / sonnet / opus / fable (fable requires explicit opt-in; see
+  [runtime-matrix.md](runtime-matrix.md)); every runtime also takes the
+  aliases cheap / balanced / best / reasoning / frontier, which resolve per
+  runtime (an alias with no mapping, such as any alias on codex, means the
+  harness default).
 
 **Streaming behavior:** claude panes stream tokens as they arrive
-(`--include-partial-messages` unframed mode). codex, agy, and gemini
+(`--include-partial-messages` unframed mode). codex and agy
 panes receive a single buffered response. The UI labels buffered panes
 so you know to wait for the full response. A buffered response is the
 agent's text, parsed from the runtime's own output (codex JSONL, agy
@@ -547,7 +558,13 @@ shows neither today; that lands with the P0a and P0d work.
 
 Each pane is **multi-turn** with a persisted transcript at
 `<work>/current/chats/<conversationID>.ndjson`. Refreshing the browser
-restores prior turns.
+restores prior turns. On claude, a follow-up turn resumes the conversation's
+native session (the id is kept in `<conversationID>.meta.json`), so the agent
+remembers the earlier turns. A conversation, and that session, belong to the
+operator who started it: another operator who learns the `conversationId`
+(for example from a shared pane) gets a 403 when dispatching into it, even
+after the owner unshared it. A session claude no longer has is forgotten, on a
+"not found" failure at once and otherwise after two failed resumes in a row.
 
 **Interactive mode and effort selector:** panes can be started in
 interactive mode (multi-turn with persistent session) and support an
@@ -675,8 +692,8 @@ Node fields:
 |---|---|---|
 | `id` | yes | Node identifier. Must match `^[a-z0-9][a-z0-9-]{0,63}$`. Unique within the workflow. |
 | `agent` | yes | Agent name (must exist in the agent roster). |
-| `runtime` | no | Runtime override (`claude`/`codex`/`agy`/`gemini`). Resolved from agent frontmatter when absent. |
-| `model` | no | Model tier/alias (`haiku`/`sonnet`/`opus`/`fable`). Resolved from agent frontmatter when absent. |
+| `runtime` | no | Runtime override (`claude`/`codex`/`agy`). When absent, resolved from the agent's frontmatter pin, then `.yakos.yml`. |
+| `model` | no | On claude, a tier (`haiku`/`sonnet`/`opus`/`fable`) or an alias (`cheap`/`balanced`/`best`/`reasoning`/`frontier`); on codex and agy, an alias or a model id. Checked against the node's runtime and passed to dispatch as written, which resolves an alias for the runtime that runs the node. Resolved from agent frontmatter when absent. |
 | `timeout` | no | Per-node dispatch timeout in seconds. Default: 600. Use 900 for long synthesis nodes. |
 | `prompt` | yes | Task prompt. Supports `${inputs.<key>}` and `${nodes.<id>.output}` substitution (only declared references are valid). |
 | `output_limit` | yes | Total tail-truncate budget in bytes for all upstream outputs substituted into this node's prompt. Mandatory — validate rejects a missing or zero value. |
