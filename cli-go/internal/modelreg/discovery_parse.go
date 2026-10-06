@@ -18,6 +18,10 @@ const (
 	maxReasonRunes = 160
 )
 
+// utf8BOM is the UTF-8 byte order mark (U+FEFF), spelled as bytes so the source
+// stays plain ASCII.
+const utf8BOM = "\xef\xbb\xbf"
+
 // parseAgyModels reads the standard output of `agy models`: one model per line,
 // the id, a tab, then a display name (`gemini-3.8-flash-high<TAB>Gemini 3.8 Flash
 // (High)`). The progress line agy prints ("Fetching available models...") goes to
@@ -25,6 +29,9 @@ const (
 //
 // The input is the output of another program, so every rule here narrows it:
 //
+//   - A UTF-8 byte order mark at the very start is ignored. A listing written by a
+//     tool that adds one would otherwise lose its first id (the mark is not part of
+//     the id, and the id rule would drop the line).
 //   - A blank line or a line starting with '#' is skipped (not counted).
 //   - The line is cut at its FIRST tab. The id is the left part, the name the
 //     rest. A line with no tab is not a model line and is dropped and counted:
@@ -44,7 +51,8 @@ const (
 // It never returns an id that ValidID rejects, whatever the input.
 func parseAgyModels(stdout []byte) (models []DiscoveredModel, dropped int) {
 	seen := make(map[string]struct{})
-	for _, raw := range strings.Split(string(stdout), "\n") {
+	text := strings.TrimPrefix(string(stdout), utf8BOM)
+	for _, raw := range strings.Split(text, "\n") {
 		// Only the line break is trimmed before the cut: a trailing tab is the
 		// separator of a model with no display name, not whitespace.
 		line := strings.TrimRight(raw, "\r")

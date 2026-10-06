@@ -83,6 +83,17 @@ func TestDiscoveryParse_Table(t *testing.T) {
 			wantIDs: []string{"a-1", "b-2"}, wantNames: []string{"Name One", "Name Two"}},
 		{name: "no trailing newline", in: "a-1\tName One",
 			wantIDs: []string{"a-1"}, wantNames: []string{"Name One"}},
+		// A byte order mark at the start of the output is not part of the first id.
+		{name: "BOM before the first id", in: bom + "a-1\tName One\nb-2\tName Two\n",
+			wantIDs: []string{"a-1", "b-2"}, wantNames: []string{"Name One", "Name Two"}},
+		{name: "BOM before a header comment", in: bom + "# header\na-1\tOne\n",
+			wantIDs: []string{"a-1"}, wantNames: []string{"One"}},
+		{name: "BOM alone", in: bom},
+		// Only the start of the output is a start: one anywhere else is a stray byte
+		// sequence in an id, and that line is dropped and counted.
+		{name: "BOM on a later line", in: "a-1\tOne\n" + bom + "b-2\tTwo\n",
+			wantIDs: []string{"a-1"}, wantNames: []string{"One"}, wantDropped: 1},
+		{name: "two BOMs", in: bom + bom + "a-1\tOne\n", wantDropped: 1},
 		{name: "crlf", in: "a-1\tName One\r\nb-2\tName Two\r\n",
 			wantIDs: []string{"a-1", "b-2"}, wantNames: []string{"Name One", "Name Two"}},
 		{name: "header comment then models", in: "# header\na-1\tOne\n",
