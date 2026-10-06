@@ -132,6 +132,71 @@ type AgentLimit struct {
 	// fable) applied at dispatch, so a project cannot raise an agent's cost
 	// by naming a dearer model (K-119 F2).
 	MaxModel string `yaml:"max_model,omitempty"`
+
+	// tokensIgnored says why a limit_tokens value in the file could not be read as a
+	// token limit (not a whole number, too large for 64 bits, not a number at all);
+	// "" when there was none or it was fine. Resolve reports it as a warning and
+	// keeps the limit the value would have replaced. Set only by UnmarshalYAML.
+	tokensIgnored string
+}
+
+// UnmarshalYAML reads one policy entry. limit_tokens is read as a YAML node and
+// checked here rather than decoded straight into an int64, because yaml.v3 decodes
+// 1500000.5 into an int64 as 1500000 without an error, and a value that is not a
+// whole number of tokens must be ignored with a warning, not silently truncated into
+// a limit the operator did not write. A value that cannot be read as a number leaves
+// the limit unset and records why (tokensIgnored); the rest of the entry, and of the
+// file, is read as usual.
+func (a *AgentLimit) UnmarshalYAML(n *yaml.Node) error {
+	var raw struct {
+		LimitUSD    *float64  `yaml:"limit_usd"`
+		LimitTokens yaml.Node `yaml:"limit_tokens"`
+		Window      string    `yaml:"window"`
+		WarnPct     int       `yaml:"warn_pct"`
+		MaxModel    string    `yaml:"max_model"`
+	}
+	if err := n.Decode(&raw); err != nil {
+		return err
+	}
+	*a = AgentLimit{LimitUSD: raw.LimitUSD, Window: raw.Window, WarnPct: raw.WarnPct, MaxModel: raw.MaxModel}
+	a.LimitTokens, a.tokensIgnored = tokenLimitFromNode(&raw.LimitTokens)
+	return nil
+}
+
+// tokenLimitFromNode reads a limit_tokens node: nil and "" when the key is absent or
+// null, the whole number it holds, or nil and the reason it cannot be a token count.
+// Range (negative, above the bound) is checked where limits are resolved.
+func tokenLimitFromNode(n *yaml.Node) (*int64, string) {
+	if n == nil || n.Kind == 0 {
+		return nil, ""
+	}
+	if n.Kind != yaml.ScalarNode {
+		return nil, "is not a number"
+	}
+	switch n.ShortTag() {
+	case "!!null":
+		return nil, ""
+	case "!!int":
+		var v int64
+		if err := n.Decode(&v); err != nil {
+			return nil, fmt.Sprintf("%s does not fit in a 64-bit integer", n.Value)
+		}
+		return &v, ""
+	case "!!float":
+		var f float64
+		if err := n.Decode(&f); err != nil {
+			return nil, "is not a number"
+		}
+		if math.IsNaN(f) || math.IsInf(f, 0) || f != math.Trunc(f) {
+			return nil, fmt.Sprintf("%v is not a whole number of tokens", f)
+		}
+		if f < -9e18 || f > 9e18 {
+			return nil, fmt.Sprintf("%v does not fit in a 64-bit integer", f)
+		}
+		v := int64(f)
+		return &v, ""
+	}
+	return nil, "is not a number"
 }
 
 // Policy is the user-level budget policy file.
@@ -216,8 +281,8 @@ func SetLimit(stateDir, agent string, usd float64, w Window) error {
 	if err := ValidateAgent(agent); err != nil {
 		return err
 	}
-	if math.IsNaN(usd) || math.IsInf(usd, 0) || usd < 0 {
-		return fmt.Errorf("budget: limit must be a non-negative number of dollars")
+	if math.IsNaN(usd) || math.IsInf(usd, 0) || usd < 0 || usd > maxLimitUSD {
+		return fmt.Errorf("budget: limit must be a number of dollars from 0 to %v", maxLimitUSD)
 	}
 	if w != "" && w != Monthly && w != Lifetime {
 		return fmt.Errorf("budget: window must be %s or %s", Monthly, Lifetime)
@@ -377,6 +442,10 @@ func Resolve(agent string, p Policy, projectUSD *float64) Limit {
 	return resolve(agent, "", p, projectUSD)
 }
 
+// maxLimitUSD bounds a configured dollar limit. A larger number is a typo, and a
+// stop of twice it must stay finite (1e308 doubled is an infinite stop).
+const maxLimitUSD = 1e9
+
 // resolve is Resolve for an agent that is also known by another agent's budget.
 // When alias is not empty, the alias's built-in limits and stop factor and its
 // own entry in the policy apply to agent too, before agent's own, which are more
@@ -398,19 +467,24 @@ func resolve(agent, alias string, p Policy, projectUSD *float64) Limit {
 	// (a built-in, or the global default's) stays: a value that cannot be a limit is a
 	// typo or a corrupt edit, not the operator turning the budget off, and turning a
 	// built-in off by accident would silently remove the supervisor's and librarian's
-	// backstop. 0 is how a limit is turned off, on purpose.
+	// backstop. Out of range is a dollar limit that is negative, NaN, infinite or above
+	// maxLimitUSD, and a token limit that is negative, not a whole number, not a number
+	// at all or above maxTokenLimit. 0 is how a limit is turned off, on purpose.
 	apply := func(name string, a AgentLimit, src string) {
 		if a.WarnPct > 0 && a.WarnPct <= 100 {
 			l.WarnPct = a.WarnPct
 		}
 		l.Window = parseWindow(a.Window, l.Window)
 		if a.LimitUSD != nil {
-			if v := *a.LimitUSD; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 {
-				l.Warnings = append(l.Warnings, fmt.Sprintf("policy limit_usd for %s ignored: %v is not a finite, non-negative number of dollars; the limit it would have replaced stays (0 turns a limit off)", name, v))
+			if v := *a.LimitUSD; math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > maxLimitUSD {
+				l.Warnings = append(l.Warnings, fmt.Sprintf("policy limit_usd for %s ignored: %v is not a finite number of dollars from 0 to %v; the limit it would have replaced stays (0 turns a limit off)", name, v, maxLimitUSD))
 			} else {
 				l.USD = v
 				l.Source = src
 			}
+		}
+		if a.tokensIgnored != "" {
+			l.Warnings = append(l.Warnings, fmt.Sprintf("policy limit_tokens for %s ignored: %s; the limit it would have replaced stays (0 turns a limit off)", name, a.tokensIgnored))
 		}
 		if a.LimitTokens != nil {
 			if v := *a.LimitTokens; v < 0 || v > maxTokenLimit {

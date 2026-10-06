@@ -74,7 +74,7 @@ func TestResolve_OutOfRangeValuesAreIgnoredNotApplied(t *testing.T) {
 		"backend":    {LimitUSD: f64(-1), LimitTokens: i64(maxTokenLimit + 1)},
 		"frontend":   {LimitUSD: f64(25), LimitTokens: i64(-9)},
 		"supervisor": {LimitTokens: i64(0)},
-		"backup":     {LimitUSD: f64(1e12), LimitTokens: i64(maxTokenLimit)},
+		"backup":     {LimitUSD: f64(maxLimitUSD), LimitTokens: i64(maxTokenLimit)},
 	}}
 	if err := SavePolicy(dir, pol); err != nil {
 		t.Fatal(err)
@@ -87,7 +87,7 @@ func TestResolve_OutOfRangeValuesAreIgnoredNotApplied(t *testing.T) {
 	if st := mustEval(t, "frontend", o); st.LimitUSD != 25 || st.LimitTokens != 0 || !hasWarning(st, "limit_tokens for frontend ignored") {
 		t.Errorf("the valid half of an entry applies: %+v", st)
 	}
-	if st := mustEval(t, "backup", o); st.LimitUSD != 1e12 || st.LimitTokens != maxTokenLimit || hasWarning(st, "ignored") {
+	if st := mustEval(t, "backup", o); st.LimitUSD != maxLimitUSD || st.LimitTokens != maxTokenLimit || st.StopUSD != maxLimitUSD || hasWarning(st, "ignored") {
 		t.Errorf("the largest values allowed apply, with no warning: %+v", st)
 	}
 	if st := mustEval(t, "supervisor", o); st.LimitTokens != 0 || st.LimitUSD != 100 || hasWarning(st, "ignored") {
