@@ -77,7 +77,8 @@ user-level file.
 
 ## Windows
 
-- `monthly` (default): the local calendar month. A new month starts at zero.
+- `monthly` (the default for an agent with no window set): the local calendar
+  month. A new month starts at zero.
 - `lifetime`: all recorded spend, never rolls over.
 
 ## Commands
@@ -102,10 +103,13 @@ yakos budget check <agent> [--project <path>] [--json]
 - `set` writes `~/.yakos-state/budget-policy.yml`. `set <agent> 0` turns the
   dollar limit off, including a built-in default. `set <agent> --tokens <n>` sets
   a token limit and leaves the dollar limit as it was; give `<usd>`, `--tokens`,
-  or both. The agent has one window, shared by both limits. The supervisor and
-  librarian also have a built-in token limit, which stays on when the dollar limit
-  is turned off: `set supervisor 0` prints a note saying so, and the budget is off
-  only after `set supervisor 0 --tokens 0`.
+  or both. The agent has one window, shared by both limits, so `set` without
+  `--window` keeps the agent's current window (monthly for an agent that has
+  none): adding a token limit never turns a lifetime dollar limit monthly. Give
+  `--window` to change it. The supervisor and librarian also have a built-in token
+  limit, which stays on when the dollar limit is turned off: `set supervisor 0`
+  prints a note saying so, and the budget is off only after
+  `set supervisor 0 --tokens 0`.
 - `reset` starts the agent's current window over. Spend already logged stops
   counting. The dispatch-log is not edited. A reset belongs to the window it was
   made in and does not carry into the next month.
@@ -306,6 +310,10 @@ and the dispatch proceeds. Only a computed `hard_stop` refuses.
 ## Where it is enforced
 
 - `dispatch.Run` (the Go dispatch, also used by the daemon and MCP paths).
+- `dispatch.RunStream`, the console's one-shot Chat turns.
+- The console's interactive Chat sessions, on both engines, before a new session
+  starts and before each follow-up message is delivered (`dispatch.PreflightBudget`,
+  the same check as the two above).
 - `yakos dispatch` handed to the bash implementation: `main` checks the budget
   before the passthrough, so the bash path cannot bypass it.
 - The supervisor hook launches the supervisor through `yakos dispatch`, so a
@@ -364,7 +372,16 @@ the Jev shadow decision, keep running.
 - Usage is only what the dispatch-log records. Interactive Claude Code sessions
   you run yourself in a terminal and teammates that never go through
   `yakos dispatch` are not counted. Turns of the console's Chat pane are: each
-  interactive turn writes one event pair (surface `console-chat`), and a streamed
-  chat turn is refused at a hard stop like any other dispatch. The Agent SDK
-  engine needs an API key, so its turns are `api` turns: their tokens and dollars
-  both count.
+  interactive turn writes one event pair (surface `console-chat`).
+- A Chat pane turn is refused at a hard stop like any other dispatch, whether the
+  pane streams one-shot turns or keeps a persistent session, on either engine (the
+  Claude CLI engine or the Agent SDK engine). A new interactive session is refused
+  before its process starts, and so is every follow-up message to a live one, with
+  the one-shot turn's own text (`dispatch failed: budget: dispatch refused: ...`
+  in the pane, as an HTTP 429 with that text for a follow-up). The session stays
+  alive and takes the next message once the limit is raised or the window is
+  reset. A session is held to the agent it started as: a later dispatch on the same
+  conversation cannot name another agent to escape its limit, and its turns are
+  accounted to the agent that started it. A turn already running is not stopped.
+- The Agent SDK engine needs an API key, so its turns are `api` turns: their
+  tokens and dollars both count.

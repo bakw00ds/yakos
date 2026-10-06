@@ -422,10 +422,40 @@ subscription harness or a local model; see UPGRADING.md.
 
 ### Fixed
 
-- **A streamed chat turn is refused at a budget hard stop (K-136).**
+- **Chat turns are refused at a budget hard stop in every Chat mode (K-136).**
   `RunStream` skipped the budget pre-flight that `Run` had, so a console chat
   turn could spend past a hard stop. It now runs the same pre-flight before it
-  forks anything or writes an event.
+  forks anything or writes an event. The two interactive engines (the persistent
+  CLI session and the Agent SDK sidecar) skipped it too: an agent at its hard
+  stop was refused as a one-shot turn yet got a 202 and ran full turns when the
+  pane was interactive, on a new session, on a dispatch to a live one and on every
+  follow-up message. They now run the same pre-flight before a session starts and
+  before each message is delivered. The pane shows the one-shot turn's text
+  (`dispatch failed: budget: dispatch refused: ...`), a follow-up gets an HTTP 429
+  with that text, and the session stays alive for when the limit is raised or the
+  window is reset. Only the session's owner is told the budget state; another
+  operator still gets the engine's 403.
+
+- **An interactive session keeps the agent it started as (K-136).** A second
+  dispatch on a live conversation could name any roster agent, and later turns
+  were then accounted and budget-checked as that agent while the process went on
+  running as the first (a claude turn logged as codex). The session is now pinned
+  to the agent and owner it started with.
+
+- **A hostile usage object cannot lose a ledger event or lower a sum (K-136).**
+  Negative token counts and a negative cost in a harness's usage object are
+  recorded as 0, and a cost that is infinite or not a number is recorded as 0
+  instead of making the whole `dispatch_finished` event unencodable, which dropped
+  the event and its tokens. The router's `route_rule` and `route_reason` text also
+  loses C1 control characters, bidirectional overrides and isolates, zero-width
+  and other format characters, and line and paragraph separators.
+
+- **Setting a token limit no longer changes the agent's window (K-136).** The
+  dollar and token limits share one window, and `yakos budget set` without
+  `--window` wrote `monthly`, so adding a token limit to an agent with a lifetime
+  dollar cap silently made the cap re-open every month. `set` now keeps the
+  agent's current window (monthly for an agent that has none) and prints the
+  window it applied; `--window` still changes it.
 
 - **The interactive chat pane gets an end-of-turn event for the CLI engine
   (K-136).** The persistent CLI engine parsed claude's result line and dropped

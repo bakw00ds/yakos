@@ -146,7 +146,13 @@ What changes for you:
   trend in the metrics dashboard steps down after the upgrade, because older
   snapshots summed every dollar figure.
 - Interactive Chat turns are now in the dispatch-log (surface `console-chat`),
-  so the Cost views include them.
+  so the Cost views include them, and they are held to the budget like any other
+  dispatch: a new interactive session, and each follow-up message to a live one,
+  is refused when the agent is at its hard stop (the pane shows the refusal; a
+  follow-up gets an HTTP 429). A session keeps the agent it started as.
+- `yakos budget set` without `--window` now keeps the agent's current window
+  instead of writing `monthly`. If you relied on a plain `set` to turn a
+  `lifetime` window monthly, pass `--window monthly`.
 
 Downgrading: the new log keys are additive and an older yakos ignores them, but
 an older yakos sums `usage.total_cost_usd`, which is 0 for subscription rows, so
