@@ -40,8 +40,10 @@ func dispatchRefuses(stateDir string) bool {
 	return warning != ""
 }
 
-// requireRefusalFinding checks the one finding a refused default-runtime file produces.
-func requireRefusalFinding(t *testing.T, f *policyFixture, wantInMessage ...string) PolicyFinding {
+// requireRefusalFinding checks the one finding a refused default-runtime file produces. Its
+// message is dispatch's own warning for that directory behind a short prefix, word for word,
+// so the two cannot drift: both come from auth.ReadDefaultRuntime.
+func requireRefusalFinding(t *testing.T, f *policyFixture, stateDir string, wantInMessage ...string) PolicyFinding {
 	t.Helper()
 	got, ok := byID(f.check())["default-runtime-refused"]
 	if !ok {
@@ -51,9 +53,16 @@ func requireRefusalFinding(t *testing.T, f *policyFixture, wantInMessage ...stri
 	if got.Severity != PolicyMedium {
 		t.Errorf("severity = %s, want medium", got.Severity)
 	}
-	for _, want := range append([]string{"default runtime file", "ignored"}, wantInMessage...) {
+	_, warning := auth.ReadDefaultRuntime(stateDir)
+	if warning == "" {
+		t.Fatal("dispatch accepts this file, so the doctor must not report it")
+	}
+	if want := "dispatch is " + warning; got.Message != want {
+		t.Errorf("the message must be dispatch's own warning, word for word\n got: %q\nwant: %q", got.Message, want)
+	}
+	for _, want := range wantInMessage {
 		if !strings.Contains(got.Message, want) {
-			t.Errorf("the message must mention %q: %q", want, got.Message)
+			t.Errorf("the message must contain %q: %q", want, got.Message)
 		}
 	}
 	if !strings.Contains(got.Fix, "yakos auth set-default") {
@@ -113,13 +122,8 @@ func TestCheckPolicy_DefaultRuntimeRefusedFileIsReportedWithItsReason(t *testing
 			f := newPolicyFixture(t)
 			stateDir := filepath.Join(f.home, ".yakos-state")
 			c.setup(t, stateDir)
-			got := requireRefusalFinding(t, f, "it "+c.reason)
-			if strings.Contains(got.Message, "its directory") {
-				t.Errorf("the file is at fault, not its directory: %q", got.Message)
-			}
-			if !dispatchRefuses(stateDir) {
-				t.Error("the doctor reports a refusal the dispatcher does not make")
-			}
+			requireRefusalFinding(t, f, stateDir,
+				"ignoring the default runtime: the default-runtime file in the yakOS state directory "+c.reason)
 		})
 	}
 }
@@ -133,10 +137,7 @@ func TestCheckPolicy_DefaultRuntimeInAnUntrustedDirectoryNamesTheDirectory(t *te
 		if err := os.Chmod(stateDir, 0o777); err != nil {
 			t.Fatal(err)
 		}
-		requireRefusalFinding(t, f, "its directory", "group or world writable")
-		if !dispatchRefuses(stateDir) {
-			t.Error("the doctor reports a refusal the dispatcher does not make")
-		}
+		requireRefusalFinding(t, f, stateDir, "ignoring the default runtime: the yakOS state directory is group or world writable")
 	})
 	t.Run("symlinked directory", func(t *testing.T) {
 		f := newPolicyFixture(t)
@@ -146,10 +147,7 @@ func TestCheckPolicy_DefaultRuntimeInAnUntrustedDirectoryNamesTheDirectory(t *te
 		if err := os.Symlink(real, stateDir); err != nil {
 			t.Fatal(err)
 		}
-		requireRefusalFinding(t, f, "its directory", "is a symlink")
-		if !dispatchRefuses(stateDir) {
-			t.Error("the doctor reports a refusal the dispatcher does not make")
-		}
+		requireRefusalFinding(t, f, stateDir, "ignoring the default runtime: the yakOS state directory is a symlink")
 	})
 }
 
@@ -161,10 +159,7 @@ func TestCheckPolicy_DefaultRuntimeIsReadWhereDispatchReadsIt(t *testing.T) {
 		relocated := t.TempDir()
 		writeDefaultRuntime(t, relocated, "codex\n", 0o666)
 		f.env["YAKOS_DISPATCH_LOG"] = relocated
-		requireRefusalFinding(t, f)
-		if !dispatchRefuses(relocated) {
-			t.Error("the doctor reports a refusal the dispatcher does not make")
-		}
+		requireRefusalFinding(t, f, relocated, "ignoring the default runtime: the default-runtime file in the yakOS state directory is group or world writable")
 	})
 	t.Run("relocated and trusted while the home one is refused", func(t *testing.T) {
 		f := newPolicyFixture(t)
@@ -196,14 +191,111 @@ func TestCheckPolicy_DefaultRuntimeFallsBackToTheTempDirectoryWithoutAHome(t *te
 	writeDefaultRuntime(t, stateDir, "codex\n", 0o666)
 
 	got := byID(CheckPolicy(PolicyEnv{Getenv: func(string) string { return "" }}))
-	if _, ok := got["default-runtime-refused"]; !ok {
+	finding, ok := got["default-runtime-refused"]
+	if !ok {
 		t.Fatalf("with no home the doctor must read the file dispatch reads, in the temp directory; got %v", got)
 	}
-	if !dispatchRefuses(stateDir) {
-		t.Error("the doctor reports a refusal the dispatcher does not make")
+	_, warning := auth.ReadDefaultRuntime(stateDir)
+	if warning == "" || finding.Message != "dispatch is "+warning {
+		t.Errorf("the finding must be dispatch's own warning for that directory: %q, dispatch says %q", finding.Message, warning)
 	}
-	if msg := got["default-runtime-refused"].Message; strings.Contains(msg, tmp) {
-		t.Errorf("the report must not print the path: %q", msg)
+	if strings.Contains(finding.Message, tmp) {
+		t.Errorf("the report must not print the path: %q", finding.Message)
+	}
+}
+
+// ---- the same, through Run: what `yakos doctor --policy` actually calls ----------------
+
+// Run replaces an empty home with "/tmp" so its other sections have a path to print. The policy
+// report must not inherit that stand-in: dispatch resolves its state directory from the real
+// environment, and with no home that is a directory under the temp directory (statepath.Dir).
+func TestRun_PolicyOnlyWithoutAHomeReadsTheFileDispatchReads(t *testing.T) {
+	skipWithoutPosixModes(t)
+	tmp := t.TempDir()
+	t.Setenv("TMPDIR", tmp)
+	t.Setenv("HOME", "")
+	t.Setenv("YAKOS_DISPATCH_LOG", "")
+	stateDir := statepath.Dir()
+	if filepath.Dir(stateDir) != filepath.Clean(tmp) {
+		t.Skipf("this platform has no TMPDIR-based fallback: statepath.Dir() = %q", stateDir)
+	}
+	writeDefaultRuntime(t, stateDir, "codex\n", 0o666)
+	// A router policy sitting in that same temp state directory must NOT be read: dispatch reads
+	// the policy from $HOME/.yakos-state only (statepath.TrustedDir is empty without a home, and
+	// then nothing is allowed), never from a directory under a shared temp directory.
+	writePolicy(t, tmp, "allow_unsandboxed_runtimes: [codex]\n", 0o600)
+
+	var buf bytes.Buffer
+	rep, err := Run(Config{Writer: &buf, ErrWriter: &buf, PolicyOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := byID(rep.Policy)
+	finding, ok := got["default-runtime-refused"]
+	if !ok {
+		t.Fatalf("through Run the doctor must report the refusal dispatch makes; got %v", ids(rep.Policy))
+	}
+	if _, warning := auth.ReadDefaultRuntime(stateDir); finding.Message != "dispatch is "+warning {
+		t.Errorf("the finding must be dispatch's own warning: %q vs %q", finding.Message, warning)
+	}
+	for id := range got {
+		if strings.HasPrefix(id, "router-policy") {
+			t.Errorf("without a home dispatch reads no router policy, so the doctor reports none; got %s", id)
+		}
+	}
+	if strings.Contains(buf.String(), tmp) {
+		t.Errorf("the printed report must not carry a path:\n%s", buf.String())
+	}
+}
+
+// When the caller gives no home directory, Run reads HOME from the environment it was given,
+// not from the process: an injected environment decides, as it does for every other check.
+func TestRun_PolicyOnlyReadsTheHomeFromTheInjectedEnvironment(t *testing.T) {
+	skipWithoutPosixModes(t)
+	injected := t.TempDir()
+	writeDefaultRuntime(t, filepath.Join(injected, ".yakos-state"), "codex\n", 0o666)
+	t.Setenv("HOME", t.TempDir()) // the process's own home must not decide
+	t.Setenv("YAKOS_DISPATCH_LOG", "")
+
+	var buf bytes.Buffer
+	rep, err := Run(Config{
+		Writer: &buf, ErrWriter: &buf, PolicyOnly: true,
+		Environ: func(k string) string {
+			if k == "HOME" {
+				return injected
+			}
+			return ""
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := byID(rep.Policy)["default-runtime-refused"]; !ok {
+		t.Errorf("the HOME in the injected environment holds a refused default-runtime file and must be read; got %v", ids(rep.Policy))
+	}
+}
+
+// A policy path must never be resolved against the working directory: with no home the
+// doctor reads no router policy at all, so a .yakos-state sitting in the current directory,
+// which a project controls, is not read either.
+func TestRun_PolicyOnlyWithoutAHomeNeverReadsAPolicyFromTheWorkingDirectory(t *testing.T) {
+	skipWithoutPosixModes(t)
+	cwd := t.TempDir()
+	writePolicy(t, cwd, "allow_unsandboxed_runtimes: [codex]\n", 0o600) // cwd/.yakos-state/router-policy.yml
+	t.Chdir(cwd)
+	t.Setenv("HOME", "")
+	t.Setenv("TMPDIR", t.TempDir())
+	t.Setenv("YAKOS_DISPATCH_LOG", "")
+
+	var buf bytes.Buffer
+	rep, err := Run(Config{Writer: &buf, ErrWriter: &buf, PolicyOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range rep.Policy {
+		if strings.HasPrefix(f.ID, "router-policy") {
+			t.Errorf("a policy in the working directory must not be read: %s", f.ID)
+		}
 	}
 }
 

@@ -22,10 +22,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/auth"
 	"github.com/bakw00ds/yakos/internal/codexhome"
 	"github.com/bakw00ds/yakos/internal/routerpolicy"
 	yakruntime "github.com/bakw00ds/yakos/internal/runtime"
-	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
 // PolicySeverity ranks a finding. High means a protection is off or bypassable
@@ -198,6 +198,11 @@ const routerPolicyLabel = "~/.yakos-state/router-policy.yml"
 // uses (routerpolicy.Load: same trust check, $HOME/.yakos-state only, never
 // YAKOS_DISPATCH_LOG), so what is reported is what dispatch would do.
 func checkRouterPolicy(e PolicyEnv) []PolicyFinding {
+	// With no home there is no policy to read, and that is what dispatch does too:
+	// statepath.TrustedDir() is empty, so it reads nothing and allows nothing. It
+	// deliberately has no temp-directory fallback (another local user could plant a
+	// policy there), unlike the default-runtime file below. The doctor must not read
+	// one either, and must never resolve this path against the working directory.
 	if e.Home == "" {
 		return nil
 	}
@@ -256,35 +261,22 @@ func trustReason(err error, path string) string {
 
 // ---- default runtime ---------------------------------------------------------------
 
-const (
-	defaultRuntimeFile = "default-runtime" // auth.ReadDefaultRuntime reads <state dir>/default-runtime
-	// defaultRuntimeMaxBytes is the read cap auth.ReadDefaultRuntime uses. The trust
-	// decision does not depend on it.
-	defaultRuntimeMaxBytes = 256
-	defaultRuntimeLabel    = "the default runtime file in the yakOS state directory"
-)
-
 // checkDefaultRuntime reports a default-runtime file that dispatch refuses. The
 // default steers every unpinned dispatch to a vendor, so the Go dispatcher reads
-// it only when no one else could have written it (statepath.ReadTrusted, through
-// auth.ReadDefaultRuntime) and ignores it otherwise, with a one-line warning.
-// This reads the same file in the same directory through the same trust check
-// and words the refusal the same way, without printing a path.
+// it only when no one else could have written it and ignores it otherwise, with a
+// one-line warning. This asks the same function dispatch asks
+// (auth.ReadDefaultRuntime) about the same directory and reports its warning word
+// for word, so the trust decision, the file name and the wording cannot drift
+// apart. The warning names what was refused by role and carries no path.
 func checkDefaultRuntime(e PolicyEnv) []PolicyFinding {
-	path := filepath.Join(e.dispatchStateDir(), defaultRuntimeFile)
-	_, err := statepath.ReadTrusted(path, defaultRuntimeMaxBytes)
-	var untrusted *statepath.UntrustedError
-	if !errors.As(err, &untrusted) {
-		return nil // absent, unreadable, or trusted: nothing refused
-	}
-	subject := "it"
-	if untrusted.Path != path {
-		subject = "its directory" // the directory half of the trust check
+	_, warning := auth.ReadDefaultRuntime(e.dispatchStateDir())
+	if warning == "" {
+		return nil // absent, unreadable or trusted: nothing refused
 	}
 	return []PolicyFinding{{
 		ID:       "default-runtime-refused",
 		Severity: PolicyMedium,
-		Message:  fmt.Sprintf("%s was refused and is ignored: %s %s; the default you set with 'yakos auth set-default' does not apply to dispatch", defaultRuntimeLabel, subject, untrusted.Reason),
+		Message:  "dispatch is " + warning,
 		Fix:      "make it a regular file you own with mode 600 in a directory only you can write, or run 'yakos auth set-default <runtime>' to write it again",
 	}}
 }
@@ -452,8 +444,16 @@ func containsString(list []string, s string) bool {
 // It records the findings on the Report and never counts them as warnings or
 // errors, so the exit status stays 0.
 func (r *runner) runPolicy() {
+	// The home as the caller gave it, not the "/tmp" stand-in Run settles on so its other
+	// sections have a path to print. Dispatch resolves its state directory from the real
+	// environment and, with no home, falls back to a directory under the temp directory;
+	// the policy checks must see "no home" to look where it looks.
+	home := r.cfg.HomeDir
+	if home == "" {
+		home = r.env("HOME")
+	}
 	findings := CheckPolicy(PolicyEnv{
-		Home:                 r.home,
+		Home:                 home,
 		Getenv:               r.env,
 		LookPath:             r.lookPath,
 		BashTreePresent:      r.cfg.PolicyBashTreePresent,
