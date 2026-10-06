@@ -42,8 +42,28 @@ ok()  { printf '  OK   %s\n' "$1"; pass=$((pass + 1)); }
 bad() { printf '  FAIL %s\n' "$1"; fail=$((fail + 1)); }
 
 TMP="$(mktemp -d -t yakos-ss-coalesce-XXXXXX)"
-cleanup() { for p in "$TMP"/*/child.pid; do [ -f "$p" ] && kill "$(cat "$p")" 2>/dev/null; done; rm -rf "$TMP"; }
-trap cleanup EXIT INT TERM
+# K-130: the detached wrapper of an earlier test writes its end-of-run bookkeeping (state, log, lock) a few ms after its
+# dispatch returns, so a bare removal of the sandboxes raced it ("Directory not empty") and, in CI, turned a suite that had
+# passed every check into a failed job. So: kill the fake dispatchers that recorded a pid, wait (10 s at most) for the
+# wrappers of THIS run (their command lines name a sandbox under $TMP), retry the removal for a moment, and keep the
+# suite's own exit status (INT and TERM exit through here with 130 and 143, and do not wait).
+cleanup() {
+    local rc=$? i=0 p
+    for p in "$TMP"/*/child.pid; do [ -f "$p" ] && kill "$(cat "$p")" 2>/dev/null; done
+    if [ "$rc" -lt 128 ]; then
+        while [ "$i" -lt 100 ] && pgrep -f "supervisor-wrap.*$TMP" >/dev/null 2>&1; do sleep 0.1; i=$((i + 1)); done
+    fi
+    i=0
+    while [ "$i" -lt 100 ]; do
+        rm -rf "$TMP" 2>/dev/null
+        [ -e "$TMP" ] || break
+        sleep 0.1; i=$((i + 1))
+    done
+    exit "$rc"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 SID="gate-session"
 HOLD=""
