@@ -64,10 +64,10 @@ func resolveAgent(roster []agentscompose.ComposedAgent, name, yakosRoot, project
 //
 // Resolution order mirrors resolveAgent:
 //
-//  a) Exact match in the composed roster.
-//  b) Bare known-runtime name (catch-all).
-//  c) Neither → returns a non-nil error with a message safe to surface to the
-//     caller (no roster path leakage).
+//	a) Exact match in the composed roster.
+//	b) Bare known-runtime name (catch-all).
+//	c) Neither → returns a non-nil error with a message safe to surface to the
+//	   caller (no roster path leakage).
 //
 // When yakosRoot is empty the roster cannot be composed; in that case only
 // the known-runtime catch-all (b) is checked.  If the name is also not a

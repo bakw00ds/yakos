@@ -43,9 +43,9 @@ import (
 //   - Reads a user_turn frame from stdin.
 //   - Emits a token chunk + summary.
 //   - If wantAsk is true, for the SECOND user_turn:
-//     - Emits an ask_user_question frame.
-//     - Reads an "answer" frame (the exact content doesn't matter for the fake).
-//     - Emits a tool_result + summary to confirm continuation.
+//   - Emits an ask_user_question frame.
+//   - Reads an "answer" frame (the exact content doesn't matter for the fake).
+//   - Emits a tool_result + summary to confirm continuation.
 //   - Exits cleanly when stdin is closed (EOF on read).
 func fakeSidecarScript(turns int, wantAsk bool) func() *exec.Cmd {
 	readyLine := `{"v":1,"kind":"ready"}`
