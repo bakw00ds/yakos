@@ -122,6 +122,17 @@ func reasonFor(s State) string {
 // Refused reports whether new dispatches for this agent must be refused.
 func (s Status) Refused() bool { return s.State == StateHardStop }
 
+// HasLimit reports whether the agent has a limit of either kind. An agent with
+// neither is off: nothing is evaluated and nothing is refused.
+func (s Status) HasLimit() bool { return s.LimitUSD > 0 || s.LimitTokens > 0 }
+
+// OverStop reports whether the agent has reached the dispatch stop of ANY
+// configured limit: the dollar limit times the stop factor, or the token limit
+// times the stop factor. It is what Enforce refuses on, and what the supervisor
+// hook's 2x high-risk ceiling tests; for an agent with a stop factor of 1 it
+// equals hard_stop.
+func (s Status) OverStop() bool { return s.usdTripped() || s.tokensTripped() }
+
 // usdTripped and tokensTripped say which limit has reached its dispatch stop. A
 // limit that is not configured never trips.
 func (s Status) usdTripped() bool {
@@ -308,7 +319,7 @@ func Evaluate(agent string, o Options) (Status, error) {
 // Status carries the details.
 func Enforce(agent string, o Options) (Status, error) {
 	st, err := Evaluate(agent, o)
-	if st.State == StateHardStop && (st.usdTripped() || st.tokensTripped()) {
+	if st.State == StateHardStop && st.OverStop() {
 		return st, &RefusedError{Status: st}
 	}
 	return st, err
