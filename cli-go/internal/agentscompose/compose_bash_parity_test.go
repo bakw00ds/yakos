@@ -53,6 +53,10 @@ func bashes(t *testing.T) []string {
 	return out
 }
 
+// repoCLILib is the repository's cli/lib, as an absolute path found while the
+// working directory is still the package directory: a test may change directory.
+var repoCLILib, _ = filepath.Abs(filepath.Join("..", "..", "..", "cli", "lib"))
+
 const composeScript = `set -eu
 . "$YAKOS_LIB/compat.sh"
 . "$YAKOS_LIB/agents-compose.sh"
@@ -77,12 +81,8 @@ func runBashComposer(t *testing.T, shell, root, project string) (ids, warns []st
 // everything it wrote to stderr.
 func bashCompose(t *testing.T, shell, root, project string) (ids []string, stderr string) {
 	t.Helper()
-	repoLib, err := filepath.Abs(filepath.Join("..", "..", "..", "cli", "lib"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	cmd := exec.Command(shell, "-c", composeScript, "composer", root, project)
-	cmd.Env = append(os.Environ(), "YAKOS_LIB="+repoLib, "HOME="+t.TempDir())
+	cmd.Env = append(os.Environ(), "YAKOS_LIB="+repoCLILib, "HOME="+t.TempDir())
 	var stdout, errBuf bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &errBuf
 	if err := cmd.Run(); err != nil {
@@ -380,6 +380,93 @@ func TestBashComposerAppliesTheDirectoryRuleLikeCompose(t *testing.T) {
 				}
 				if strings.Contains(stderr, "MARKER") || strings.Contains(stderr, "TOPSECRET") {
 					t.Errorf("%s: text of a refused file reached stderr:\n%s", shell, stderr)
+				}
+			}
+		})
+	}
+}
+
+// A relative project path with CDPATH set. With CDPATH set, bash's cd given a
+// relative path prints the directory it entered, and that second line got into
+// the path the bash composer resolved: a directory linked to somewhere outside the
+// project was then taken for one inside it, and a link inside was refused. Compose
+// never looks at CDPATH, so the twins must still agree. Both run from the project's
+// parent, with the project named relatively.
+func TestBashComposerDirectoryRuleIgnoresCDPATH(t *testing.T) {
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skip("jq is not installed; the bash composer needs it")
+	}
+	const dirWarn = "yakos: WARN: ignoring agent directory "
+	const fileWarn = "yakos: WARN: ignoring agent file "
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, root, project string)
+		ids   string
+		warns []string
+	}{
+		{
+			name: "agents linked outside the project",
+			setup: func(t *testing.T, root, project string) {
+				symlinkOrSkip(t, filepath.Join(outsideTree(t), "agents"), filepath.Join(project, ".claude", "agents"))
+			},
+			ids:   "backend",
+			warns: []string{dirWarn + filepath.Join("proj", ".claude", "agents") + ": " + DirOutsideReason},
+		},
+		{
+			name: "agents linked inside the project, with links in it",
+			setup: func(t *testing.T, root, project string) {
+				writeAgentDir(t, filepath.Join(project, "config", "agents"), map[string]string{"mine": "model: haiku\n"})
+				writeFileT(t, filepath.Join(project, "config", "agents", "sub", "shared.md"), "---\nid: shared\n---\n\n## Purpose\n\nShared.\n")
+				writeFileT(t, filepath.Join(project, ".env"), secretText+"\n")
+				symlinkOrSkip(t, filepath.Join("sub", "shared.md"), filepath.Join(project, "config", "agents", "inproject.md"))
+				symlinkOrSkip(t, filepath.Join("..", "..", ".env"), filepath.Join(project, "config", "agents", "dotenv.md"))
+				symlinkOrSkip(t, filepath.Join("..", "config", "agents"), filepath.Join(project, ".claude", "agents"))
+			},
+			ids:   "backend,inproject,mine",
+			warns: []string{fileWarn + filepath.Join("proj", ".claude", "agents", "dotenv.md") + ": " + AgentOutsideReason},
+		},
+	}
+	shells := bashes(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			warnings := captureWarnings(t)
+			root, parent := t.TempDir(), t.TempDir()
+			writeAgentDir(t, filepath.Join(root, "lib", "agents"), map[string]string{"backend": "model: sonnet\n"})
+			project := filepath.Join(parent, "proj")
+			tc.setup(t, root, project)
+			t.Chdir(parent)
+			t.Setenv("CDPATH", ".:/")
+
+			roster, err := Compose(root, "proj")
+			if err != nil {
+				t.Fatalf("Compose = %v", err)
+			}
+			goIDs := rosterIDs(roster)
+			sort.Strings(goIDs)
+			var goWarns []string
+			for _, line := range strings.Split(warnings.String(), "\n") {
+				if strings.HasPrefix(line, dirWarn) || strings.HasPrefix(line, fileWarn) {
+					goWarns = append(goWarns, line)
+				}
+			}
+			sort.Strings(goWarns)
+			if strings.Join(goIDs, ",") != tc.ids || strings.Join(goWarns, "\n") != strings.Join(tc.warns, "\n") {
+				t.Fatalf("Compose: roster %v, warnings\n%s\nwant %s and\n%s", goIDs, strings.Join(goWarns, "\n"), tc.ids, strings.Join(tc.warns, "\n"))
+			}
+			for _, shell := range shells {
+				ids, stderr := bashCompose(t, shell, root, "proj")
+				var warns []string
+				for _, line := range strings.Split(stderr, "\n") {
+					if strings.HasPrefix(line, dirWarn) || strings.HasPrefix(line, fileWarn) {
+						warns = append(warns, line)
+					}
+				}
+				sort.Strings(warns)
+				if strings.Join(ids, ",") != tc.ids {
+					t.Errorf("%s: the bash composer composed %v, want %s", shell, ids, tc.ids)
+				}
+				if strings.Join(warns, "\n") != strings.Join(tc.warns, "\n") {
+					t.Errorf("%s: the bash composer's warnings differ\n got:\n%s\nwant:\n%s", shell, strings.Join(warns, "\n"), strings.Join(tc.warns, "\n"))
 				}
 			}
 		})

@@ -167,6 +167,7 @@ norm2() { sed "s|$Q|<Q>|g" | grep -E '\[err\]|\[warn\]|Summary' | sort; }
 run_bash2() { YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$REPO_ROOT/cli/lib" "${BASH:-bash}" "$REPO_ROOT/cli/lib/validate.sh" "$@" 2>&1; }
 run_go2()   { YAKOS_ROOT="$REPO_ROOT" YAKOS_IMPL=go "$GO_BINARY" validate "$@" 2>&1; }
 SKIP='the Go dispatcher skips it'
+OUTSIDE="symlink resolves outside the framework lib/agents and the project's .claude/agents; $SKIP"
 for side in $sides; do
     vlim 60 "$TMP/q.out" "run_${side}2" "$Q"
     out="$(norm2 < "$TMP/q.out")"
@@ -178,7 +179,6 @@ for side in $sides; do
         want_err "$out" "agents/ghost.md: symlink does not resolve to a regular file; $SKIP"    "$side: a dangling symlink is rejected"
         want_err "$out" "agents/dirlink.md: symlink does not resolve to a regular file; $SKIP"  "$side: a symlink to a directory is rejected"
         want_err "$out" "agents/pipelink.md: symlink does not resolve to a regular file; $SKIP" "$side: a symlink to a FIFO is rejected"
-        OUTSIDE="symlink resolves outside the framework lib/agents and the project's .claude/agents; $SKIP"
         want_err "$out" "agents/leak.md: $OUTSIDE"      "$side: a symlink outside the roots is rejected"
         want_err "$out" "agents/otherfile.md: $OUTSIDE" "$side: a link to another file of the project is rejected"
         want_err "$out" "agents/dotenv.md: $OUTSIDE"    "$side: a link to the project's .env is rejected"
@@ -301,6 +301,43 @@ if [ "$dirs_ok" = 1 ]; then
         printf '%s' "$o6" | grep -q 'Summary: 0 error(s), 0 warning(s)' && ok "$side: a linked .claude without a skills directory is silent about it" || bad "$side: wrong findings for a .claude with no skills directory: $o6"
         if [ "$h1$h2$h3$h4$h5$h6" = 000000 ]; then ok "$side: every directory fixture finished"; else bad "$side: a directory fixture did not finish in 30 seconds"; fi
     done
+    # A relative project path with CDPATH set: bash's `cd` then prints the directory
+    # it enters, which put a second line into every path the bash twin resolved with
+    # `cd -P`, so a link inside the project was refused as pointing outside it. The Go
+    # twin never looked at CDPATH. Run from $TMP, with the project named relatively.
+    CA="$TMP/cdp-a"; mkdir -p "$CA/config/agents" "$CA/.claude"
+    agent_md "$CA/config/agents" mine; skill_md "$CA/config/skills" mine
+    lnk ../config/agents "$CA/.claude/agents"; lnk ../config/skills "$CA/.claude/skills"
+    CB="$TMP/cdp-b"; mkdir -p "$CB/dotclaude/agents/sub"
+    agent_md "$CB/dotclaude/agents" good; agent_md "$CB/dotclaude/agents/sub" shared
+    printf 'OPENAI_API_KEY=sk-TOPSECRET-1234\n' > "$CB/.env"
+    lnk sub/shared.md "$CB/dotclaude/agents/inproject.md"; lnk ../../.env "$CB/dotclaude/agents/dotenv.md"; lnk dotclaude "$CB/.claude"
+    CC="$TMP/cdp-c"; mkdir -p "$CC/.claude"; outside_tree "$TMP/out-cdp"
+    lnk "$TMP/out-cdp/agents" "$CC/.claude/agents"; lnk "$TMP/out-cdp/skills" "$CC/.claude/skills"
+    cdrun() { # <side> <project relative to $TMP>
+        local rc=0
+        VHUNG=0
+        ( cd "$TMP" && CDPATH=".:/" limited 30 "$TMP/vrun.out" "run_${1}2" "$2" ) || rc=$?
+        [ "$rc" -eq 124 ] && VHUNG=1
+        VOUT="$(sed "s|$2|<D>|g" "$TMP/vrun.out" | grep -E '\[err\]|\[warn\]|Summary' | sort)"
+    }
+    for side in $sides; do
+        cdrun "$side" cdp-a; oa="$VOUT"; ha=$VHUNG; printf '%s' "$VOUT" > "$TMP/cdp-a-$side.txt"
+        printf '%s' "$oa" | grep -q 'Summary: 0 error(s), 0 warning(s)' && ok "$side: a linked directory inside the project is accepted for a relative path with CDPATH set" || bad "$side: CDPATH broke a linked directory inside the project: $oa"
+        cdrun "$side" cdp-b; ob="$VOUT"; hb=$VHUNG; printf '%s' "$VOUT" > "$TMP/cdp-b-$side.txt"
+        want_err_f "$ob" "<D>/.claude/agents/dotenv.md: $OUTSIDE" "$side: a link to .env is refused for a relative path with CDPATH set"
+        printf '%s' "$ob" | grep -q 'Summary: 1 error(s), 0 warning(s)' && ok "$side: a link inside the agent directory is accepted for a relative path with CDPATH set" || bad "$side: CDPATH changed the findings for links inside the agent directory: $ob"
+        # the same for a link that leads outside: it must still be refused, not waved through
+        cdrun "$side" cdp-c; oc="$VOUT"; hc=$VHUNG; printf '%s' "$VOUT" > "$TMP/cdp-c-$side.txt"
+        want_err_f "$oc" "<D>/.claude/agents: $DIROUT" "$side: an agents directory linked outside the project is refused for a relative path with CDPATH set"
+        want_err_f "$oc" "<D>/.claude/skills: $DIROUT" "$side: a skills directory linked outside the project is refused for a relative path with CDPATH set"
+        if [ "$ha$hb$hc" = 000 ]; then ok "$side: the CDPATH fixtures finished"; else bad "$side: a CDPATH fixture did not finish in 30 seconds"; fi
+    done
+    if [ "$sides" = "bash go" ]; then
+        for d in cdp-a cdp-b cdp-c; do
+            if diff "$TMP/$d-bash.txt" "$TMP/$d-go.txt" >/dev/null; then ok "bash and Go findings identical for $d"; else bad "bash/go findings differ for $d:"; diff "$TMP/$d-bash.txt" "$TMP/$d-go.txt"; fi
+        done
+    fi
     # The framework's own lib/agents is never subject to the rule, even as a link:
     # framework mode (no project path) does not apply it.
     FW="$TMP/fw"; mkdir -p "$FW/lib/rules" "$TMP/fw-elsewhere/agents"

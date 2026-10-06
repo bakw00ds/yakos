@@ -170,19 +170,22 @@ yk_agents_warn_skip() {
 #   The physical directory that holds the file <path> finally names, following a
 #   chain of symlinks (a relative link is read from the physical directory of the
 #   link, as the kernel does). Fails on a loop or a directory that is missing.
+#   Every cd in this file empties CDPATH: with it set, cd given a relative path
+#   prints the directory it entered, and the extra line corrupted the answer, so
+#   a link out of the project was taken for one inside it.
 yk_agents_real_dir() {
     local p="$1" n=0 d l
     while [ -L "$p" ]; do
         n=$((n + 1))
         if [ "$n" -gt 40 ]; then return 1; fi
-        d="$(cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P)" || return 1
+        d="$(CDPATH='' cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P)" || return 1
         l="$(readlink -- "$p")" || return 1
         case "$l" in
             /*) p="$l" ;;
             *) p="$d/$l" ;;
         esac
     done
-    (cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P)
+    (CDPATH='' cd -P -- "$(dirname -- "$p")" 2>/dev/null && pwd -P)
 }
 
 # yk_agents_symlink_problem <file> <framework-agents-dir> <project-agents-dir or empty>
@@ -233,7 +236,7 @@ yk_agents_dir_problem() {
     if [ ! -L "$project/.claude" ] && [ ! -L "$dir" ]; then return 0; fi
     # Nothing there, so nothing is read through the link.
     if [ ! -e "$dir" ] && [ ! -L "$dir" ]; then return 0; fi
-    if [ ! -d "$dir" ] || ! real="$(cd -P -- "$dir" 2>/dev/null && pwd -P)"; then
+    if [ ! -d "$dir" ] || ! real="$(CDPATH='' cd -P -- "$dir" 2>/dev/null && pwd -P)"; then
         echo "symlink does not resolve to a directory"
         return 0
     fi
