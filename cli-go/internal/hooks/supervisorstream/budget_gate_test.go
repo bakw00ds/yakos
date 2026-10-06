@@ -15,7 +15,8 @@ import (
 	"github.com/bakw00ds/yakos/internal/hooks/supervisorstream"
 )
 
-// K-119 F1: the supervisor dollar budget in the launch gate. Bash twin:
+// K-119 F1: the supervisor dollar budget in the launch gate (the token budget,
+// K-136, is in budget_token_gate_test.go). Bash twin:
 // tests/run-supervisor-budget-test.sh.
 
 // budgetState sets the supervisor limit and records spend in the same month
@@ -165,9 +166,14 @@ func TestBudgetUnreadableSpendWarnsAndFailsOpen(t *testing.T) {
 	}
 }
 
-// A budget that is switched off (a limit of 0) is not a failed read: no WARN.
+// A budget that is switched off (a limit of 0 on BOTH units: the supervisor's
+// built-in token limit stays on when only its dollar limit is turned off, see
+// TestDollarLimitOffLeavesTheTokenLimitGated) is not a failed read: no WARN.
 func TestBudgetOffIsNotUnavailable(t *testing.T) {
 	b, work := budgetHook(t, 0, 0)
+	if err := budget.SetTokenLimit(os.Getenv("YAKOS_DISPATCH_LOG"), "supervisor", 0, budget.Monthly); err != nil {
+		t.Fatal(err)
+	}
 	out := bigEditOut(t, b)
 	if out.ExitCode != 0 || len(b.rec.specs) != 1 {
 		t.Fatalf("a budget that is off must not stop a launch: exit %d launches %d", out.ExitCode, len(b.rec.specs))
