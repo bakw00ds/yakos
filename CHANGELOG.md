@@ -12,7 +12,56 @@ runtime that is installed and signed in, and resolves models per runtime.
 Agents that declare `runtime:` (`general-codex`, `general-agy` and any project
 agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
 
+Routing P0d part 2 (K-136): accounting. Tokens are now the primary unit
+everywhere. Dollars count only for runs billed per API call, never for a
+subscription harness or a local model; see UPGRADING.md.
+
 ### Changed
+
+- **Tokens are the primary accounting unit; dollars count only for API runs
+  (K-136, P0d).** The Go dispatcher now records how each run was billed
+  (`billing`: `subscription`, `api` or `local`), read from the credentials the
+  harness inherits (an API key of its own provider means `api`, none means
+  `subscription`; the value of a key is never read). Tokens (fresh input,
+  output, cache read, cache creation) are summed for every run of every model.
+  Dollars are summed only for `api` runs and for rows that predate the field.
+  A subscription run's cost as the harness reported it (claude's
+  `total_cost_usd`) is kept as `api_equivalent_usd` and `usage.total_cost_usd`
+  is written as 0, so no reader that sums it counts it as spend. **Behavior
+  change:** a dollar budget (`limit_usd`, including the built-in supervisor and
+  librarian limits) no longer moves for subscription runs. See UPGRADING.md and
+  `docs/budgets.md`.
+
+- **Budgets gain token limits (K-136).** `budget-policy.yml` entries accept
+  `limit_tokens` next to `limit_usd`, set with
+  `yakos budget set <agent> [<usd>] [--tokens <n>]` (`5000000`, `500k`, `1.5m`,
+  `2b`). It counts the input, output and cache tokens of every run whatever its
+  billing, and trips exactly like `limit_usd` (warning at `warn_pct`, hard stop
+  at 100%, same window and reset rules); an agent with both stops when either is
+  reached. `budget status` gains `TOKENS` and `TOKEN LIMIT` columns when there is
+  a token to show, `--json` and `budget check --json` gain `limit_tokens`,
+  `stop_tokens`, `spent_tokens` and `tokens_pct`, and the `budget check` first
+  line gains ` spent_tokens=<n> limit_tokens=<n>` only for an agent that has a
+  token limit. The spend cache is rebuilt from the log once.
+
+- **`dispatch.Account` is the only writer of `dispatch_started` and
+  `dispatch_finished` (K-136).** `Run`, `RunStream`, the MCP, JSON-RPC, REST and
+  gRPC transports, Flows nodes and the console's interactive turns all go
+  through one ledger entry, and a test keeps it that way. Each transport stamps
+  its own `surface`.
+
+- **Cost views show tokens first (K-136).** `yakos cost` leads with tokens:
+  logs holding the new rows gain `in`/`out`/`cache`/`tokens` columns, a `usd`
+  column only when some run was billed per API call, and a muted `api_equiv`
+  column (what subscription runs would have cost at API rates, not spend); logs
+  without the new rows print exactly as before, and `--json` rows gain `tokens`,
+  `usd` and `api_equivalent_usd`. The Performance dashboard and the console Cost
+  tab show tokens by default and dollars only for API-billed runs. The hard-coded
+  Sonnet-rate estimate is gone, so a run with no reported cost reads $0 instead
+  of a guess. `/api/perf/*` and `/api/metrics/live_cost` gain additive token,
+  `billing`, `api_equivalent_usd` and per-runtime keys, plus a `tokens`
+  timeseries metric. `yakos metrics collect` totals `efficiency.total_cost_usd`
+  from API-billed spend only, so that trend steps down after the upgrade.
 
 - **Go dispatch honors agent `runtime:` and `runtime-fallback:` (K-127,
   K-132 P0a).** Frontmatter `runtime:` and `runtime-fallback:` now select the
@@ -164,6 +213,27 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   the schema pattern to dispatch's own validation so the two cannot drift.
 
 ### Added
+
+- **The dispatch-log carries ledger fields (K-136).** `dispatch_finished`
+  events gain additive fields, each omitted when empty and absent from rows the
+  bash dispatcher writes: `provider`, `model_id` (the concrete id the harness
+  reported, else the resolved model), `billing`, `cost_source` (`harness` when
+  the harness reported a dollar figure), `api_equivalent_usd`, `surface` (`cli`,
+  `console-chat`, `mcp`, `jsonrpc`, `rest`, `grpc`, `flows`, `library`),
+  `native_session_id`, and the routing fields `route_rule`, `route_reason`,
+  `route_class` and `policy_sha`, which stay empty until the router lands.
+  `fallback_from` was already there. Readers must ignore keys they do not know,
+  as the bash readers do; `tests/run-ledger-compat-test.sh` proves it for every
+  bash reader on a mixed log. No event carries a credential or an environment
+  value: billing is a fixed constant derived from the presence of a key.
+
+- **Interactive chat turns are in the dispatch-log (K-136).** Each turn of the
+  console's interactive Chat pane (the persistent CLI engine and the Agent SDK
+  engine) writes one `dispatch_started`/`dispatch_finished` pair with surface
+  `console-chat`, so the Cost views are no longer empty for them. A turn the
+  engine refuses writes nothing; a turn cut off by the session closing is
+  finished as failed. The SDK sidecar reports a turn's dollar cost but no token
+  counts, so those turns carry no tokens until it does.
 
 - **The dispatch-log records why a runtime was chosen (K-132 P0a).**
   `dispatch_finished` events gain two additive fields, both omitted when
@@ -323,6 +393,25 @@ agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
   to an agent still pinned to it, fails with `gemini was removed; use agy`.
 
 ### Fixed
+
+- **A streamed chat turn is refused at a budget hard stop (K-136).**
+  `RunStream` skipped the budget pre-flight that `Run` had, so a console chat
+  turn could spend past a hard stop. It now runs the same pre-flight before it
+  forks anything or writes an event.
+
+- **The interactive chat pane gets an end-of-turn event for the CLI engine
+  (K-136).** The persistent CLI engine parsed claude's result line and dropped
+  it, so the browser never received a `summary` for a turn and the pane stayed
+  "streaming". The parser state an interactive session uses now emits one
+  `summary` chunk per result line, carrying the turn's usage, cost, native
+  session id and model id; the Chat pane marks the turn done, the transcript
+  gets the assistant text, and the turn is accounted. The one-shot path is
+  unchanged.
+
+- **Streamed claude turns report their cache tokens (K-136).** The streamed
+  result frame was read for input and output tokens only; it now also reads cache
+  read, cache creation and duration, as the one-shot parser does, so a console
+  chat turn's tokens are whole.
 
 - **Claude chat runs in the project and remembers the conversation (K-132
   P0a).** One-shot chat now runs in the project directory, and the first

@@ -8,8 +8,8 @@ CHANGELOG point here. Last updated for v0.39.
 
 ## Upgrading to the next release (unreleased)
 
-Changes since v0.61.0.0 that may need action. The first two are behavior
-changes.
+Changes since v0.61.0.0 that may need action. The first two, and the seventh
+(dollar budgets and subscription runs), are behavior changes.
 
 ### 1. Agents with `runtime:` now run on that runtime
 
@@ -96,6 +96,50 @@ another vendor. The Go dispatcher now skips such a file with a warning, and
 only when it is a regular file owned by you that no one else can write, in a
 directory with the same properties, not a symlink. A file that fails this is
 ignored with a one-line notice. A file `yakos auth set-default` wrote passes.
+
+### 7. Dollar budgets ignore subscription runs; token limits are new (K-136)
+
+Tokens are now the primary unit. The Go dispatcher (the console, MCP, Flows,
+JSON-RPC, REST, gRPC and `yakos dispatch` with `YAKOS_IMPL=go`) records how each
+run was billed. A run on a harness with no API key in its environment is a
+`subscription` run: its tokens are counted, its dollar figure is kept only as
+`api_equivalent_usd`, and it no longer counts toward `limit_usd`. That includes
+the built-in $100 supervisor and $40 librarian limits.
+
+What changes for you:
+
+- **Subscription operators:** `limit_usd` never trips for your runs. If you want
+  a backstop, set a token limit:
+
+  ```sh
+  yakos budget set supervisor --tokens 20m
+  yakos budget set general-codex --tokens 5m
+  ```
+
+  A token limit counts input, output and cache tokens of every run, whatever its
+  billing. Codex and agy report tokens and no dollars, so a token limit is the
+  only budget that can stop them.
+- **API-key operators:** nothing moves. A run with `ANTHROPIC_API_KEY`,
+  `OPENAI_API_KEY`, `GEMINI_API_KEY` (or their siblings) in its environment is
+  `api`, and its dollars count as before. Rows written before this release, and
+  every row the bash dispatcher writes (still the default for `yakos dispatch`),
+  have no `billing` field and keep counting their dollars, so no budget resets
+  itself on upgrade.
+- **Console-login (pay-per-token) users:** a harness signed in that way, or given
+  a key by its own settings file, has no key in the environment yakos passes to
+  it, so it reads as a subscription and `limit_usd` will not see it. Use a token
+  limit.
+- The budget spend cache is rebuilt from the log once, on first use.
+- `yakos cost` prints exactly what it printed unless the log holds rows with a
+  `billing` field; then it adds token columns. The `efficiency.total_cost_usd`
+  trend in the metrics dashboard steps down after the upgrade, because older
+  snapshots summed every dollar figure.
+- Interactive Chat turns are now in the dispatch-log (surface `console-chat`),
+  so the Cost views include them.
+
+Downgrading: the new log keys are additive and an older yakos ignores them, but
+an older yakos sums `usage.total_cost_usd`, which is 0 for subscription rows, so
+its dollar budgets will read those runs as free.
 
 ## Unreleased: codex runs in an OS sandbox, agy gets `--sandbox` but is not contained (K-133)
 
