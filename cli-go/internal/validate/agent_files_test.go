@@ -431,3 +431,89 @@ func TestAgentFiles_FrameworkModeNeverAppliesTheDirectoryRule(t *testing.T) {
 		validateFramework(t, linked)
 	})
 }
+
+// No pass that reads agent files reads through a link the dispatcher refuses. The
+// targets would draw a finding from every one of them if they were read: one is a
+// file outside the project, the other a file of the project that is not an agent.
+// The one error each is the link itself, and nothing else is printed about them.
+func TestAgentFiles_NoPassReadsThroughALinkTheDispatcherRefuses(t *testing.T) {
+	root, proj, agents := agentFilesProject(t)
+	outside := filepath.Join(dirsTree(t), "agents", "evil.md")
+	inProject := filepath.Join(proj, "notes", "evil.md")
+	writeFile(t, inProject, evilAgent)
+	leak := filepath.Join(agents, "leak.md")
+	shared := filepath.Join(agents, "shared.md")
+	symlinkOrSkip(t, outside, leak)
+	symlinkOrSkip(t, inProject, shared)
+
+	out, errs := validateProject(t, root, proj)
+	want := []string{leak + ": " + msgOutside, shared + ": " + msgOutside}
+	if strings.Join(errs, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("errors =\n%s\nwant\n%s\nfull output:\n%s", strings.Join(errs, "\n"), strings.Join(want, "\n"), out)
+	}
+	for _, bad := range []string{"evil", "[warn]", "[ok]   " + leak, "[ok]   " + shared} {
+		if strings.Contains(out, bad) {
+			t.Errorf("a pass read through a refused link: %q is in the output:\n%s", bad, out)
+		}
+	}
+}
+
+// The same for a symlinked SKILL.md: ComposeSkills refuses one that does not end at
+// a regular file inside .claude/skills (or lib/skills), and no pass reads through
+// it. The targets draw a finding from the frontmatter, the line budget and the
+// playbook passes if they are read. A link that stays inside .claude/skills is read
+// as before.
+func TestAgentFiles_NoPassReadsThroughASkillLinkTheDispatcherRefuses(t *testing.T) {
+	root, proj := t.TempDir(), t.TempDir()
+	skills := filepath.Join(proj, ".claude", "skills")
+	writeFile(t, filepath.Join(skills, "ok", "SKILL.md"), "---\nname: ok\ndescription: fine\n---\n\n# ok\n"+strings.Repeat("filler\n", 90))
+	outside := filepath.Join(dirsTree(t), "skills", "evil", "SKILL.md")
+	inProject := filepath.Join(proj, "notes", "evil-skill.md")
+	writeFile(t, inProject, "---\nname: [unclosed\n---\n\n- playbook:evil-skill-ref\n")
+	leak := filepath.Join(skills, "leak", "SKILL.md")
+	shared := filepath.Join(skills, "shared", "SKILL.md")
+	alias := filepath.Join(skills, "alias", "SKILL.md")
+	symlinkOrSkip(t, outside, leak)
+	symlinkOrSkip(t, inProject, shared)
+	symlinkOrSkip(t, filepath.Join("..", "ok", "SKILL.md"), alias)
+
+	out, errs := validateProject(t, root, proj)
+	if len(errs) != 0 {
+		t.Fatalf("errors = %q, want none\nfull output:\n%s", errs, out)
+	}
+	for _, bad := range []string{"evil", "[warn]", leak, shared} {
+		if strings.Contains(out, bad) {
+			t.Errorf("a pass read through a refused skill link: %q is in the output:\n%s", bad, out)
+		}
+	}
+	if !strings.Contains(out, "[ok]   "+alias) {
+		t.Errorf("a link that stays inside .claude/skills should still be validated:\n%s", out)
+	}
+}
+
+// The same for the framework's own agents and the standards check on their
+// sections, which walks lib/agents and warns of every section a file lacks.
+func TestAgentFiles_TheSectionCheckDoesNotReadThroughARefusedLink(t *testing.T) {
+	root := t.TempDir()
+	lib := filepath.Join(root, "lib")
+	agents := filepath.Join(lib, "agents")
+	writeFile(t, filepath.Join(agents, "real.md"), agentBody("real"))
+	outside := filepath.Join(dirsTree(t), "agents", "evil.md")
+	leak := filepath.Join(agents, "leak.md")
+	symlinkOrSkip(t, outside, leak)
+
+	t.Setenv("HOME", t.TempDir())
+	var buf bytes.Buffer
+	cfg := Config{YakosRoot: root, Writer: &buf, ErrWriter: &buf}
+	r := &Result{}
+	validateTree(cfg, r, &buf, "framework", lib)
+	checkAgentMDSections(cfg, r, &buf)
+	for _, f := range r.Findings {
+		if strings.HasPrefix(f.Message, leak+": ") && f.Message != leak+": "+msgOutside {
+			t.Errorf("a pass said more of the refused link than that it is refused: %s", f.Message)
+		}
+		if strings.Contains(f.Message, "evil") {
+			t.Errorf("a pass read through the refused link: %s", f.Message)
+		}
+	}
+}

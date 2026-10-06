@@ -289,14 +289,15 @@ func collectMDFiles(cfg Config, base string, roots []string) []string {
 		})
 	}
 
-	// skills/*/SKILL.md
+	// skills/*/SKILL.md, leaving out a symlinked one that ComposeSkills refuses
 	skillsDir := skillsDirOf(cfg, base)
+	skillRoots := skillRootsFor(cfg, base)
 	if fi, err := os.Stat(skillsDir); err == nil && fi.IsDir() {
 		_ = filepath.WalkDir(skillsDir, func(p string, de fs.DirEntry, err error) error {
 			if err != nil || de.IsDir() || isSpecialEntry(de) {
 				return nil
 			}
-			if de.Name() == "SKILL.md" {
+			if de.Name() == "SKILL.md" && !refusedLink(p, skillRoots) {
 				files = append(files, p)
 			}
 			return nil
@@ -388,11 +389,12 @@ func checkLineBudgets(cfg Config, r *Result, w io.Writer, base string) {
 	})
 
 	skillsDir := skillsDirOf(cfg, base)
+	skillRoots := skillRootsFor(cfg, base)
 	_ = filepath.WalkDir(skillsDir, func(p string, de fs.DirEntry, err error) error {
 		if err != nil || de.IsDir() || isSpecialEntry(de) {
 			return nil
 		}
-		if de.Name() != "SKILL.md" {
+		if de.Name() != "SKILL.md" || refusedLink(p, skillRoots) {
 			return nil
 		}
 		n := countLines(p)
@@ -441,14 +443,17 @@ func checkPlaybookReferences(cfg Config, r *Result, w io.Writer, base string) {
 	// Collect all referenced playbook names across agents, rules, skills.
 	refSet := map[string]struct{}{}
 	agentsDir := agentsDirOf(cfg, base)
+	skillsDir := skillsDirOf(cfg, base)
 	roots := []string{
 		agentsDir,
 		filepath.Join(base, "rules"),
-		skillsDirOf(cfg, base),
+		skillsDir,
 	}
 	agentRoots := agentRootsFor(cfg, base)
+	skillRoots := skillRootsFor(cfg, base)
 	for _, root := range roots {
 		isAgents := root == agentsDir
+		isSkills := root == skillsDir
 		_ = filepath.WalkDir(root, func(p string, de fs.DirEntry, err error) error {
 			if err != nil || de.IsDir() {
 				return nil
@@ -456,6 +461,9 @@ func checkPlaybookReferences(cfg Config, r *Result, w io.Writer, base string) {
 			readable := readableAgentFile(p)
 			if isAgents {
 				readable = readableAgentEntry(p, agentRoots)
+			}
+			if isSkills && refusedLink(p, skillRoots) {
+				readable = false
 			}
 			if !strings.HasSuffix(de.Name(), ".md") || !readable {
 				return nil
@@ -948,6 +956,7 @@ func checkEvalDirs(cfg Config, r *Result, w io.Writer, root string) {
 	if _, err := os.Stat(agentsDir); os.IsNotExist(err) {
 		return
 	}
+	roots := agentRootsFor(cfg, root)
 
 	// Walk only maxdepth 1 (direct children of agents/).
 	entries, err := os.ReadDir(agentsDir)
@@ -964,6 +973,11 @@ func checkEvalDirs(cfg Config, r *Result, w io.Writer, root string) {
 		name := e.Name()
 		switch name {
 		case "README.md", "INDEX.md", "lead-template.md":
+			continue
+		}
+		// A link the dispatcher refuses is not read: its model-policy would be
+		// printed below. checkAgentEnums reports it, once.
+		if !readableAgentEntry(agentFile, roots) {
 			continue
 		}
 

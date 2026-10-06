@@ -370,6 +370,22 @@ if [ "$dirs_ok" = 1 ]; then
             fi
         done
     done
+    # A symlinked SKILL.md that ComposeSkills refuses is read by no pass in either
+    # twin: the bash passes only ever read regular files, and the Go passes skip a
+    # link the dispatcher refuses. The target would draw a finding from the
+    # frontmatter, line-budget and playbook passes if it were read.
+    SK="$TMP/sk"; mkdir -p "$SK/.claude/skills/ok" "$SK/.claude/skills/leak" "$TMP/out-sk"
+    skill_md "$SK/.claude/skills" ok
+    printf -- '---\nname: [unclosed\n---\n\n- playbook:evil-skill-ref\n' > "$TMP/out-sk/evil-skill.md"
+    lnk "$TMP/out-sk/evil-skill.md" "$SK/.claude/skills/leak/SKILL.md"
+    for side in $sides; do
+        vrun "$side" "$SK"; printf '%s' "$VOUT" > "$TMP/sk-$side.txt"
+        if printf '%s' "$VOUT" | grep -q 'evil'; then bad "$side: a pass read through a refused SKILL.md link: $VOUT"; else ok "$side: no pass reads through a SKILL.md link the dispatcher refuses"; fi
+        printf '%s' "$VOUT" | grep -q 'Summary: 0 error(s), 0 warning(s)' && ok "$side: a refused SKILL.md link adds no finding" || bad "$side: wrong findings with a refused SKILL.md link: $VOUT"
+    done
+    if [ "$sides" = "bash go" ]; then
+        if diff "$TMP/sk-bash.txt" "$TMP/sk-go.txt" >/dev/null; then ok "bash and Go findings identical for sk"; else bad "bash/go findings differ for sk:"; diff "$TMP/sk-bash.txt" "$TMP/sk-go.txt"; fi
+    fi
     if [ "$sides" = "bash go" ]; then
         for d in d1 d2 d3 d4 d5 d6 d7; do
             if diff "$TMP/$d-bash.txt" "$TMP/$d-go.txt" >/dev/null; then ok "bash and Go findings identical for $d"; else bad "bash/go findings differ for $d:"; diff "$TMP/$d-bash.txt" "$TMP/$d-go.txt"; fi
