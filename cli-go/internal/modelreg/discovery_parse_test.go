@@ -87,9 +87,15 @@ func TestDiscoveryParse_Table(t *testing.T) {
 			wantIDs: []string{"a-1", "b-2"}, wantNames: []string{"Name One", "Name Two"}},
 		{name: "header comment then models", in: "# header\na-1\tOne\n",
 			wantIDs: []string{"a-1"}, wantNames: []string{"One"}},
-		{name: "no tab, whole line is an id", in: "just-an-id\n",
-			wantIDs: []string{"just-an-id"}, wantNames: []string{""}},
+		// The format is tab-separated. A line with no tab is never a model, even when
+		// the whole line would pass as an id: a one-word message on standard output
+		// ("unauthorized", "loading") must not become a one-model listing.
+		{name: "no tab, whole line is an id", in: "just-an-id\n", wantDropped: 1},
+		{name: "one word on stdout", in: "unauthorized\n", wantDropped: 1},
+		{name: "one word beside real lines", in: "a-1\tOne\nloading\nb-2\tTwo\n",
+			wantIDs: []string{"a-1", "b-2"}, wantNames: []string{"One", "Two"}, wantDropped: 1},
 		{name: "no tab, line is not an id", in: "Fetching available models...\nno models here\n", wantDropped: 2},
+		{name: "only spaces between the id and the name", in: "a-1   Name One\n", wantDropped: 1},
 		{name: "tab then empty name", in: "a-1\t\n", wantIDs: []string{"a-1"}, wantNames: []string{""}},
 		{name: "cut at the FIRST tab only", in: "a-1\tName\twith\ttabs\n",
 			wantIDs: []string{"a-1"}, wantNames: []string{"Name with tabs"}},

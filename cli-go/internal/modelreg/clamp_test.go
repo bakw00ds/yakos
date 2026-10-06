@@ -203,3 +203,26 @@ func TestClamp_ClassifiesByTheEffectiveTable(t *testing.T) {
 		t.Errorf("gemini-3.1-pro-low is frontier now: (%q, %v)", got, lowered)
 	}
 }
+
+// By design, and a gap to close before the clamp is wired to a harness other than
+// claude: a model no alias maps to has no class and passes any ceiling. On agy
+// that is 13 of 18 models. The router (K-139, K-142) decides what an unranked
+// model under a ceiling means; this test pins today's behaviour so that change is
+// deliberate, and ClassOf is how a caller tells the cases apart.
+func TestClamp_UnrankedModelsPassThroughByDesign(t *testing.T) {
+	r := mustLoad(t, Options{})
+	for _, id := range []string{"claude-opus-5-5-low", "claude-sonnet-5-5-high", "gemini-3.1-pro-low", "gemini-3.7-flash-high", "gpt-oss-120b-medium"} {
+		if _, _, ranked := r.ClassOf("agy", id); ranked {
+			t.Errorf("%s has a class; the test's premise is stale", id)
+		}
+		if got, lowered := r.Clamp("agy", id, "cheap"); got != id || lowered {
+			t.Errorf("Clamp(agy, %s, cheap) = (%q, %v): an unranked model passes a ceiling", id, got, lowered)
+		}
+	}
+	// Every claude model is ranked, so nothing escapes a claude ceiling.
+	for _, id := range []string{"haiku", "sonnet", "opus", "fable"} {
+		if _, _, ranked := r.ClassOf("claude", id); !ranked {
+			t.Errorf("claude %s has no class", id)
+		}
+	}
+}

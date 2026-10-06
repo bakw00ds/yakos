@@ -383,3 +383,94 @@ func TestParseOverlay_BoundsTheNumberOfEntries(t *testing.T) {
 		t.Errorf("no cap warning: %v", warns)
 	}
 }
+
+// A refusal names what was refused by role, never by path, and the role matters:
+// "the file" is fixed with chmod on one file, "the state directory" by fixing the
+// directory. The other refusal tests check the reason and that no path leaks; this
+// one pins the subject.
+func TestLoadOverlay_RefusalNamesTheRoleOfWhatWasRefused(t *testing.T) {
+	skipIfNoPosixModes(t)
+	const prefix = "model-registry.yml (yakOS state directory) ignored: "
+	cases := []struct {
+		name  string
+		setup func(t *testing.T) string
+		want  string
+	}{
+		{"file mode", func(t *testing.T) string {
+			dir := privateStateDir(t)
+			writeOverlay(t, dir, goodOverlay, 0o666)
+			return dir
+		}, prefix + "the file is group or world writable (chmod go-w)"},
+		{"directory mode", func(t *testing.T) string {
+			dir := privateStateDir(t)
+			writeOverlay(t, dir, goodOverlay, 0o600)
+			if err := os.Chmod(dir, 0o777); err != nil {
+				t.Fatal(err)
+			}
+			return dir
+		}, prefix + "the state directory is group or world writable (chmod go-w)"},
+		{"symlinked directory", func(t *testing.T) string {
+			real := privateStateDir(t)
+			writeOverlay(t, real, goodOverlay, 0o600)
+			link := filepath.Join(t.TempDir(), "state-link")
+			if err := os.Symlink(real, link); err != nil {
+				t.Fatal(err)
+			}
+			return link
+		}, prefix + "the state directory is a symlink (possible planted-directory attack)"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, warns := LoadOverlay(c.setup(t))
+			if len(warns) != 1 || warns[0] != c.want {
+				t.Errorf("warnings = %q, want exactly [%q]", warns, c.want)
+			}
+		})
+	}
+}
+
+// The overlay's trust root is the home directory, and a relative one (HOME=.)
+// would be the working directory, which can be a cloned project: a 0644 file in a
+// 0755 directory it owns passes every ownership and mode check. A state directory
+// that is not absolute is refused, by DefaultStateDir and by LoadOverlay, the way
+// NewDiscoverer already refuses it for the cache.
+func TestLoadOverlay_RelativeStateDirIsRefused(t *testing.T) {
+	skipIfNoPosixModes(t)
+	project := t.TempDir()
+	state := filepath.Join(project, ".yakos-state")
+	if err := os.Mkdir(state, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeOverlay(t, state, "discovery:\n  admit: [agy]\nmodels:\n  haiku: {enabled: false}\n", 0o644)
+	t.Chdir(project)
+	t.Setenv("HOME", ".")
+	t.Setenv("USERPROFILE", ".")
+
+	if got := DefaultStateDir(); got != "" {
+		t.Errorf("DefaultStateDir() = %q with HOME=., want \"\" (a relative home is the working directory)", got)
+	}
+	ov, warns := LoadOverlay(".yakos-state")
+	if len(ov.Models)+len(ov.Admit) != 0 || len(warns) != 1 || !strings.Contains(warns[0], "not an absolute path") {
+		t.Errorf("a relative state directory was read: %+v %v", ov, warns)
+	}
+	r := mustLoad(t, Options{StateDir: DefaultStateDir()})
+	if e := entry(t, r, "claude", "haiku"); !e.Enabled || e.EnabledBy != FromCatalog {
+		t.Errorf("the planted overlay took effect: %+v", e)
+	}
+}
+
+// One hostile file must not flood the terminal: past maxWarningsPerSource the
+// problems are counted, not printed.
+func TestParseOverlay_CapsTheWarnings(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 3000; i++ {
+		b.WriteString("zz" + strings.Repeat("a", i%7) + string(rune('a'+i%26)) + string(rune('a'+(i/26)%26)) + string(rune('a'+(i/676)%26)) + ": 1\n")
+	}
+	_, warns := ParseOverlay([]byte(b.String()))
+	if len(warns) != maxWarningsPerSource+1 {
+		t.Fatalf("%d warnings, want %d kept plus one summary", len(warns), maxWarningsPerSource)
+	}
+	if last := warns[len(warns)-1]; !strings.Contains(last, "and ") || !strings.Contains(last, " more problems not shown") {
+		t.Errorf("summary line = %q", last)
+	}
+}

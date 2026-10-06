@@ -62,16 +62,46 @@ func asFloat(v any) (float64, bool) {
 	return 0, false
 }
 
-// firstLine collapses an error text to its first line, and bounds it, so a
-// warning never spans the log.
+// firstLine collapses an error text to its first line and makes it plain text:
+// no control or escape sequences (an OS error carries the project's path, and a
+// directory can be named with anything), at most 200 runes. A warning never spans
+// the log and never moves the operator's terminal.
 func firstLine(s string) string {
 	if i := strings.IndexByte(s, '\n'); i >= 0 {
 		s = s[:i]
 	}
-	if len(s) > 200 {
-		s = s[:200]
+	return sanitizeText(s, 200)
+}
+
+// maxWarningsPerSource bounds how many problems one file reports. A hostile file
+// with thousands of bad entries would otherwise print thousands of lines on every
+// run in its directory.
+const maxWarningsPerSource = 25
+
+// warnList collects the warnings of one source, keeps the first
+// maxWarningsPerSource and counts the rest.
+type warnList struct {
+	prefix  string
+	items   []string
+	dropped int
+}
+
+func (w *warnList) add(format string, a ...any) {
+	if len(w.items) >= maxWarningsPerSource {
+		w.dropped++
+		return
 	}
-	return s
+	w.items = append(w.items, w.prefix+fmt.Sprintf(format, a...))
+}
+
+// list returns the kept warnings and, when some were dropped, one line saying how
+// many.
+func (w *warnList) list() []string {
+	out := append([]string(nil), w.items...)
+	if w.dropped > 0 {
+		out = append(out, fmt.Sprintf("%sand %d more problems not shown", w.prefix, w.dropped))
+	}
+	return out
 }
 
 // quote renders an untrusted key for a warning: %q escapes control characters,

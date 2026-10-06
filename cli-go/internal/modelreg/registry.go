@@ -117,7 +117,14 @@ type Registry struct {
 	aliases  map[string]map[string]string // alias -> harness -> id, effective
 	aliasBy  map[string]map[string]string // alias -> harness -> catalog|overlay
 	warnings []string
+	// mergeWarnings counts the problems found while merging; past
+	// maxMergeWarnings they are counted, not kept.
+	mergeWarnings int
 }
+
+// maxMergeWarnings bounds the warnings the merge itself adds (an overlay naming
+// hundreds of unknown models, say).
+const maxMergeWarnings = 40
 
 // Load builds a Registry. The error is for a catalog that does not validate (a
 // broken build); every problem with the overlay, the project file or discovery
@@ -224,7 +231,9 @@ func (r *Registry) admit(harnesses []string, snaps map[string]Snapshot) {
 				continue
 			}
 			e := Entry{
-				ID: d.ID, Harness: h, Name: d.Name, Provider: DefaultProvider[h],
+				// The name is display text from another program: the Discoverer
+				// sanitizes it, and this is the last line for any other SnapshotSource.
+				ID: d.ID, Harness: h, Name: sanitizeText(d.Name, maxNameRunes), Provider: DefaultProvider[h],
 				Billing: BillingSubscription, BillingBy: FromCatalog,
 				Enabled: true, EnabledBy: FromOverlay, Source: FromDiscovery,
 				Availability: Availability{State: AvailUnknown},
@@ -359,7 +368,7 @@ func (r *Registry) applyAvailability(snaps map[string]Snapshot, now time.Time, f
 		if snap.Has(e.ID) {
 			st = AvailYes
 		}
-		e.Availability = Availability{State: st, Source: snap.Source, At: snap.ProbedAt, Stale: now.Sub(snap.ProbedAt) > fresh}
+		e.Availability = Availability{State: st, Source: sanitizeText(snap.Source, 64), At: snap.ProbedAt, Stale: now.Sub(snap.ProbedAt) > fresh}
 	}
 }
 
@@ -376,12 +385,23 @@ func (r *Registry) labelAliases() {
 }
 
 func (r *Registry) warn(format string, a ...any) {
+	r.mergeWarnings++
+	if r.mergeWarnings > maxMergeWarnings {
+		return
+	}
 	r.warnings = append(r.warnings, "model registry: "+fmt.Sprintf(format, a...))
 }
 
 // Warnings are the problems found while loading the overlay, the project file and
-// the merge, in a fixed order. Nothing in them is a path or a secret.
-func (r *Registry) Warnings() []string { return append([]string(nil), r.warnings...) }
+// the merge, in a fixed order, each source capped. They carry no secret, and the
+// ones about the overlay carry no path.
+func (r *Registry) Warnings() []string {
+	out := append([]string(nil), r.warnings...)
+	if r.mergeWarnings > maxMergeWarnings {
+		out = append(out, fmt.Sprintf("model registry: and %d more problems not shown", r.mergeWarnings-maxMergeWarnings))
+	}
+	return out
+}
 
 // Sources are the dated provenance notes of the catalog.
 func (r *Registry) Sources() []Source { return append([]Source(nil), r.catalog.Sources...) }

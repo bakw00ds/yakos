@@ -74,8 +74,16 @@ func OverlayPath(stateDir string) string {
 // set the environment variable statepath.Dir() honours (a committed
 // .claude/settings.json env block, K-129), and the overlay loosens a policy, so
 // letting that variable move it would let a cloned repository plant its own. It is
-// "" when there is no home directory, and the registry then reads no overlay.
-func DefaultStateDir() string { return statepath.TrustedDir() }
+// "" when there is no home directory or it is not an absolute path, and the
+// registry then reads no overlay.
+func DefaultStateDir() string {
+	// A relative home (HOME=.) would resolve against the working directory, which can
+	// be a cloned project, and a file in it passes every ownership and mode check.
+	if d := statepath.TrustedDir(); filepath.IsAbs(d) {
+		return d
+	}
+	return ""
+}
 
 // LoadOverlay reads the overlay from stateDir. A missing file is an empty overlay
 // with no warning. A file that is not trusted (a symlink, not a regular file,
@@ -86,6 +94,9 @@ func DefaultStateDir() string { return statepath.TrustedDir() }
 func LoadOverlay(stateDir string) (Overlay, []string) {
 	if stateDir == "" {
 		return Overlay{}, nil
+	}
+	if !filepath.IsAbs(stateDir) {
+		return Overlay{}, []string{overlayName + " ignored: the state directory is not an absolute path"}
 	}
 	path := OverlayPath(stateDir)
 	data, err := statepath.ReadTrusted(path, maxOverlayBytes+1)
@@ -133,11 +144,9 @@ func ParseOverlay(data []byte) (Overlay, []string) {
 	if !ok {
 		return Overlay{}, []string{overlayName + " ignored: the top level must be a mapping"}
 	}
-	var (
-		ov    Overlay
-		warns []string
-	)
-	warn := func(format string, a ...any) { warns = append(warns, overlayName+": "+fmt.Sprintf(format, a...)) }
+	var ov Overlay
+	wl := &warnList{prefix: overlayName + ": "}
+	warn := wl.add
 
 	if v, present := top["version"]; present {
 		if n, ok := v.(int); !ok || n != 1 {
@@ -160,7 +169,7 @@ func ParseOverlay(data []byte) (Overlay, []string) {
 	if v, ok := top["discovery"]; ok && v != nil {
 		ov.Admit = parseOverlayDiscovery(v, warn)
 	}
-	return ov, warns
+	return ov, wl.list()
 }
 
 func parseOverlayModels(v any, warn func(string, ...any)) map[string]ModelPatch {

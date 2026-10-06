@@ -27,7 +27,11 @@ const (
 //
 //   - A blank line or a line starting with '#' is skipped (not counted).
 //   - The line is cut at its FIRST tab. The id is the left part, the name the
-//     rest. A line with no tab is a model only when the whole line is an id.
+//     rest. A line with no tab is not a model line and is dropped and counted:
+//     the format is tab-separated and every real line has its tab, so accepting a
+//     bare word would let any one-word message ("unauthorized", "loading") that
+//     a failing or wrapped agy prints on standard output become a one-model
+//     listing and mark every other model unavailable.
 //   - The id must pass ValidID, the rule dispatch applies before an id reaches a
 //     harness's argv. A line whose id does not is dropped and counted, so a
 //     listing that changed format shows up as "N lines unusable" and not as a
@@ -41,16 +45,15 @@ const (
 func parseAgyModels(stdout []byte) (models []DiscoveredModel, dropped int) {
 	seen := make(map[string]struct{})
 	for _, raw := range strings.Split(string(stdout), "\n") {
-		line := strings.TrimSpace(raw) // also removes the \r of a CRLF listing
-		if line == "" || strings.HasPrefix(line, "#") {
+		// Only the line break is trimmed before the cut: a trailing tab is the
+		// separator of a model with no display name, not whitespace.
+		line := strings.TrimRight(raw, "\r")
+		if trimmed := strings.TrimSpace(line); trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
 		idPart, name, hasTab := strings.Cut(line, "\t")
 		id := strings.TrimSpace(idPart)
-		if !hasTab {
-			name = ""
-		}
-		if !ValidID(id) {
+		if !hasTab || !ValidID(id) {
 			dropped++
 			continue
 		}

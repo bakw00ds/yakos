@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/modelreg"
+	rt "github.com/bakw00ds/yakos/internal/runtime"
 )
 
 // ---- harness for the unit tests ---------------------------------------------------
@@ -252,8 +255,8 @@ func TestModelsList_UntrustedOverlayIsReportedAndIgnored(t *testing.T) {
 	if !strings.Contains(errs, "model-registry.yml (yakOS state directory) ignored: the file is group or world writable") {
 		t.Errorf("stderr = %q", errs)
 	}
-	if strings.Contains(out, "haiku  claude  subscription  disabled") || !strings.Contains(out, "unknown") {
-		t.Errorf("the untrusted overlay took effect:\n%s", out)
+	if got := listRows(out)["haiku"]; len(got) < 4 || got[3] != "unknown" {
+		t.Errorf("the untrusted overlay took effect (haiku row %q):\n%s", got, out)
 	}
 	if strings.Contains(errs, r.stateDir) {
 		t.Errorf("the warning names the path: %q", errs)
@@ -633,5 +636,237 @@ func TestModelsProbeThroughTheRouterWithNoAgy(t *testing.T) {
 	code, out := runYakos(t, t.TempDir(), nil, "models", "probe", "--harness", "agy")
 	if code != 0 || !strings.Contains(out, "agy: skipped, CLI not found on PATH") {
 		t.Errorf("exit %d\n%s", code, out)
+	}
+}
+
+// models has its own row in the flag registry that the help-versus-parser test
+// reads, with every flag the command parses. A missing row leaves that test with
+// nothing to compare, and nothing else notices (TestBudgetFlagsRegistered is the
+// model).
+func TestModelsFlagsRegistered(t *testing.T) {
+	var spec []string
+	found := false
+	for _, e := range commandRegistry {
+		if e.Name != "models" {
+			continue
+		}
+		found = true
+		if e.HelpFn == nil {
+			t.Error("models has no HelpFn in the registry")
+		}
+		for _, s := range e.Specs.Specs {
+			spec = append(spec, s.Name)
+		}
+	}
+	if !found {
+		t.Fatal("models is not in commandRegistry")
+	}
+	for _, want := range []string{"--json", "--harness", "--project", "--timeout"} {
+		have := false
+		for _, s := range spec {
+			have = have || s == want
+		}
+		if !have {
+			t.Errorf("models flag %s not registered (have %v)", want, spec)
+		}
+	}
+}
+
+// `yakos help` is the list operators read to learn a command exists: models must
+// be in one of its groups with a one-line description.
+func TestModelsIsListedInTheHelp(t *testing.T) {
+	in := false
+	for _, g := range helpGroups {
+		for _, c := range g.Commands {
+			in = in || c == "models"
+		}
+	}
+	if !in {
+		t.Error("models is in no help group")
+	}
+	if builtinDescs["models"] == "" {
+		t.Error("models has no one-line description in builtinDescs")
+	}
+}
+
+// ---- the environment the listing runs in -------------------------------------------
+
+// agy models is a read-only listing. It sees how to find its login and the network
+// and agy's own credential families, and none of what dispatch forwards for an
+// agent's git workflow or yakOS's own settings.
+func TestModelsDiscoveryEnv(t *testing.T) {
+	environ := []string{
+		"PATH=/usr/bin", "HOME=/home/u", "USER=u", "LANG=C", "LC_ALL=C", "XDG_CONFIG_HOME=/x", "TMPDIR=/t", "TERM=xterm",
+		"HTTPS_PROXY=http://p", "NO_PROXY=x", "SSL_CERT_FILE=/c", "Path=C:\\bin", "SystemRoot=C:\\Windows",
+		"GEMINI_API_KEY=k1", "ANTIGRAVITY_API_KEY=k2", "GOOGLE_API_KEY=k3", "GCLOUD_PROJECT=p",
+		// not for a listing:
+		"GH_TOKEN=t", "GITHUB_TOKEN=t", "SSH_AUTH_SOCK=/s", "GIT_SSH_COMMAND=x", "GIT_ASKPASS=x", "NODE_OPTIONS=--x",
+		"YAKOS_ROOT=/r", "YAKOS_DISPATCH_LOG=/d", "YAKOS_DISPATCH_ENV_PASSTHROUGH=*", "ANTHROPIC_API_KEY=a", "OPENAI_API_KEY=o",
+		"AWS_SECRET_ACCESS_KEY=s", "SHELL=/bin/zsh", "PWD=/proj", "CI=true", "COLORTERM=truecolor", "TERM_PROGRAM=x",
+		"=C:=C:\\", "NOEQUALS", "EMPTYVALUE=",
+	}
+	got := map[string]bool{}
+	for _, kv := range modelsDiscoveryEnv(environ) {
+		k, _, _ := strings.Cut(kv, "=")
+		got[k] = true
+	}
+	for _, k := range []string{"PATH", "HOME", "USER", "LANG", "LC_ALL", "XDG_CONFIG_HOME", "TMPDIR", "TERM", "HTTPS_PROXY", "NO_PROXY",
+		"SSL_CERT_FILE", "Path", "SystemRoot", "GEMINI_API_KEY", "ANTIGRAVITY_API_KEY", "GOOGLE_API_KEY", "GCLOUD_PROJECT"} {
+		if !got[k] {
+			t.Errorf("%s was dropped; agy needs it to find its login or the network", k)
+		}
+	}
+	for _, k := range []string{"GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "GIT_SSH_COMMAND", "GIT_ASKPASS", "NODE_OPTIONS", "YAKOS_ROOT",
+		"YAKOS_DISPATCH_LOG", "YAKOS_DISPATCH_ENV_PASSTHROUGH", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "AWS_SECRET_ACCESS_KEY",
+		"SHELL", "PWD", "CI", "COLORTERM", "TERM_PROGRAM", "NOEQUALS"} {
+		if got[k] {
+			t.Errorf("%s reached a model listing", k)
+		}
+	}
+	if len(modelsDiscoveryEnv(nil)) != 0 {
+		t.Error("an empty environment must stay empty")
+	}
+}
+
+// The listing never sees more than dispatch lets agy see: a variable dispatch
+// withholds from agy is not one discovery may add.
+func TestModelsDiscoveryEnvIsASubsetOfWhatDispatchGivesAgy(t *testing.T) {
+	var environ []string
+	for k := range modelsEnvNames {
+		environ = append(environ, k+"=v")
+	}
+	for _, p := range modelsEnvPrefixes {
+		environ = append(environ, p+"X=v")
+	}
+	environ = append(environ, "ANTHROPIC_API_KEY=a", "GH_TOKEN=t", "YAKOS_ROOT=/r", "UNRELATED=1")
+	dispatch := map[string]bool{}
+	for _, kv := range rt.FilterEnvFor("agy", environ) {
+		dispatch[kv] = true
+	}
+	for _, kv := range modelsDiscoveryEnv(environ) {
+		if !dispatch[kv] {
+			t.Errorf("%q reaches a model listing but dispatch withholds it from agy", kv)
+		}
+	}
+}
+
+// End to end through the router with a fake agy on PATH: the child sees agy's own
+// credential and the basics, and none of the variables dispatch would have
+// forwarded for a git workflow.
+func TestModelsProbeThroughTheRouterGivesAgyANarrowEnvironment(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script stand-in for agy")
+	}
+	bin := t.TempDir()
+	dump := filepath.Join(t.TempDir(), "env.txt")
+	script := "#!/bin/sh\nenv > '" + dump + "'\nprintf 'gemini-3.8-flash-high\\tGemini 3.8 Flash (High)\\n'\n"
+	if err := os.WriteFile(filepath.Join(bin, "agy"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	code, out := runYakos(t, t.TempDir(), []string{
+		"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + home, "ANTIGRAVITY_API_KEY=agy-key",
+		"GH_TOKEN=ghp_sentinel", "GITHUB_TOKEN=ghs_sentinel", "SSH_AUTH_SOCK=/tmp/sock", "NODE_OPTIONS=--require=x",
+		"ANTHROPIC_API_KEY=sk-sentinel", "GIT_ASKPASS=x", "YAKOS_SENTINEL=1",
+	}, "models", "probe", "--harness", "agy")
+	if code != 0 || !strings.Contains(out, "agy: updated, 1 models listed") {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	raw, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatalf("the fake agy did not run: %v", err)
+	}
+	env := string(raw)
+	for _, want := range []string{"ANTIGRAVITY_API_KEY=agy-key", "HOME=" + home} {
+		if !strings.Contains(env, want+"\n") {
+			t.Errorf("the child lacks %q:\n%s", want, env)
+		}
+	}
+	for _, bad := range []string{"GH_TOKEN", "GITHUB_TOKEN", "SSH_AUTH_SOCK", "NODE_OPTIONS", "ANTHROPIC_API_KEY", "GIT_ASKPASS", "YAKOS_"} {
+		if strings.Contains(env, bad) {
+			t.Errorf("%s reached the model listing:\n%s", bad, env)
+		}
+	}
+	// And the cache landed in the trusted state directory under HOME, 0600.
+	if fi, err := os.Stat(filepath.Join(home, ".yakos-state", modelreg.DiscoveryFileName)); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("cache: %v %v", fi, err)
+	}
+}
+
+// ---- shadow mode ---------------------------------------------------------------------
+
+// With a bash tree next to the binary and YAKOS_IMPL unset, the router is in shadow
+// mode and hands every command to bash, except the ones with no bash twin. This
+// builds that layout (a stub cli/yakos beside a copy of the test binary), proves a
+// control command reaches the stub, and that models does not.
+func TestModelsInShadowModeStillReachesGo(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell stub for the bash tree")
+	}
+	root := t.TempDir()
+	for _, d := range []string{"bin", "cli"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "cli", "yakos"), []byte("#!/bin/sh\necho STUB-BASH-REACHED \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	copyExe(t, os.Args[0], filepath.Join(root, "bin", "yakos"))
+
+	run := func(args ...string) (int, string) {
+		t.Helper()
+		b, _ := json.Marshal(args)
+		cmd := exec.Command(filepath.Join(root, "bin", "yakos"), "-test.run=^TestBudgetHelperMain$")
+		cmd.Env = []string{"YAKOS_TEST_MAIN_ARGS=" + string(b), "HOME=" + t.TempDir(), "PATH=/usr/bin:/bin"}
+		var out bytes.Buffer
+		cmd.Stdout, cmd.Stderr = &out, &out
+		err := cmd.Run()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else if err != nil {
+			t.Fatal(err)
+		}
+		return code, out.String()
+	}
+
+	if _, out := run("cost"); !strings.Contains(out, "STUB-BASH-REACHED") {
+		t.Fatalf("setup: shadow mode did not hand a plain command to the bash tree:\n%s", out)
+	}
+	for _, c := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"models", "--help"}, "yakos models <list|show|probe>"},
+		{[]string{"models", "list", "--harness", "claude"}, "frontier"},
+	} {
+		code, out := run(c.args...)
+		if strings.Contains(out, "STUB-BASH-REACHED") {
+			t.Errorf("%v reached the bash tree in shadow mode:\n%s", c.args, out)
+		}
+		if code != 0 || !strings.Contains(out, c.want) {
+			t.Errorf("%v: exit %d, want output containing %q:\n%s", c.args, code, c.want, out)
+		}
+	}
+}
+
+func copyExe(t *testing.T, from, to string) {
+	t.Helper()
+	src, err := os.Open(from)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = src.Close() }()
+	dst, err := os.OpenFile(to, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		_ = dst.Close()
+		t.Fatal(err)
+	}
+	if err := dst.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

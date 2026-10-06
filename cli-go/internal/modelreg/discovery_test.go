@@ -397,11 +397,34 @@ func TestDiscoveryProbe_RunsExactlyAgyModelsInAPrivateDirectory(t *testing.T) {
 	if !filepath.IsAbs(sawDir) || sawDir == cwd || sawDir == "" || sawDir == "." {
 		t.Errorf("working directory %q must be a fresh absolute directory, not the caller's (%q)", sawDir, cwd)
 	}
-	if filepath.Dir(sawDir) != filepath.Clean(os.TempDir()) {
-		t.Errorf("working directory %q is not directly under the temp directory %q", sawDir, os.TempDir())
+	// Inside the secured state directory, not the temp directory: TMPDIR follows
+	// the process environment, which a project can set, and whoever owns a
+	// directory's parent can swap it after it is made.
+	if filepath.Dir(sawDir) != filepath.Clean(rig.stateDir) || !strings.HasPrefix(filepath.Base(sawDir), ".discover-") {
+		t.Errorf("working directory %q is not a .discover-* directory directly under the state directory %q", sawDir, rig.stateDir)
 	}
 	if _, err := os.Stat(sawDir); !os.IsNotExist(err) {
 		t.Errorf("the private working directory must be removed after the run, stat err = %v", err)
+	}
+}
+
+// With no state directory (memory-only discovery) the temp directory is the only
+// place left for the private working directory.
+func TestDiscoveryProbe_WithoutAStateDirTheTempDirIsUsed(t *testing.T) {
+	var sawDir string
+	rig := newDiscRig(t, func(c *DiscovererConfig) { c.StateDir = "" })
+	rig.runner.fn = func(_ context.Context, spec RunSpec) (RunResult, error) {
+		sawDir = spec.Dir
+		return discListing("model-a"), nil
+	}
+	if _, err := rig.d.Probe(context.Background(), "agy"); err != nil {
+		t.Fatal(err)
+	}
+	if filepath.Dir(sawDir) != filepath.Clean(os.TempDir()) || !strings.HasPrefix(filepath.Base(sawDir), "yakos-modelreg-") {
+		t.Errorf("working directory %q, want a yakos-modelreg-* directory directly under %q", sawDir, os.TempDir())
+	}
+	if _, err := os.Stat(sawDir); !os.IsNotExist(err) {
+		t.Errorf("the working directory outlived the run: %v", err)
 	}
 }
 
@@ -1078,7 +1101,7 @@ func TestDiscoveryKick_ReturnsAtOnceWithAHungRunner(t *testing.T) {
 	}()
 	select {
 	case el := <-returned:
-		if el > 250*time.Millisecond {
+		if el > time.Second { // a blocked Kick would wait out the rig Timeout (5s)
 			t.Errorf("Kick took %v with a hung runner", el)
 		}
 	case <-time.After(time.Second):

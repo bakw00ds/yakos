@@ -3,6 +3,7 @@ package modelreg
 import (
 	"bytes"
 	"encoding/json"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -510,5 +511,103 @@ func TestLoad_BrokenCatalogIsAnError(t *testing.T) {
 	embeddedCatalogJSON = []byte(`{"schema": 7}`)
 	if _, err := Load(Options{}); err == nil {
 		t.Error("Load must fail when the embedded catalog does not validate")
+	}
+}
+
+// The overlay parser already refuses a claude column, and buildAliases refuses it
+// again. The second layer matters for a caller that builds an Overlay by hand (an
+// editing surface that does not go through the YAML parser) and for a parser
+// change that forgets the rule: the claude CLI takes tier names, so the claude
+// column is the catalog's alone.
+func TestBuildAliasesNeverMovesTheClaudeColumn(t *testing.T) {
+	r := mustLoad(t, Options{})
+	r.buildAliases(map[string]map[string]string{
+		"cheap":    {"claude": "fable", "codex": "gpt-5.6-luna"},
+		"frontier": {"claude": "haiku"},
+	})
+	if id, _ := r.ResolveAlias("claude", "cheap"); id != "haiku" {
+		t.Errorf("claude cheap = %q, want haiku", id)
+	}
+	if id, _ := r.ResolveAlias("claude", "frontier"); id != "fable" {
+		t.Errorf("claude frontier = %q, want fable", id)
+	}
+	if src := r.AliasSource("claude", "cheap"); src != FromCatalog {
+		t.Errorf("claude cheap came from %q, want the catalog", src)
+	}
+	// The same call did apply the codex mapping, so the test is not vacuous.
+	if id, _ := r.ResolveAlias("codex", "cheap"); id != "gpt-5.6-luna" {
+		t.Errorf("codex cheap = %q, want the overlay's gpt-5.6-luna", id)
+	}
+}
+
+// rule:cache-stability. The warnings are the one output of Load that depends on the
+// order maps are walked in (the overlay's models, its aliases, the top-level keys, the
+// project's keys), and Go randomizes map order. TestLoad_SameInputsSameBytes
+// has no warnings and so cannot see an unsorted walk; this one has dozens and
+// compares many loads.
+func TestLoad_WarningOrderIsStable(t *testing.T) {
+	dir := privateStateDir(t)
+	var b strings.Builder
+	b.WriteString("zzz: 1\naaa: 2\nmmm: 3\nmodels:\n")
+	for _, id := range []string{"unknown-z", "unknown-a", "unknown-m", "unknown-b", "unknown-y", "unknown-c", "unknown-x", "unknown-d", "unknown-w", "unknown-e"} {
+		b.WriteString("  " + id + ": {enabled: false}\n")
+	}
+	b.WriteString("aliases:\n  best: {codex: nope-z, agy: nope-y}\n  cheap: {codex: nope-a, agy: nope-b}\n  frontier: {codex: nope-c}\n")
+	writeOverlay(t, dir, b.String(), 0o600)
+	project := writeProject(t, "models:\n  zz: 1\n  aa: 2\n  mm: 3\n  disable: [none-z, none-a, none-m]\n")
+
+	first := mustLoad(t, Options{StateDir: dir, Project: project}).Warnings()
+	if len(first) < 20 {
+		t.Fatalf("only %d warnings; the test needs many to see an order: %v", len(first), first)
+	}
+	for i := 0; i < 40; i++ {
+		got := mustLoad(t, Options{StateDir: dir, Project: project}).Warnings()
+		if strings.Join(got, "\n") != strings.Join(first, "\n") {
+			t.Fatalf("load %d produced the warnings in another order:\n%s\n--- vs ---\n%s", i, strings.Join(first, "\n"), strings.Join(got, "\n"))
+		}
+	}
+	// And the order is the sorted one, not merely a repeated one.
+	var unknown []string
+	for _, w := range first {
+		if strings.Contains(w, "models.unknown-") {
+			unknown = append(unknown, w)
+		}
+	}
+	if len(unknown) != 10 || !sort.StringsAreSorted(unknown) {
+		t.Errorf("the unknown-model warnings are not in sorted order: %v", unknown)
+	}
+}
+
+// A SnapshotSource other than the Discoverer may hand over any text. The registry
+// is what prints it, so it makes the text plain: names and the source word lose
+// escape sequences and control and format characters.
+func TestLoad_AdmittedNamesAndSourcesAreSanitized(t *testing.T) {
+	dir := privateStateDir(t)
+	writeOverlay(t, dir, "discovery:\n  admit: [agy]\n", 0o600)
+	snaps := fakeSnaps{"agy": {
+		Harness: "agy", Source: "agy\x1b[31m models\x07", ProbedAt: t0,
+		Models: []DiscoveredModel{{ID: "new-model-low", Name: "N\x1b]0;owned\x07ew \xe2\x80\xaeName\n"}, {ID: "gemini-3.8-flash-low", Name: "x"}},
+	}}
+	r := mustLoad(t, Options{StateDir: dir, Snapshots: snaps, Now: func() time.Time { return t0 }})
+	e := entry(t, r, "agy", "new-model-low")
+	if e.Name != "New Name" {
+		t.Errorf("Name = %q, want the sanitized \"New Name\"", e.Name)
+	}
+	if got := entry(t, r, "agy", "gemini-3.8-flash-low").Availability.Source; got != "agy models" {
+		t.Errorf("Source = %q, want \"agy models\"", got)
+	}
+}
+
+func TestLoad_CapsTheMergeWarnings(t *testing.T) {
+	dir := privateStateDir(t)
+	var b strings.Builder
+	b.WriteString("models:\n")
+	for i := 0; i < 300; i++ {
+		b.WriteString("  unknown-" + string(rune('a'+i%26)) + string(rune('a'+(i/26)%26)) + ": {enabled: false}\n")
+	}
+	writeOverlay(t, dir, b.String(), 0o600)
+	w := mustLoad(t, Options{StateDir: dir}).Warnings()
+	if len(w) != maxMergeWarnings+1 || !strings.Contains(w[len(w)-1], "and 260 more problems not shown") {
+		t.Fatalf("%d warnings, last %q", len(w), w[len(w)-1])
 	}
 }

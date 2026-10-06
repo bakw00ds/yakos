@@ -347,3 +347,27 @@ func TestClassRank(t *testing.T) {
 		}
 	}
 }
+
+// A stray closing brace after the document is trailing data too.
+func TestParseCatalogRejectsATrailingBrace(t *testing.T) {
+	for _, tail := range []string{"}", "]", " {}", "\n\"x\"", " 1"} {
+		if _, err := ParseCatalog(append(encode(t, minimalCatalog()), []byte(tail)...)); err == nil || !strings.Contains(err.Error(), "trailing") {
+			t.Errorf("tail %q: err = %v, want trailing data refused", tail, err)
+		}
+	}
+}
+
+// rule:cache-stability in spirit: two bad price fields always give the same
+// error, not whichever a map walk reaches first.
+func TestPricingValidateErrorIsDeterministic(t *testing.T) {
+	bad := Pricing{Input: -1, Output: -2, CacheRead: -3, CacheWrite: -4}
+	first := bad.Validate()
+	if first == nil || !strings.Contains(first.Error(), "cost.input") {
+		t.Fatalf("err = %v, want the first field in order (input)", first)
+	}
+	for i := 0; i < 200; i++ {
+		if err := bad.Validate(); err == nil || err.Error() != first.Error() {
+			t.Fatalf("error text changed between calls: %v vs %v", err, first)
+		}
+	}
+}

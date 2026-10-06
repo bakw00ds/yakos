@@ -10,6 +10,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
 // Discovery asks a harness's own command which models the signed-in account can
@@ -46,6 +48,12 @@ const (
 	maxListingStdout = 256 << 10
 	maxListingStderr = 16 << 10
 )
+
+// probeGrace is how long a probe whose context has ended waits for its work to
+// notice, before it reports failure anyway: the run's own wait delay plus a
+// second for the process to be reaped and the output parsed. A variable so a test
+// need not wait three seconds.
+var probeGrace = waitDelay + time.Second
 
 // ProbeStatus is how a probe ended.
 type ProbeStatus string
@@ -140,8 +148,15 @@ type probeCall struct {
 	// last one gives up. A background refresh (Kick) counts as one that never
 	// leaves. Guarded by Discoverer.mu.
 	waiters int
-	report  ProbeReport // set before done is closed
-	err     error
+	// dead is set, under Discoverer.mu and together with the cancel, when the last
+	// caller gave up. The call stays registered until its process has ended (a
+	// descendant holding the pipes can take waitDelay), and a caller that arrives
+	// meanwhile must not join it: it would be told "cancelled" though it never
+	// cancelled anything. A dead call is treated as absent; the next probe starts
+	// a fresh one beside it.
+	dead   bool
+	report ProbeReport // set before done is closed
+	err    error
 }
 
 var _ SnapshotSource = (*Discoverer)(nil)
@@ -231,7 +246,7 @@ func (d *Discoverer) Probe(ctx context.Context, harness string) (ProbeReport, er
 	}
 	d.mu.Lock()
 	call := d.inflight[harness]
-	if call == nil {
+	if call == nil || call.dead {
 		call = d.startLocked(harness)
 	}
 	call.waiters++
@@ -243,11 +258,14 @@ func (d *Discoverer) Probe(ctx context.Context, harness string) (ProbeReport, er
 	case <-ctx.Done():
 		d.mu.Lock()
 		call.waiters--
-		last := call.waiters == 0
-		d.mu.Unlock()
-		if last {
-			call.cancel() // nobody is waiting for it any more: stop the process
+		if call.waiters == 0 {
+			// Nobody is waiting for it any more: stop the process. The decision and
+			// the mark are made under the lock, so no other caller can join between
+			// "the last one left" and "the call is cancelled".
+			call.dead = true
+			call.cancel()
 		}
+		d.mu.Unlock()
 		return d.abandoned(harness, ctx.Err())
 	}
 }
@@ -265,7 +283,7 @@ func (d *Discoverer) Kick(harness string) {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.inflight[harness] != nil {
+	if c := d.inflight[harness]; c != nil && !c.dead {
 		return
 	}
 	if t, ok := d.failedAt[harness]; ok && d.cfg.Now().Sub(t) < d.cfg.FailBackoff {
@@ -310,25 +328,55 @@ func (d *Discoverer) startLocked(harness string) *probeCall {
 // run does one probe and publishes its result. It never panics out: a parser or
 // a cache bug must not take a daemon down.
 func (d *Discoverer) run(ctx context.Context, harness string, call *probeCall) {
+	type outcome struct {
+		rep ProbeReport
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		var o outcome
+		defer func() {
+			if r := recover(); r != nil {
+				o = outcome{
+					ProbeReport{Harness: harness, Status: ProbeFailed, Reason: "internal error while listing models"},
+					fmt.Errorf("modelreg: %s discovery: internal error: %v", harness, r),
+				}
+			}
+			done <- o
+		}()
+		o.rep, o.err = d.discover(ctx, harness)
+	}()
 	var (
 		rep ProbeReport
 		err error
 	)
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				rep = ProbeReport{Harness: harness, Status: ProbeFailed, Reason: "internal error while listing models"}
-				err = fmt.Errorf("modelreg: %s discovery: internal error: %v", harness, r)
+	select {
+	case o := <-done:
+		rep, err = o.rep, o.err
+	case <-ctx.Done():
+		// discover ends by itself soon after ctx does: the runner kills the process
+		// and returns, and a sign-in check that honours ctx returns. Give it a
+		// moment, but a sign-in function that ignores its context must not hold
+		// the probe, and every caller waiting for it, for as long as it likes.
+		select {
+		case o := <-done:
+			rep, err = o.rep, o.err
+		case <-time.After(probeGrace):
+			rep = ProbeReport{Harness: harness}
+			if snap, ok := d.Snapshot(harness); ok {
+				rep.Snapshot = snap
 			}
-		}()
-		rep, err = d.discover(ctx, harness)
-	}()
+			rep, err = probeFailed(rep, "the sign-in check or agy models did not stop when asked to", ctx.Err())
+		}
+	}
 	stoppedByCaller := errors.Is(ctx.Err(), context.Canceled)
 	call.cancel()
 
 	d.mu.Lock()
 	call.report, call.err = rep, err
-	delete(d.inflight, harness)
+	if d.inflight[harness] == call { // a newer call may have replaced a dead one
+		delete(d.inflight, harness)
+	}
 	switch {
 	case rep.Status == ProbeUpdated:
 		delete(d.failedAt, harness)
@@ -379,7 +427,7 @@ func (d *Discoverer) discover(ctx context.Context, harness string) (ProbeReport,
 		return probeSkipped(rep, "refusing a relative PATH entry for agy")
 	}
 
-	dir, err := os.MkdirTemp("", "yakos-modelreg-*")
+	dir, err := d.workDir()
 	if err != nil {
 		return probeFailed(rep, "cannot create a private working directory for agy", err)
 	}
@@ -448,6 +496,21 @@ func (d *Discoverer) discover(ctx context.Context, harness string) (ProbeReport,
 		}
 	}
 	return rep, nil
+}
+
+// workDir makes the private directory agy runs in. It goes inside the secured
+// state directory when there is one: the process's temp directory follows TMPDIR,
+// which a project's environment can set, and whoever owns the parent of a
+// directory can swap it after it is made. The state directory is owner-only
+// (statepath.SecureDir refuses a symlink, another owner, and loosens the mode),
+// so nobody else can. Without a state directory the temp directory is used.
+func (d *Discoverer) workDir() (string, error) {
+	if d.cfg.StateDir != "" && statepath.SecureDir(d.cfg.StateDir) == nil {
+		if dir, err := os.MkdirTemp(d.cfg.StateDir, ".discover-*"); err == nil {
+			return dir, nil
+		}
+	}
+	return os.MkdirTemp("", "yakos-modelreg-*")
 }
 
 // cloneReport copies r's slices so callers that shared one probe cannot change

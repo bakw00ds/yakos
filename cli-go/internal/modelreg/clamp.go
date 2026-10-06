@@ -13,6 +13,16 @@ package modelreg
 // A model with no class on its harness (a full id nothing maps an alias to, or
 // anything on codex, whose column is empty) has no rank and is never changed:
 // better to leave a model alone than to guess its cost.
+//
+// That is a gap for any caller that enforces a ceiling as a cost control rather
+// than a convenience. On claude every model has a class, so nothing escapes
+// today; on agy only the five models the aliases name have one, and an unranked
+// sibling (claude-opus-5-5-low under a `cheap` ceiling) passes unchanged. A
+// caller that wires Clamp to a harness other than claude (the router, K-139,
+// K-142) must decide what an unranked model under a ceiling means (refuse it, or
+// replace it with the ceiling's model) and use ClassOf to tell the two cases
+// apart; this package does not guess. TestClamp_UnrankedModelsPassThroughByDesign
+// pins the behaviour so a change to it is deliberate.
 
 // ClassOf returns the tier class of id on harness: the alias that maps to it, and
 // that alias's rank. When several aliases map to the same id the highest rank

@@ -5,6 +5,7 @@ import (
 	_ "embed" // model-catalog.json
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"regexp"
 	"strings"
@@ -157,7 +158,9 @@ func ParseCatalog(data []byte) (*Catalog, error) {
 	if err := dec.Decode(&c); err != nil {
 		return nil, fmt.Errorf("modelreg: parse catalog: %w", err)
 	}
-	if dec.More() {
+	// A second Decode must find the end of the input: More() would miss a stray
+	// closing brace.
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
 		return nil, fmt.Errorf("modelreg: parse catalog: trailing data after the document")
 	}
 	if err := c.validate(); err != nil {
@@ -315,9 +318,13 @@ const maxPricePerMillion = 100000
 // Validate reports a price that is not a finite, non-negative number of dollars
 // per million tokens within the sanity bound. Input and output are required.
 func (p Pricing) Validate() error {
-	for name, v := range map[string]float64{"input": p.Input, "output": p.Output, "cache_read": p.CacheRead, "cache_write": p.CacheWrite} {
-		if math.IsNaN(v) || math.IsInf(v, 0) || v < 0 || v > maxPricePerMillion {
-			return fmt.Errorf("cost.%s must be between 0 and %d dollars per million tokens", name, maxPricePerMillion)
+	// A fixed order, so two bad fields always give the same error text.
+	for _, f := range []struct {
+		name string
+		v    float64
+	}{{"input", p.Input}, {"output", p.Output}, {"cache_read", p.CacheRead}, {"cache_write", p.CacheWrite}} {
+		if math.IsNaN(f.v) || math.IsInf(f.v, 0) || f.v < 0 || f.v > maxPricePerMillion {
+			return fmt.Errorf("cost.%s must be between 0 and %d dollars per million tokens", f.name, maxPricePerMillion)
 		}
 	}
 	if p.Input == 0 && p.Output == 0 {

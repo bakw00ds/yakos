@@ -199,3 +199,41 @@ func TestReadTrusted_OwnerCheckDefaultsToTheRealOne(t *testing.T) {
 		t.Fatalf("a file this user owns must be trusted: %v", err)
 	}
 }
+
+// ReadTrusted vets the path with Lstat and then opens it. If another file takes the
+// path's place in between, the file read is not the file vetted. The replacement
+// here is a regular file of the same owner and mode, so only the same-file
+// comparison on the open descriptor can refuse it: the symlink, owner and mode
+// checks all pass.
+func TestReadTrusted_RefusesAFileSwappedAfterTheCheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("rename over an entry another handle may hold")
+	}
+	_, path := trustedState(t, "default-runtime", "codex\n")
+	restore := afterCheck
+	t.Cleanup(func() { afterCheck = restore })
+	swapped := false
+	afterCheck = func(p string) {
+		tmp := p + ".swap"
+		if err := os.WriteFile(tmp, []byte("agy\n"), 0o600); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := os.Rename(tmp, p); err != nil {
+			t.Error(err)
+			return
+		}
+		swapped = true
+	}
+
+	data, err := ReadTrusted(path, 256)
+	if !swapped {
+		t.Fatal("the hook did not run between the check and the open")
+	}
+	if err == nil {
+		t.Fatalf("read %q from a file swapped after it was vetted", data)
+	}
+	if !IsUntrusted(err) || !strings.Contains(err.Error(), "changed while it was being opened") {
+		t.Errorf("err = %v, want an untrusted error saying the file changed while it was opened", err)
+	}
+}

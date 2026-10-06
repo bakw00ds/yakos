@@ -161,12 +161,12 @@ func TestDiscoveryExec_RunsInAPrivateDirectoryOfItsOwn(t *testing.T) {
 	}
 	ran := strings.TrimSpace(string(raw))
 	realCaller, _ := filepath.EvalSymlinks(callerDir)
-	realTemp, _ := filepath.EvalSymlinks(os.TempDir())
+	realState, _ := filepath.EvalSymlinks(rig.stateDir)
 	if ran == realCaller || ran == callerDir {
 		t.Errorf("agy ran in the caller's directory %q", ran)
 	}
-	if filepath.Dir(ran) != realTemp || !strings.HasPrefix(filepath.Base(ran), "yakos-modelreg-") {
-		t.Errorf("agy ran in %q, want a yakos-modelreg-* directory directly under %q", ran, realTemp)
+	if filepath.Dir(ran) != realState || !strings.HasPrefix(filepath.Base(ran), ".discover-") {
+		t.Errorf("agy ran in %q, want a .discover-* directory directly under the state directory %q", ran, realState)
 	}
 	if _, err := os.Stat(ran); !os.IsNotExist(err) {
 		t.Errorf("the private directory %q outlived the probe (err=%v)", ran, err)
@@ -265,7 +265,7 @@ func TestDiscoveryExec_KickWithARealHungAgyReturnsAtOnce(t *testing.T) {
 	rig := newDiscRig(t, discReal(script, 2*time.Second))
 	start := time.Now()
 	rig.d.Kick("agy")
-	if el := time.Since(start); el > 250*time.Millisecond {
+	if el := time.Since(start); el > time.Second { // a blocked Kick would wait out the 2s Timeout
 		t.Errorf("Kick took %v with a hung agy", el)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

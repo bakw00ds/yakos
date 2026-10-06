@@ -79,17 +79,15 @@ func LoadProject(project string) (ProjectPolicy, []string) {
 func ParseProject(data []byte) (ProjectPolicy, []string) {
 	var doc map[string]any
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return ProjectPolicy{}, []string{".yakos.yml: cannot parse (the models: key is ignored): " + firstLine(err.Error())}
+		return ProjectPolicy{}, []string{".yakos.yml: cannot parse, so a models: disable list in it is NOT applied: " + firstLine(err.Error())}
 	}
 	raw, ok := doc["models"]
 	if !ok || raw == nil {
 		return ProjectPolicy{}, nil
 	}
-	var (
-		pol   ProjectPolicy
-		warns []string
-	)
-	warn := func(format string, a ...any) { warns = append(warns, ".yakos.yml models: "+fmt.Sprintf(format, a...)) }
+	var pol ProjectPolicy
+	wl := &warnList{prefix: ".yakos.yml models: "}
+	warn := wl.add
 	m, ok := asStringMap(raw)
 	if !ok {
 		return ProjectPolicy{}, []string{".yakos.yml models: want a mapping with a disable: list; ignored"}
@@ -102,7 +100,7 @@ func ParseProject(data []byte) (ProjectPolicy, []string) {
 	list, ok := m["disable"].([]any)
 	if _, present := m["disable"]; present && !ok {
 		warn("disable: want a list of model ids; ignored")
-		return pol, warns
+		return pol, wl.list()
 	}
 	seen := map[string]bool{}
 	for _, el := range list {
@@ -120,5 +118,5 @@ func ParseProject(data []byte) (ProjectPolicy, []string) {
 			pol.Disable = append(pol.Disable, id)
 		}
 	}
-	return pol, warns
+	return pol, wl.list()
 }

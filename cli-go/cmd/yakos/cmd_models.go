@@ -13,7 +13,6 @@ import (
 	"github.com/bakw00ds/yakos/internal/auth"
 	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/modelreg"
-	"github.com/bakw00ds/yakos/internal/runtime"
 )
 
 // Exit-code contract of `yakos models` (docs/routing.md, "Model registry"):
@@ -79,12 +78,52 @@ func defaultModelsEnv() modelsEnv {
 			return modelreg.NewDiscoverer(modelreg.DiscovererConfig{
 				StateDir: stateDir,
 				Probe:    modelsSignInProbe,
-				// The child sees what dispatch would let agy see, and nothing else.
-				Env:     runtime.FilterEnvFor("agy", os.Environ()),
-				Timeout: timeout,
+				Env:      modelsDiscoveryEnv(os.Environ()),
+				Timeout:  timeout,
 			})
 		},
 	}
+}
+
+// modelsEnvNames and modelsEnvPrefixes are what a read-only model listing may see
+// of the environment: how to find the program and its login (PATH, HOME, the
+// platform basics), how to reach the network (proxy and certificate variables),
+// and agy's own credential families (the ones dispatch lets agy see). It is a
+// strict subset of runtime.FilterEnvFor("agy", ...), a test keeps it one: the
+// dispatch allowlist also carries GH_TOKEN, GITHUB_TOKEN, SSH_AUTH_SOCK, GIT_*,
+// NODE_OPTIONS and YAKOS_* because an agent doing a task needs git, and a listing
+// needs none of them, which matters once discovery runs unattended.
+var modelsEnvNames = map[string]bool{
+	"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "TERM": true, "LANG": true, "TZ": true, "TMPDIR": true,
+	"SYSTEMROOT": true, "WINDIR": true, "TEMP": true, "TMP": true, "USERPROFILE": true, "APPDATA": true,
+	"LOCALAPPDATA": true, "PROGRAMDATA": true, "PATHEXT": true, "COMSPEC": true, "SYSTEMDRIVE": true,
+	"HOMEDRIVE": true, "HOMEPATH": true, "USERNAME": true,
+	"HTTP_PROXY": true, "HTTPS_PROXY": true, "NO_PROXY": true, "ALL_PROXY": true,
+	"SSL_CERT_FILE": true, "SSL_CERT_DIR": true, "NODE_EXTRA_CA_CERTS": true,
+}
+
+var modelsEnvPrefixes = []string{"LC_", "XDG_", "GEMINI_", "GOOGLE_", "GCLOUD_", "ANTIGRAVITY_"}
+
+// modelsDiscoveryEnv filters environ to the variables a model listing may see, in
+// the order given. Names match case-insensitively (Windows spells them Path,
+// SystemRoot).
+func modelsDiscoveryEnv(environ []string) []string {
+	var out []string
+	for _, kv := range environ {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok || key == "" {
+			continue
+		}
+		k := strings.ToUpper(key)
+		keep := modelsEnvNames[k]
+		for _, p := range modelsEnvPrefixes {
+			keep = keep || strings.HasPrefix(k, p)
+		}
+		if keep {
+			out = append(out, kv)
+		}
+	}
+	return out
 }
 
 // modelsSignInProbe is the P0a auth probe (auth.ProbeRuntime: CLI on PATH, looks

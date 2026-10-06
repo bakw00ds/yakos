@@ -132,3 +132,55 @@ func TestLoadProject_ReadsTheFile(t *testing.T) {
 		t.Errorf("%+v %v", pol, warns)
 	}
 }
+
+func TestParseProject_CapsTheWarnings(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("models:\n")
+	for i := 0; i < 3000; i++ {
+		b.WriteString("  k" + string(rune('a'+i%26)) + string(rune('a'+(i/26)%26)) + string(rune('a'+(i/676)%26)) + ": 1\n")
+	}
+	_, warns := ParseProject([]byte(b.String()))
+	if len(warns) != maxWarningsPerSource+1 || !strings.Contains(warns[len(warns)-1], " more problems not shown") {
+		t.Fatalf("%d warnings, last %q", len(warns), warns[len(warns)-1])
+	}
+}
+
+// A project whose .yakos.yml does not parse loses its models: restrictions, and the
+// warning says so, so a typo in an unrelated key is not mistaken for a working
+// restriction.
+func TestParseProject_ParseErrorSaysTheDisableListIsNotApplied(t *testing.T) {
+	pol, warns := ParseProject([]byte("models:\n  disable: [opus]\nother: [unclosed\n"))
+	if len(pol.Disable) != 0 {
+		t.Errorf("Disable = %v", pol.Disable)
+	}
+	if len(warns) != 1 || !strings.Contains(warns[0], "a models: disable list in it is NOT applied") {
+		t.Errorf("warnings = %v", warns)
+	}
+}
+
+// OS error text carries the project's path, and a directory can be named with
+// anything. Warnings are printed to a terminal, so they hold no control or escape
+// characters whatever the path.
+func TestLoadProject_OSErrorTextIsSanitized(t *testing.T) {
+	skipIfNoPosixModes(t)
+	if os.Geteuid() == 0 {
+		t.Skip("root can read a mode-000 file")
+	}
+	dir := filepath.Join(t.TempDir(), "p\x1b]0;owned\x07roj")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Skipf("this filesystem refuses such a name: %v", err)
+	}
+	path := filepath.Join(dir, ".yakos.yml")
+	if err := os.WriteFile(path, []byte("models:\n  disable: [opus]\n"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	_, warns := LoadProject(dir)
+	if len(warns) != 1 {
+		t.Fatalf("warnings = %v, want the read error", warns)
+	}
+	for _, r := range warns[0] {
+		if r < 0x20 || r == 0x7f {
+			t.Errorf("warning holds control character %q: %q", r, warns[0])
+		}
+	}
+}

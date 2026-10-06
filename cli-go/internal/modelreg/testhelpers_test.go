@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -73,16 +74,7 @@ func entry(t *testing.T, r *Registry, harness, id string) Entry {
 // hasWarning reports whether any warning contains sub.
 func hasWarning(ws []string, sub string) bool {
 	for _, w := range ws {
-		if containsStr(w, sub) {
-			return true
-		}
-	}
-	return false
-}
-
-func containsStr(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
+		if strings.Contains(w, sub) {
 			return true
 		}
 	}
