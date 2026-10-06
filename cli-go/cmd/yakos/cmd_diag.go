@@ -371,6 +371,120 @@ func runStatus(args []string) {
 	}
 }
 
+// doctorArgs is what the arguments of `yakos doctor` resolve to. Resolving them is a step of
+// its own, apart from runDoctor (which exits the process), so the argument rules, the usage
+// errors and the project the Agent budgets section reads can be tested in process.
+type doctorArgs struct {
+	help          bool
+	probeRuntime  bool
+	probeDecision bool
+	live          bool
+	production    bool
+	preflight     bool
+	policy        bool
+	// projectPath is the positional project path, "" when none. It alone turns the
+	// project-wide checks on.
+	projectPath string
+	// budgetProject is the project the Agent budgets section reads: --project, else
+	// projectPath, else the working directory.
+	budgetProject string
+}
+
+// parseDoctorArgs resolves args, everything after "doctor". A usage error comes back as an
+// error whose text is exactly what runDoctor prints on stderr before it exits 1. A --help
+// comes back with help set and nothing else checked, as it always did. getwd supplies the
+// working directory (os.Getwd in production).
+func parseDoctorArgs(args []string, getwd func() (string, error)) (doctorArgs, error) {
+	var a doctorArgs
+	fix := false
+	projectFlag := ""
+	projectSeen := false
+
+	fs := &cliflag.Set{Cmd: "doctor", Specs: []cliflag.Spec{
+		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &a.help},
+		{Name: "--probe-runtime", Kind: cliflag.Bool, Bool: &a.probeRuntime},
+		{Name: "--probe-decision", Kind: cliflag.Bool, Bool: &a.probeDecision},
+		{Name: "--live", Kind: cliflag.Bool, Bool: &a.live},
+		{Name: "--production", Kind: cliflag.Bool, Bool: &a.production},
+		{Name: "--fix", Kind: cliflag.Bool, Bool: &fix},
+		{Name: "--preflight", Kind: cliflag.Bool, Bool: &a.preflight},
+		{Name: "--policy", Kind: cliflag.Bool, Bool: &a.policy},
+		{Name: "--project", Kind: cliflag.String, Str: &projectFlag, Seen: &projectSeen, ValueDesc: "a directory"},
+	}}
+	rest, err := fs.Parse(args)
+	if err != nil {
+		return a, err
+	}
+	if a.help {
+		return a, nil
+	}
+	if a.live && !a.probeDecision {
+		return a, errors.New("doctor: --live only applies to --probe-decision")
+	}
+	if fix {
+		return a, errors.New("doctor: --fix is not yet implemented in the Go port (see ideas wishlist rank 5)\n" +
+			"  Use 'YAKOS_IMPL=bash yakos doctor --fix' to reach the bash implementation.")
+	}
+	// --policy is a report on its own, like --preflight: refuse a mix instead of
+	// silently dropping one of the modes.
+	if a.policy && (a.preflight || a.probeRuntime || a.probeDecision || a.production) {
+		return a, errors.New("doctor: --policy runs on its own; it cannot be combined with --preflight, --probe-runtime, --probe-decision or --production")
+	}
+
+	for _, arg := range rest {
+		if len(arg) > 0 && arg[0] == '-' {
+			return a, fmt.Errorf("doctor: unknown flag %q", arg)
+		}
+		if a.projectPath != "" {
+			return a, errors.New("doctor: too many positional args")
+		}
+		a.projectPath = arg
+	}
+	if a.policy && a.projectPath != "" {
+		return a, errors.New("doctor: --policy reads your user-level setup and takes no project path")
+	}
+	if a.policy && projectSeen {
+		return a, errors.New("doctor: --policy reads your user-level setup and takes no --project")
+	}
+	if projectSeen && a.projectPath != "" {
+		return a, errors.New("doctor: name the project once, as a path argument or with --project")
+	}
+	if projectSeen {
+		if fi, err := os.Stat(projectFlag); projectFlag == "" || err != nil || !fi.IsDir() {
+			return a, errors.New("doctor: --project must name an existing directory")
+		}
+	}
+	// The project the Agent budgets section reads: --project, else the positional
+	// path, else the working directory. Only that section sees the working directory
+	// default; projectPath stays the positional path alone, because it switches on
+	// the project-wide checks a plain `yakos doctor` must not run.
+	a.budgetProject = a.projectPath
+	if projectSeen {
+		a.budgetProject = projectFlag
+	}
+	if a.budgetProject == "" {
+		if wd, err := getwd(); err == nil {
+			a.budgetProject = wd
+		}
+	}
+	return a, nil
+}
+
+// config is the doctor.Config these arguments ask for. The caller adds the framework roots
+// and the writers.
+func (a doctorArgs) config() doctor.Config {
+	return doctor.Config{
+		ProjectPath:       a.projectPath,
+		BudgetProject:     a.budgetProject,
+		ProbeRuntime:      a.probeRuntime,
+		ProbeDecision:     a.probeDecision,
+		ProbeDecisionLive: a.live,
+		Production:        a.production,
+		PreflightOnly:     a.preflight,
+		PolicyOnly:        a.policy,
+	}
+}
+
 // runDoctor implements `yakos doctor` natively in Go.
 //
 // Usage mirrors cli/lib/doctor.sh exactly, plus the Go-only --preflight fast
@@ -409,95 +523,15 @@ func runDoctor(yakosRoot string, args []string) {
 	// policy report needs it unchanged, before YAKOS_ROOT and the lib cascade
 	// below replace yakosRoot.
 	exeRoot := yakosRoot
-	help := false
-	probeRuntime := false
-	probeDecision := false
-	live := false
-	production := false
-	fix := false
-	preflight := false
-	policy := false
-	projectFlag := ""
-	projectSeen := false
 
-	fs := &cliflag.Set{Cmd: "doctor", Specs: []cliflag.Spec{
-		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
-		{Name: "--probe-runtime", Kind: cliflag.Bool, Bool: &probeRuntime},
-		{Name: "--probe-decision", Kind: cliflag.Bool, Bool: &probeDecision},
-		{Name: "--live", Kind: cliflag.Bool, Bool: &live},
-		{Name: "--production", Kind: cliflag.Bool, Bool: &production},
-		{Name: "--fix", Kind: cliflag.Bool, Bool: &fix},
-		{Name: "--preflight", Kind: cliflag.Bool, Bool: &preflight},
-		{Name: "--policy", Kind: cliflag.Bool, Bool: &policy},
-		{Name: "--project", Kind: cliflag.String, Str: &projectFlag, Seen: &projectSeen, ValueDesc: "a directory"},
-	}}
-	rest, err := fs.Parse(args)
+	a, err := parseDoctorArgs(args, os.Getwd)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if help {
+	if a.help {
 		doctor.PrintHelp(os.Stdout)
 		os.Exit(0)
-	}
-	if live && !probeDecision {
-		fmt.Fprintln(os.Stderr, "doctor: --live only applies to --probe-decision")
-		os.Exit(1)
-	}
-	if fix {
-		fmt.Fprintln(os.Stderr, "doctor: --fix is not yet implemented in the Go port (see ideas wishlist rank 5)")
-		fmt.Fprintln(os.Stderr, "  Use 'YAKOS_IMPL=bash yakos doctor --fix' to reach the bash implementation.")
-		os.Exit(1)
-	}
-	// --policy is a report on its own, like --preflight: refuse a mix instead of
-	// silently dropping one of the modes.
-	if policy && (preflight || probeRuntime || probeDecision || production) {
-		fmt.Fprintln(os.Stderr, "doctor: --policy runs on its own; it cannot be combined with --preflight, --probe-runtime, --probe-decision or --production")
-		os.Exit(1)
-	}
-
-	projectPath := ""
-	for _, arg := range rest {
-		if len(arg) > 0 && arg[0] == '-' {
-			fmt.Fprintf(os.Stderr, "doctor: unknown flag %q\n", arg)
-			os.Exit(1)
-		}
-		if projectPath != "" {
-			fmt.Fprintln(os.Stderr, "doctor: too many positional args")
-			os.Exit(1)
-		}
-		projectPath = arg
-	}
-	if policy && projectPath != "" {
-		fmt.Fprintln(os.Stderr, "doctor: --policy reads your user-level setup and takes no project path")
-		os.Exit(1)
-	}
-	if policy && projectSeen {
-		fmt.Fprintln(os.Stderr, "doctor: --policy reads your user-level setup and takes no --project")
-		os.Exit(1)
-	}
-	if projectSeen && projectPath != "" {
-		fmt.Fprintln(os.Stderr, "doctor: name the project once, as a path argument or with --project")
-		os.Exit(1)
-	}
-	if projectSeen {
-		if fi, err := os.Stat(projectFlag); projectFlag == "" || err != nil || !fi.IsDir() {
-			fmt.Fprintln(os.Stderr, "doctor: --project must name an existing directory")
-			os.Exit(1)
-		}
-	}
-	// The project the Agent budgets section reads: --project, else the positional
-	// path, else the working directory. Only that section sees the working directory
-	// default; cfg.ProjectPath below stays the positional path alone, because it
-	// switches on the project-wide checks a plain `yakos doctor` must not run.
-	budgetProject := projectPath
-	if projectSeen {
-		budgetProject = projectFlag
-	}
-	if budgetProject == "" {
-		if wd, err := os.Getwd(); err == nil {
-			budgetProject = wd
-		}
 	}
 
 	// Resolve YAKOS_ROOT from env, then cascade to materialized/embedded lib.
@@ -521,21 +555,12 @@ func runDoctor(yakosRoot string, args []string) {
 		yakosLib = filepath.Join(yakosRoot, "lib")
 	}
 
-	cfg := doctor.Config{
-		YakosRoot:         yakosRoot,
-		YakosLib:          yakosLib,
-		ProjectPath:       projectPath,
-		BudgetProject:     budgetProject,
-		ProbeRuntime:      probeRuntime,
-		ProbeDecision:     probeDecision,
-		ProbeDecisionLive: live,
-		Production:        production,
-		PreflightOnly:     preflight,
-		PolicyOnly:        policy,
-		Writer:            os.Stdout,
-		ErrWriter:         os.Stderr,
-	}
-	if policy {
+	cfg := a.config()
+	cfg.YakosRoot = yakosRoot
+	cfg.YakosLib = yakosLib
+	cfg.Writer = os.Stdout
+	cfg.ErrWriter = os.Stderr
+	if a.policy {
 		applyPolicyFacts(&cfg, yakosRoot, exeRoot)
 	}
 
