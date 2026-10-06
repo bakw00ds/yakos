@@ -160,7 +160,9 @@ What changes for you:
   separately, and can be stricter in the mixed case (an own $200 lifetime limit
   beside the supervisor's $100 monthly one is $100 lifetime). `yakos budget
   status`, `yakos doctor` and `yakos budget reset` take the project into account
-  (`--project`, else the working directory).
+  (`--project <dir>`, else the working directory); `yakos doctor` uses it for its
+  Agent budgets section only, and still runs its project checks only for a
+  positional project path.
 - **API-key operators:** your dollars count as before. A run with
   `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` (or their siblings) in
   its environment is `api`, and its dollars count toward `limit_usd`. What is new

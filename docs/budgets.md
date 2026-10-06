@@ -289,8 +289,11 @@ doubled stop), and gives an agent that had no limit the supervisor's $100 and
 two hooks, the console and `dispatch` agree. Both hooks read the name (the Go hook as
 YAML, the bash hook with a line scan), and every name either of them arrives at is
 treated as the supervisor. The renamed agent has its own spend counter (K-160 tracks
-counting spend against the supervisor role instead of the name), and `status` and
-`doctor` list it when run in the project. The model ceiling below is keyed on the
+counting spend against the supervisor role instead of the name). `status`, `reset`
+and `doctor` take `--project <dir>`, else the working directory, and list or reset
+it for that project; `doctor` uses the project for its Agent budgets section only,
+and its project checks (hook drift, hook binaries, the pre-push gate, project rules)
+still run only for a positional project path. The model ceiling below is keyed on the
 agent name alone, so a renamed supervisor does not get the supervisor's `sonnet`
 ceiling (K-139 passes the project to the ceiling).
 
@@ -393,7 +396,7 @@ change the decision.
 |---|---|---|
 | `timeout` | the `yakos budget check` child outlived its 2 s wall-clock bound and was killed | bash |
 | `no_output` | it printed nothing and exited non-zero, or could not run (a CLI too old to have `budget`, one that crashed, a missing binary) | bash |
-| `parse` | what it printed is not a budget: not JSON, JSON without a numeric `limit_usd` or a string `state`, or a failing `jq` | bash |
+| `parse` | what it printed is not a budget: not JSON, JSON without a numeric `limit_usd`, `spent_usd` and `stop_usd` and a string `state` (the token fields are optional: one that is absent or not a number reads as 0, except `stop_tokens`, which then reads as the token limit), or a failing `jq` | bash |
 | `read_error` | the spend could not be read: the CLI's JSON says `read_failed: true` (its numbers then read "ok, nothing spent"), also when it failed inside; the Go twin sees the same error in-process | both |
 
 The bash hook never reads the CLI's stderr: it carries text a project controls,

@@ -38,11 +38,14 @@ import (
 // codex's own fields, so input_tokens holds the whole prompt, cached tokens
 // included, and cache_read is 0; rows the Go dispatcher writes hold the fresh
 // remainder in input_tokens and the cached part in cache_read. The two
-// conventions agree on the sum, so every reader that totals tokens (K-136:
-// TokenTotals.Total, the budget aggregate, the cost and dashboard views) adds
-// all four counts and is unaffected; only a reader that reports the input/cache
-// split of a legacy bash codex row sees a different split. The bash writer is
-// not changed (docs/runtime-matrix.md, "Usage fields by harness").
+// conventions agree on the sum, so the readers that add all four counts (K-136:
+// TokenTotals.Total, the budget aggregate, the cost and dashboard views) are
+// unaffected. Two older readers add only input and output tokens, the metrics
+// collector and `work close`: for a legacy bash codex row they count the whole
+// prompt, and for a Go row of the same run only its fresh part. A reader that
+// reports the input/cache split of a legacy bash codex row sees a different
+// split as well. The bash writer is not changed (docs/runtime-matrix.md, "Usage
+// fields by harness").
 //
 // Dollars (K-136). TotalCostUSD is the dollar figure the harness reported. It is
 // spend only on a row whose billing is "api" (or on a row that predates the

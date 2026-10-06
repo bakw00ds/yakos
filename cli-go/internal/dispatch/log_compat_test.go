@@ -162,8 +162,10 @@ func TestDispatchLog_MixedLegacyAndNewRecordsAreReadTogether(t *testing.T) {
 	if whole := newCodex.InputTokens + newCodex.CacheRead + newCodex.CacheCreation; whole != oldCodex.InputTokens {
 		t.Errorf("whole prompt: go %d, bash %d", whole, oldCodex.InputTokens)
 	}
-	// What makes the split harmless: every token total adds all four counts, and
-	// the two conventions agree on that sum for the SAME run.
+	// What makes the split harmless to the readers that add all four counts (the
+	// budget aggregate and the cost views; the metrics collector and `work close`
+	// add input plus output only, and do see it): the two conventions agree on
+	// that sum for the SAME run.
 	if o, n := byAgent["legacy-codex"][0].Tokens(), newRows["codex"].Tokens(); o.Input+o.CacheRead+o.CacheCreation != n.Input+n.CacheRead+n.CacheCreation || o.Output != n.Output {
 		t.Errorf("codex token totals disagree: bash %+v, go %+v", o, n)
 	}

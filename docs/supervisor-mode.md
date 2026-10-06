@@ -160,13 +160,18 @@ supervisor:
     every launch decision, over both of its units, dollars and tokens: through
     `yakos budget check --json` in the bash hook and in-process in the Go hook.
     At the limit of EITHER unit (`hard_stop`) a routine launch is refused; a
-    high-risk launch runs on up to 2x the limit of either unit, and is refused
-    past it, with one synthetic CRITICAL finding for the session that names the
-    ceiling reached (`Supervisor token-budget ceiling (N tokens)` or
-    `Supervisor dollar-budget ceiling ($N)`). A budget is off only when it has
-    no limit of either kind: a token-only budget (a dollar limit of 0, the usual
-    case for a subscription) is gated at 1x and at 2x its tokens, and turning
-    off only the dollar limit leaves the supervisor's built-in token limit on.
+    high-risk launch runs on until either unit reaches its dispatch stop (2x the
+    limit for the supervisor) and is refused from then on, with one synthetic
+    CRITICAL finding for the session that names the ceiling reached (`Supervisor
+    token-budget ceiling (N tokens)` or `Supervisor dollar-budget ceiling ($N)`).
+    A budget is off only when it has no limit of either kind: a token-only budget
+    (a dollar limit of 0, which an operator sets when only tokens should stop the
+    supervisor) is gated at 1x and at 2x its tokens, and turning off only the
+    dollar limit leaves the supervisor's built-in token limit on. A subscription
+    operator keeps both limits: the dollar one never moves for a subscription run,
+    so the token limit is the one that stops the supervisor. A project can name
+    its own supervisor agent; it is budgeted at the stricter of its own limits and
+    the supervisor's, stop included (`docs/budgets.md`).
     Each message names one unit, tokens first: at the limit, tokens when the
     token limit itself has been reached, else dollars; at the warning level, the
     unit with the larger share of its limit (a tie goes to tokens); at the 2x

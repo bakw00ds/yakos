@@ -12,9 +12,11 @@ runtime that is installed and signed in, and resolves models per runtime.
 Agents that declare `runtime:` (`general-codex`, `general-agy` and any project
 agent with a pin) now run on that runtime instead of claude; see UPGRADING.md.
 
-Routing P0d part 2 (K-136): accounting. Tokens are now the primary unit
-everywhere. Dollars count only for runs billed per API call, never for a
-subscription harness or a local model; see UPGRADING.md.
+Routing P0d part 2 (K-136): accounting. Tokens are now the primary unit of the
+dispatch ledger, the budgets and the cost views. Dollars count only for runs
+billed per API call, never for a subscription harness or a local model. Some
+payloads and readers still show the harness's own dollar figure (the first entry
+below lists them); see UPGRADING.md.
 
 ### Changed
 
@@ -32,9 +34,9 @@ subscription harness or a local model; see UPGRADING.md.
   so the built-in supervisor and librarian budgets also carry a token limit (see
   the next entry) and keep tripping for every billing class. See UPGRADING.md and
   `docs/budgets.md`. Not converted yet: the Chat pane's summary and stored
-  transcript, the MCP, JSON-RPC and REST summaries, and the Flows per-node cost
-  still show the harness-reported `total_cost_usd`; only the log splits it into
-  spend and an API-equivalent.
+  transcript, the MCP and JSON-RPC summaries, and the Flows per-node cost still
+  show the harness-reported `total_cost_usd` (REST and gRPC return no cost); only
+  the log splits it into spend and an API-equivalent.
 
 - **Budgets gain token limits, and the built-in budgets have them (K-136).**
   `budget-policy.yml` entries accept `limit_tokens` next to `limit_usd`, set with
@@ -492,10 +494,13 @@ subscription harness or a local model; see UPGRADING.md.
   lifetime). `budget check`, `status`, `doctor` and `reset` all use the combined
   limit, and the two hooks read it from there. Both hooks read the name, the Go
   one as YAML and the bash one with a line scan, and every name either arrives
-  at counts. `yakos budget status` and `doctor` list the renamed agent when run
-  in the project, and `yakos budget reset` takes `--project`. The model ceiling
-  is keyed on the agent name alone and does not follow a rename (K-139), and the
-  renamed agent has its own spend counter (K-160).
+  at counts. `yakos budget status`, `yakos doctor` and `yakos budget reset` take
+  `--project <dir>`, else the working directory, and list or reset the renamed
+  agent for that project; `doctor` uses it for its Agent budgets section only, and
+  still runs its project checks (hook drift, hook binaries, the pre-push gate,
+  project rules) only for a positional project path. The model ceiling is keyed
+  on the agent name alone and does not follow a rename (K-139), and the renamed
+  agent has its own spend counter (K-160).
 
 - **A malformed limit in the budget policy no longer switches a built-in budget
   off or makes a limit infinite (K-136).** A negative or NaN `limit_usd`, or a
@@ -524,8 +529,10 @@ subscription harness or a local model; see UPGRADING.md.
   thing a subscription operator sees. An agent with a token limit is now
   described in tokens first, the limit that was reached is named (token, dollar
   or both), and the matching flag is recommended (`--tokens <n>` for a token
-  stop). A dollar-only agent reads as before. Budget messages list tokens before
-  dollars everywhere.
+  stop). A dollar-only agent reads as before. `doctor`, `budget status` and the
+  supervisor hook's messages list tokens before dollars; the dispatch refusal that
+  names both limits and the first line of `budget check` keep their dollars-first
+  order.
 
 - **An interactive session keeps the agent it started as (K-136).** A second
   dispatch on a live conversation could name any roster agent, and later turns
