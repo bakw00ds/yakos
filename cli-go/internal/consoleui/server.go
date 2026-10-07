@@ -467,12 +467,12 @@ func New(cfg Config) (*Server, error) {
 	// Always allocated; the store is a no-op map until an ask_user_question fires.
 	chatH.pendingQuestions = newPendingQuestionStore()
 	flowsH := &flowsHandlers{
-		engine:     cfg.WorkflowEngine,
-		workDir:    cfg.WorkDir,
-		serverCtx:  serverCtx,
-		activeRuns: make(map[string]activeRunEntry),
-		slug:       workflow.ProjectSlug(cfg.WorkspaceRoot),
-		yakosRoot:  cfg.YakosRoot,
+		engine:        cfg.WorkflowEngine,
+		workDir:       cfg.WorkDir,
+		serverCtx:     serverCtx,
+		activeRuns:    make(map[string]activeRunEntry),
+		workspaceRoot: cfg.WorkspaceRoot,
+		yakosRoot:     cfg.YakosRoot,
 	}
 	// IDE file pane and diff handler use cfg.ideRoot() — either IDERoot (when
 	// set, e.g. the project repo) or WorkspaceRoot as fallback.

@@ -67,12 +67,37 @@ func (s *triggerState) claim(name string) bool {
 	return true
 }
 
+// surfaceKey carries the dispatch surface for a run started by a trigger down
+// to its node dispatches, so the dispatch ledger records surface=trigger.
+type surfaceKey struct{}
+
+func surfaceFrom(ctx context.Context) string {
+	if v, ok := ctx.Value(surfaceKey{}).(string); ok && v != "" {
+		return v
+	}
+	return dispatch.SurfaceFlows
+}
+
+// RecordTriggerRefusal writes a "refused" ledger line (for example a webhook
+// whose workflow file changed since it was enabled). reason must be path-free.
+func (e *Engine) RecordTriggerRefusal(name, source, reason string) {
+	e.appendTriggerLedger(triggerLedgerEntry{TS: time.Now().UTC(), Workflow: name, Source: source, Outcome: "refused", Reason: reason})
+}
+
+// RunActive reports whether a run of the named workflow is in flight, so a
+// caller can answer 409 before doing expensive work (the payload scan).
+func (e *Engine) RunActive(name string) bool {
+	e.trig.mu.Lock()
+	defer e.trig.mu.Unlock()
+	return e.trig.active[name] > 0
+}
+
 // triggerLedgerEntry is one line of <WorkDir>/workflows/triggers.ndjson.
 type triggerLedgerEntry struct {
 	TS       time.Time `json:"ts"`
 	Workflow string    `json:"workflow"`
 	Source   string    `json:"source"`
-	Outcome  string    `json:"outcome"` // started | skipped
+	Outcome  string    `json:"outcome"` // started | skipped | refused
 	Reason   string    `json:"reason,omitempty"`
 	RunID    string    `json:"run_id,omitempty"`
 }
@@ -80,16 +105,22 @@ type triggerLedgerEntry struct {
 func (e *Engine) appendTriggerLedger(ent triggerLedgerEntry) {
 	dir := e.workflowsDir()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		slog.Warn("workflow: trigger ledger unavailable", "err", err)
+		slog.Warn("workflow: trigger ledger unavailable", "reason", "cannot create directory")
 		return
 	}
 	line, err := json.Marshal(ent)
 	if err != nil {
 		return
 	}
-	f, err := os.OpenFile(filepath.Join(dir, "triggers.ndjson"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec
+	path := filepath.Join(dir, "triggers.ndjson")
+	// The directory is project-controlled: never append through a symlink.
+	if fi, err := os.Lstat(path); err == nil && !fi.Mode().IsRegular() {
+		slog.Warn("workflow: trigger ledger unavailable", "reason", "not a regular file")
+		return
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY|oNoFollow, 0o600) //nolint:gosec
 	if err != nil {
-		slog.Warn("workflow: trigger ledger unavailable", "err", err)
+		slog.Warn("workflow: trigger ledger unavailable", "reason", "cannot open ledger") // no path in the log
 		return
 	}
 	defer f.Close()
@@ -144,6 +175,7 @@ func (e *Engine) StartTriggered(ctx context.Context, wf *Workflow, source, owner
 	e.appendTriggerLedger(triggerLedgerEntry{TS: time.Now().UTC(), Workflow: wf.Name, Source: source, Outcome: "started", RunID: runID})
 	go func() {
 		defer e.trig.done(wf.Name)
+		ctx := context.WithValue(ctx, surfaceKey{}, dispatch.SurfaceTrigger)
 		if _, err := e.Run(ctx, &cp, runID, ownerOpID, identity); err != nil {
 			slog.Error("workflow: triggered run failed", "run_id", runID, "workflow", wf.Name, "source", source, "err", err)
 		}

@@ -8,13 +8,20 @@ package consoleui
 //
 // Webhook security model:
 //   - A workflow can declare `triggers.webhook`, but it answers only when the
-//     operator enabled it in the trusted user-level schedules file AND repeated
-//     the declared secret_env name there (a cloned repo cannot pick which
-//     environment variable the daemon reads). Every "not available" cause
-//     (undeclared, not enabled, untrusted file, unset or short secret) answers
-//     the same 404, so the endpoint is not a configuration oracle.
-//   - The shared secret is read from the environment at request time, and
-//     compared in constant time over SHA-256 digests (no length leak).
+//     operator enabled it in the trusted user-level schedules file (bound to
+//     this workspace's canonical path), repeated the declared secret_env name
+//     there, and the workflow file still hashes to the entry's workflow_sha.
+//   - The sender signs: `X-Yakos-Signature: sha256=<hex HMAC-SHA256(secret,
+//     timestamp + "." + body)>` with `X-Yakos-Timestamp: <unix seconds>`. The
+//     timestamp must be within +-5 minutes and a signature is accepted once
+//     (bounded cache of 1000), so a captured request cannot be replayed. The
+//     secret is read from the daemon environment at request time. There is no
+//     bare-secret header path.
+//   - Every "not available" cause (undeclared, not enabled, untrusted file,
+//     changed workflow, unset or short secret, bad/stale/replayed signature)
+//     answers the same 404, so the endpoint is neither a configuration nor a
+//     secret-validity oracle. Requests are limited to 6 per minute per
+//     workflow name, answered 429 before any configuration is read.
 //   - The body is capped at 64 KiB and must be UTF-8. The raw payload passes
 //     through the engine's OutputScanFn (the same blocking injection scan node
 //     output gets) before it reaches any node; the scan being absent fails
@@ -22,13 +29,24 @@ package consoleui
 //     `payload`, wrapped as inert delimited data.
 //   - The run's owner is the caller's resolved identity, never a body field.
 //
+// Role decision (K-152 review, medium finding): the route is RoleDispatch, not
+// the RoleFlowsRun that /flows/api/run requires. The operator's explicit,
+// content-pinned entry in the trusted schedules file is the consent to run
+// this one workflow on an external event; the HMAC secret is held by the
+// sender, not by the console user. /flows/api/run keeps its stricter role.
+// The edge still requires the console token or session: an external sender
+// needs the token as well as the signature.
+//
 // Idempotency: POST is NOT idempotent and takes no Idempotency-Key. Each call
 // starts a new run, unless one is already active (409): a webhook sender's
-// retry therefore cannot pile up concurrent runs of the same workflow.
+// retry therefore cannot pile up concurrent runs of the same workflow. A
+// retry must carry a fresh timestamp (the replay cache rejects a repeated
+// signature).
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
-	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -37,7 +55,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
@@ -48,8 +68,10 @@ import (
 const (
 	// maxTriggerBodyBytes caps a webhook payload.
 	maxTriggerBodyBytes = 64 << 10
-	// triggerSecretHeader carries the shared secret.
-	triggerSecretHeader = "X-Yakos-Webhook-Secret"
+	// triggerSignatureHeader carries "sha256=<hex>"; triggerTimestampHeader the
+	// unix-seconds timestamp that is part of the signed message.
+	triggerSignatureHeader = "X-Yakos-Signature"
+	triggerTimestampHeader = "X-Yakos-Timestamp"
 	// minWebhookSecretLen is the shortest secret the endpoint will accept
 	// from the environment; a shorter or empty one disables the webhook.
 	minWebhookSecretLen = 16
@@ -60,10 +82,19 @@ type flowsTriggerResponse struct {
 	RunID string `json:"run_id"`
 }
 
-// secretsEqual compares in constant time without leaking either length.
-func secretsEqual(a, b string) bool {
-	ha, hb := sha256.Sum256([]byte(a)), sha256.Sum256([]byte(b))
-	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
+// TriggerSignature returns the header value a sender sets as
+// X-Yakos-Signature for a body signed with secret at timestamp ts.
+func TriggerSignature(secret, ts string, body []byte) string {
+	m := hmac.New(sha256.New, []byte(secret))
+	m.Write([]byte(ts))
+	m.Write([]byte("."))
+	m.Write(body)
+	return "sha256=" + hex.EncodeToString(m.Sum(nil))
+}
+
+// signatureValid verifies the MAC in constant time.
+func signatureValid(secret, ts string, body []byte, got string) bool {
+	return hmac.Equal([]byte(TriggerSignature(secret, ts, body)), []byte(got))
 }
 
 // handleTrigger serves POST /flows/api/trigger/{name}.
@@ -83,20 +114,38 @@ func (h *flowsHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	wf, err := workflow.Load(h.workflowPath(name))
-	if err != nil || workflow.Validate(wf) != nil || wf.Triggers == nil || wf.Triggers.Webhook == nil {
-		notAvailable()
+	if !h.trigGuard.allow(name) {
+		w.Header().Set("Retry-After", "60")
+		writeGenericError(w, http.StatusTooManyRequests, "too many requests")
 		return
 	}
-	sched, err := workflow.LoadSchedules(h.slug)
+
+	// Enablement first (a small trusted file), then the workflow file: the
+	// workflow is only opened for a name the operator enabled.
+	sched, err := workflow.LoadSchedules(h.workspaceRoot)
 	if err != nil {
 		slog.Warn("flows: webhook refused, schedules file unusable", "workflow", name, "reason", err.Error())
 		notAvailable()
 		return
 	}
-	ent := sched.Workflows[name]
+	ent, enabled := sched.Workflows[name]
+	if !enabled || !ent.Webhook {
+		notAvailable()
+		return
+	}
+	wf, sha, err := workflow.LoadFile(h.workflowPath(name))
+	if err != nil || workflow.Validate(wf) != nil || wf.Triggers == nil || wf.Triggers.Webhook == nil {
+		notAvailable()
+		return
+	}
 	envName := wf.Triggers.Webhook.SecretEnv
-	if !ent.Webhook || ent.SecretEnv != envName {
+	if ent.SecretEnv != envName {
+		notAvailable()
+		return
+	}
+	if perr := workflow.CheckPin(ent, sha); perr != nil {
+		slog.Warn("flows: webhook refused", "workflow", name, "reason", perr.Error())
+		h.engine.RecordTriggerRefusal(name, workflow.TriggerWebhook, perr.Error())
 		notAvailable()
 		return
 	}
@@ -104,10 +153,6 @@ func (h *flowsHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	if len(secret) < minWebhookSecretLen {
 		slog.Warn("flows: webhook refused, secret not configured", "workflow", name)
 		notAvailable()
-		return
-	}
-	if !secretsEqual(r.Header.Get(triggerSecretHeader), secret) {
-		writeGenericError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
@@ -127,6 +172,26 @@ func (h *flowsHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 	if !utf8.Valid(body) {
 		writeGenericError(w, http.StatusBadRequest, "payload must be UTF-8")
+		return
+	}
+
+	// Authenticate: signed timestamp inside the window, valid MAC, first use.
+	ts := r.Header.Get(triggerTimestampHeader)
+	sig := r.Header.Get(triggerSignatureHeader)
+	secs, perr := strconv.ParseInt(ts, 10, 64)
+	if perr != nil || !h.trigGuard.fresh(time.Unix(secs, 0)) || !signatureValid(secret, ts, body, sig) {
+		slog.Warn("flows: webhook refused, bad or stale signature", "workflow", name)
+		notAvailable()
+		return
+	}
+	if !h.trigGuard.firstUse(sig) {
+		slog.Warn("flows: webhook refused, replayed signature", "workflow", name)
+		notAvailable()
+		return
+	}
+	// Cheap 409 before the payload scan spawns a subprocess.
+	if h.engine.RunActive(wf.Name) {
+		writeGenericError(w, http.StatusConflict, "a run of this workflow is already active")
 		return
 	}
 

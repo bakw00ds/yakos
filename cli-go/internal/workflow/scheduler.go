@@ -45,6 +45,9 @@ type Scheduler struct {
 	mu      sync.Mutex
 	state   map[string]*schedState
 	lastErr string
+	// refused remembers the workflow hash a refusal was already reported for,
+	// so a changed file is logged once, not every minute.
+	refused map[string]string
 }
 
 type schedState struct {
@@ -103,10 +106,24 @@ func (s *Scheduler) Tick(ctx context.Context, now time.Time) {
 
 	next := make(map[string]*schedState, len(names))
 	for _, name := range names {
-		wf, err := Load(filepath.Join(s.Engine.workflowsDir(), name+".yaml"))
+		wf, sha, err := LoadFile(filepath.Join(s.Engine.workflowsDir(), name+".yaml"))
 		if err != nil || Validate(wf) != nil || wf.Triggers == nil || wf.Triggers.Cron == "" {
 			continue
 		}
+		if perr := CheckPin(sched.Workflows[name], sha); perr != nil {
+			// Enablement pins content: the file changed since the operator
+			// enabled it. Refuse (and say so once per distinct content).
+			if s.refused == nil {
+				s.refused = make(map[string]string)
+			}
+			if s.refused[name] != sha {
+				s.refused[name] = sha
+				slog.Warn("workflow: cron trigger refused", "workflow", name, "reason", perr.Error())
+				s.Engine.appendTriggerLedger(triggerLedgerEntry{TS: time.Now().UTC(), Workflow: name, Source: TriggerCron, Outcome: "refused", Reason: perr.Error()})
+			}
+			continue
+		}
+		delete(s.refused, name)
 		c, err := ParseCron(wf.Triggers.Cron)
 		if err != nil {
 			continue

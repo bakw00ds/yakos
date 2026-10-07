@@ -1,5 +1,5 @@
 # Review the last day of changes each night. Cron is declared here and fires
-# only after you enable it in ~/.yakos-state/schedules/<project>.yaml.
+# only after you enable it in ~/.yakos-state/schedules/<slug>-<hash>.yaml (see docs/flows.md).
 version: 1
 name: nightly-review
 inputs:

@@ -764,7 +764,7 @@ func (e *Engine) runNode(
 		YakosRoot:        e.YakosRoot,
 		OperatorID:       ownerOpID,
 		ResolvedIdentity: identity,
-		Surface:          dispatch.SurfaceFlows,
+		Surface:          surfaceFrom(ctx),
 	}
 
 	// Write dispatch_started to the per-run node dispatch log.

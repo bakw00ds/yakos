@@ -27,7 +27,6 @@ package serve
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -907,13 +906,14 @@ func handleWorkflowStatus(cfg Config) jsonrpc.Handler {
 
 		rs, err := workflow.LoadRunState(runDir)
 		if err != nil {
-			// LoadRunState wraps the error with the run.json path; errors.Is
-			// (not os.IsNotExist) sees through it, and the path stays out of
-			// the reply.
-			if errors.Is(err, os.ErrNotExist) {
-				return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("workflow.status: run %q not found", p.RunID)}
-			}
-			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: "workflow.status: run state unreadable"}
+			// A missing run and a run whose run.json cannot be read or parsed
+			// answer identically ("not found"), so a malformed foreign run is
+			// not distinguishable from a missing one. LoadRunState's error
+			// carries the run.json path; it stays out of the reply. Residual:
+			// the parse makes a foreign run's reply measurably slower than a
+			// missing one's; the socket is 0600 and its caller is the same OS
+			// user, who can read run.json directly, so this is accepted.
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("workflow.status: run %q not found", p.RunID)}
 		}
 		// K-166: a run belongs to the operator who started it. This socket's
 		// caller is the daemon's loopback operator (workflowOwnerID), so a run

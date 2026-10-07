@@ -2,6 +2,8 @@ package workflow_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -28,8 +30,36 @@ nodes:
 
 // schedHome points HOME at a private dir holding ~/.yakos-state/schedules and
 // returns the path of slug's file (not yet written).
-func schedHome(t *testing.T, slug string) string {
+// wsByTest maps a test name to the workspace directory schedHome created.
+var wsByTest sync.Map
+
+func wsOf(t *testing.T) string {
+	v, _ := wsByTest.Load(t.Name())
+	return v.(string)
+}
+
+func sha256hex(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
+
+// schedFor is the schedules file path for the workspace at ws.
+func schedFor(t *testing.T, ws string) string {
 	t.Helper()
+	p := workflow.SchedulesPath(ws)
+	if p == "" {
+		t.Fatal("no schedules path")
+	}
+	return p
+}
+
+func schedHome(t *testing.T, name string) string {
+	t.Helper()
+	ws := filepath.Join(t.TempDir(), name)
+	if err := os.MkdirAll(ws, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	wsByTest.Store(t.Name(), ws)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
@@ -40,11 +70,14 @@ func schedHome(t *testing.T, slug string) string {
 	for _, d := range []string{filepath.Join(home, ".yakos-state"), dir} {
 		_ = os.Chmod(d, 0o700)
 	}
-	return filepath.Join(dir, slug+".yaml")
+	return schedFor(t, ws)
 }
 
 func writeSched(t *testing.T, path, body string, mode os.FileMode) {
 	t.Helper()
+	if ws, ok := wsByTest.Load(t.Name()); ok {
+		body = strings.ReplaceAll(body, "{WS}", ws.(string))
+	}
 	if err := os.WriteFile(path, []byte(body), mode); err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +95,7 @@ func writeWF(t *testing.T, workDir, name, body string) {
 	}
 }
 
-const enabledSched = "version: 1\ntimezone: UTC\nworkflows:\n  nightly:\n    cron: true\n"
+var enabledSched = "version: 1\nworkspace: {WS}\ntimezone: UTC\nworkflows:\n  nightly:\n    cron: true\n    workflow_sha: " + sha256hex(cronWF) + "\n"
 
 // fakeClock is a manual clock: After registers a waiter that Advance releases.
 type fakeClock struct {
@@ -129,7 +162,7 @@ func newSched(t *testing.T, fn workflow.EngineRunFn, now time.Time) (*workflow.S
 	eng, workDir := newTestEngine(t, fn)
 	return &workflow.Scheduler{
 		Engine:    eng,
-		Load:      func() (workflow.Schedules, error) { return workflow.LoadSchedules("proj") },
+		Load:      func() (workflow.Schedules, error) { return workflow.LoadSchedules(wsOf(t)) },
 		OwnerOpID: "op-sched",
 	}, workDir
 }
@@ -212,7 +245,10 @@ func TestScheduler_SkipsWhileRunning(t *testing.T) {
 	s, workDir := newSched(t, blocking, time.Time{})
 	writeWF(t, workDir, "nightly", cronWF)
 	ctx := context.Background()
-	defer close(release)
+	defer func() { // let the run finish before the temp dir is removed
+		close(release)
+		waitFor(t, "the run to finish", func() bool { return !s.Engine.RunActive("nightly") })
+	}()
 
 	day := time.Date(2026, 6, 1, 8, 59, 0, 0, time.UTC)
 	s.Tick(ctx, day)
@@ -242,8 +278,8 @@ func TestScheduler_IgnoresDisabledAndUntrusted(t *testing.T) {
 		mode os.FileMode
 	}{
 		{"no file", "", 0},
-		{"cron not enabled", "version: 1\ntimezone: UTC\nworkflows:\n  nightly:\n    cron: false\n", 0o600},
-		{"other workflow enabled", "version: 1\ntimezone: UTC\nworkflows:\n  other:\n    cron: true\n", 0o600},
+		{"cron not enabled", strings.Replace(enabledSched, "true", "false", 1), 0o600},
+		{"other workflow enabled", strings.Replace(enabledSched, "nightly:", "other:", 1), 0o600},
 		{"group-readable file", enabledSched, 0o640},
 		{"world-writable file", enabledSched, 0o666},
 		{"malformed", "version: 1\nworkflows: [", 0o600},
@@ -313,7 +349,7 @@ func TestLoadSchedules_ErrorsNameNoPath(t *testing.T) {
 	}
 	path := schedHome(t, "proj")
 	writeSched(t, path, enabledSched, 0o644)
-	_, err := workflow.LoadSchedules("proj")
+	_, err := workflow.LoadSchedules(wsOf(t))
 	if err == nil {
 		t.Fatal("0644 file accepted")
 	}

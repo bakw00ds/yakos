@@ -1,5 +1,5 @@
 # Triage an incoming event (issue, alert) posted to the webhook trigger.
-# Enable it in ~/.yakos-state/schedules/<project>.yaml and export the secret.
+# Enable it in ~/.yakos-state/schedules/<slug>-<hash>.yaml (see docs/flows.md) and export the secret.
 version: 1
 name: webhook-triage
 inputs:

@@ -164,3 +164,29 @@ func TestWorkflowStatus_OwnerCheck(t *testing.T) {
 		t.Errorf("foreign run is distinguishable from a missing one:\n  %v\n  %v", errTheirs, errMissing)
 	}
 }
+
+// A foreign run whose run.json is malformed must not answer differently from a
+// missing run (sec-348 finding 9).
+func TestWorkflowStatus_MalformedForeignRunReadsAsMissing(t *testing.T) {
+	cfg, ws, _ := newWorkflowOwnerCfg(t)
+	dir := filepath.Join(workflowWorkDir(ws), "workflows", "runs", "run-bad")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "run.json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := handleWorkflowStatus(cfg)
+	call := func(id string) error {
+		p, _ := json.Marshal(map[string]string{"run_id": id})
+		_, err := h(context.Background(), p)
+		return err
+	}
+	bad, missing := call("run-bad"), call("run-nope")
+	if bad == nil || missing == nil {
+		t.Fatalf("errors: %v %v", bad, missing)
+	}
+	if strings.ReplaceAll(bad.Error(), "run-bad", "ID") != strings.ReplaceAll(missing.Error(), "run-nope", "ID") {
+		t.Errorf("malformed run is distinguishable:\n  %v\n  %v", bad, missing)
+	}
+}
