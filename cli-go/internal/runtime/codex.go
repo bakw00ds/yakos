@@ -217,8 +217,17 @@ func (a *CodexAdapter) ExecCmd(ctx context.Context, req DispatchRequest) *exec.C
 // MaxPersonaBytes, as given or once encoded, is refused before any argv is
 // built: the returned command fails in Start with ErrPersonaTooLarge.
 func (a *CodexAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *exec.Cmd {
-	args := []string{"exec", "--json"}
-	args = append(args, codexCommonArgs(req.ModelOverride, req.Effort, false)...)
+	resumeID, bad := req.resumeFor("codex")
+	if bad {
+		return rejectedCmd(ctx, "codex", ErrInvalidResumeID)
+	}
+	resume := resumeID != ""
+	args := []string{"exec"}
+	if resume {
+		args = append(args, "resume")
+	}
+	args = append(args, "--json")
+	args = append(args, codexCommonArgs(req.ModelOverride, req.Effort, resume)...)
 	if req.AgentSystemPrompt != "" {
 		persona, err := codexPersonaArg(req.AgentSystemPrompt)
 		if err != nil {
@@ -228,7 +237,11 @@ func (a *CodexAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest)
 	}
 	// Insert '--' before the positional user text so that a UserText beginning
 	// with '-' cannot be interpreted as a flag by the codex CLI.
-	args = append(args, "--", req.UserText)
+	args = append(args, "--")
+	if resume {
+		args = append(args, resumeID)
+	}
+	args = append(args, req.UserText)
 
 	cmd := exec.CommandContext(ctx, "codex", args...) //nolint:gosec
 	cmd.Env = buildEnvCodex(DispatchRequest{

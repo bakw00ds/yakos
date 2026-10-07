@@ -27,6 +27,10 @@ const MaxPersonaBytes = 64 << 10
 // persona, or its encoded form, exceeds MaxPersonaBytes.
 var ErrPersonaTooLarge = errors.New("agent persona too large")
 
+// ErrInvalidResumeID is what a codex or agy chat command reports when the
+// native session id to resume fails ValidSessionID.
+var ErrInvalidResumeID = errors.New("invalid native session id for resume")
+
 // checkPersonaSize returns an error naming the size when persona is over the
 // cap. It never includes the persona itself.
 func checkPersonaSize(persona string) error {
