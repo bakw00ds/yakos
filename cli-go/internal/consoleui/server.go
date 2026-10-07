@@ -548,6 +548,8 @@ func New(cfg Config) (*Server, error) {
 	if stableLoopbackID == "" {
 		stableLoopbackID = loadOrCreateLoopbackOwnerID(cfg.StateDir)
 	}
+	chatH.loopbackHost = loopbackTrusted
+	chatH.loopbackOwnerID = stableLoopbackID
 	callerLabelFn := func(r *http.Request) string {
 		if loopbackTrusted {
 			// Stamp every loopback request with the stable server-derived ID.
@@ -883,6 +885,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/", s.handleIndex)
 	s.mux.HandleFunc("/app.js", s.handleAppJS)
 	s.mux.HandleFunc("/chat-routing.js", s.handleChatRoutingJS)
+	s.mux.HandleFunc("/context-drawer.js", s.handleContextDrawerJS)
 	s.mux.HandleFunc("/styles.css", s.handleCSS)
 	// Service Worker served from a real same-origin path so browsers accept
 	// registration at scope '/'.  Blob-URL registration is rejected by
@@ -1054,6 +1057,7 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/chat/transcript", requireRoleFunc(netid.RoleRead, s.chat.handleChatTranscript))
 	// GET /api/models — the model registry for the pane selects (K-148). RoleRead.
 	s.mux.HandleFunc("/api/models", requireRoleFunc(netid.RoleRead, s.chat.handleModels))
+	s.mux.HandleFunc("/api/chat/context", requireRoleFunc(netid.RoleRead, s.chat.handleChatContext))
 	// POST /api/chat/share — flip shared flag; owner-gated.
 	s.mux.HandleFunc("/api/chat/share", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatShare))
 	// POST /api/chat/send — deliver a follow-up turn to a persistent interactive
@@ -1538,7 +1542,7 @@ func isStaticAsset(r *http.Request) bool {
 		return false
 	}
 	switch r.URL.Path {
-	case "/", "/app.js", "/chat-routing.js", "/styles.css", "/sw.js", "/ide-editor.js", "/ide/editor":
+	case "/", "/app.js", "/chat-routing.js", "/context-drawer.js", "/styles.css", "/sw.js", "/ide-editor.js", "/ide/editor":
 		return true
 	}
 	// Vendored pinned blobs are same-origin static assets; no token required.

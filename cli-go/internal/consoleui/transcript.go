@@ -48,6 +48,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/knowledge"
 	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/statepath"
 )
@@ -431,6 +432,14 @@ type conversationMeta struct {
 	// recognised from the CLI's own message; the count is the backstop for a
 	// message that changes wording, so a dead id cannot fail every turn forever.
 	ResumeFailures map[string]int `json:"resume_failures,omitempty"`
+
+	// KnowledgeSHA, KnowledgeBytes and KnowledgeParts describe the knowledge
+	// block composed for a non-claude conversation (K-149). The block's text is
+	// in <conversationId>.knowledge.txt; it is composed once and every later
+	// turn re-sends those bytes, so the prefix stays byte-stable.
+	KnowledgeSHA   string           `json:"knowledge_sha,omitempty"`
+	KnowledgeBytes int              `json:"knowledge_bytes,omitempty"`
+	KnowledgeParts []knowledge.Part `json:"knowledge_parts,omitempty"`
 }
 
 // errNativeSessionOwner is returned when a native session operation names an
@@ -483,6 +492,9 @@ func readMeta(path string) conversationMeta {
 		if !isKnownRuntime(rt) || n <= 0 || n > maxResumeFailures {
 			delete(m.ResumeFailures, rt)
 		}
+	}
+	if !validKnowledgeMeta(&m) {
+		m.KnowledgeSHA, m.KnowledgeBytes, m.KnowledgeParts = "", 0, nil
 	}
 	return m
 }
