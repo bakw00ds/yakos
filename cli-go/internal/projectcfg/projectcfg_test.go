@@ -1,6 +1,7 @@
 package projectcfg
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -300,5 +301,34 @@ func TestParse_RouterNeverPaths(t *testing.T) {
 	}
 	if cfg, _ := Parse([]byte("router:\n  never_paths: nope\n")); len(cfg.NeverPaths) != 0 {
 		t.Errorf("non-list accepted: %v", cfg.NeverPaths)
+	}
+}
+
+// router.never_paths is bounded (K-140 fixup F3): at most 32 entries, and no glob
+// whose wildcards could make a match expensive.
+func TestParse_NeverPathsAreBounded(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("router:\n  never_paths:\n")
+	b.WriteString("    - \"*" + strings.Repeat("[!b]", 60) + "b\"\n")
+	b.WriteString("    - \"**/a/**/b/**\"\n")
+	for i := 0; i < 50; i++ {
+		fmt.Fprintf(&b, "    - \"vault%d/*\"\n", i)
+	}
+	cfg, warns := Parse([]byte(b.String()))
+	if len(cfg.NeverPaths) != MaxNeverPaths {
+		t.Errorf("kept %d, want %d", len(cfg.NeverPaths), MaxNeverPaths)
+	}
+	for _, g := range cfg.NeverPaths {
+		if strings.Contains(g, "[!b]") || g == "**/a/**/b/**" {
+			t.Errorf("kept %q", g)
+		}
+	}
+	if len(warns) == 0 {
+		t.Error("no warning for the dropped entries")
+	}
+	for _, ok := range []string{"internal/billing/*", "**/.vault*", "secrets/**", "*.tfvars"} {
+		if !NeverPathSimpleEnough(ok) {
+			t.Errorf("%q rejected", ok)
+		}
 	}
 }

@@ -244,6 +244,10 @@ type Input struct {
 	// prompt, a knowledge block, upstream flow outputs, transcript digests. Only
 	// the classifier reads it; no rule matches on it, and it is never logged.
 	Material []string
+	// SecretOnly is text scanned for secret patterns but not for credential-file
+	// names: the agent's own prompt, whose policy prose ("never edit .env*") is
+	// not a request to read that file.
+	SecretOnly []string
 	// NeverPaths are the project's additional never-paths (projectcfg). They add
 	// to the built-in set and cannot remove from it.
 	NeverPaths []string

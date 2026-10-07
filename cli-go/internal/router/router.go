@@ -61,7 +61,7 @@ var ActiveClassifier Classifier = SensitiveClassifier
 // material to scan and it is sensitive, the class is sensitive whatever was set.
 func Classify(in Input) string {
 	if in.Class != "" && identRe.MatchString(in.Class) {
-		if in.Class != ClassSensitive && len(in.Material) > 0 && SensitiveReason(in) != "" {
+		if in.Class != ClassSensitive && len(in.Material)+len(in.SecretOnly) > 0 && SensitiveReason(in) != "" {
 			return ClassSensitive
 		}
 		return in.Class

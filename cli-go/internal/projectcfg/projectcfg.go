@@ -112,6 +112,28 @@ var neverPathRe = regexp.MustCompile(`^[A-Za-z0-9_.*?\[\]!^@~+/-]{1,256}$`)
 // maxDisables bounds each router disable list.
 const maxDisables = 64
 
+// MaxNeverPaths bounds router.never_paths: every entry is matched against every
+// token of every request, so the list is kept short (K-140 fixup F3).
+const MaxNeverPaths = 32
+
+// maxGlobMeta and maxGlobStars bound the work one never_paths glob can cost a
+// match: at most 6 of `*?[` (plus the stars of a `**`) and two `**` runs. A glob of 64 chained `[!b]`
+// classes is a CPU sink, not a credential name.
+const (
+	maxGlobMeta  = 6
+	maxGlobStars = 2
+)
+
+// NeverPathSimpleEnough reports whether a never_paths glob is cheap enough to
+// match against every token of a request. The router applies the same bound to
+// any project glob it is handed.
+func NeverPathSimpleEnough(glob string) bool {
+	if len(glob) > 256 {
+		return false
+	}
+	return strings.Count(glob, "**") <= maxGlobStars && strings.Count(glob, "*")+strings.Count(glob, "?")+strings.Count(glob, "[") <= maxGlobMeta+maxGlobStars
+}
+
 // modelIDRe is the shape of a model id (runtime.ModelIDPattern).
 var modelIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,63}$`)
 
@@ -262,7 +284,7 @@ func Parse(data []byte) (Config, []string) {
 					warns = append(warns, w...)
 				case "never_paths":
 					var w []string
-					cfg.NeverPaths, w = disableList(k, m[k], neverPathRe)
+					cfg.NeverPaths, w = neverPathList(m[k])
 					warns = append(warns, w...)
 				default:
 					warns = append(warns, "router: a project can only disable runtimes and models or add never_paths; ignoring that key")
@@ -272,6 +294,25 @@ func Parse(data []byte) (Config, []string) {
 	}
 
 	return cfg, warns
+}
+
+// neverPathList reads router.never_paths: disableList's shape check, then the
+// complexity bound, then at most MaxNeverPaths entries.
+func neverPathList(v any) ([]string, []string) {
+	all, warns := disableList("never_paths", v, neverPathRe)
+	var out []string
+	for _, g := range all {
+		if !NeverPathSimpleEnough(g) {
+			warns = append(warns, "router.never_paths: skipping a glob with too many wildcards")
+			continue
+		}
+		if len(out) >= MaxNeverPaths {
+			warns = append(warns, fmt.Sprintf("router.never_paths: only the first %d entries are read", MaxNeverPaths))
+			break
+		}
+		out = append(out, g)
+	}
+	return out, warns
 }
 
 // disableList reads one router disable list: strings that match re, deduplicated,

@@ -378,7 +378,11 @@ A dispatch is classified `sensitive` when any of this text contains a
 secret-shaped string or names a never-path:
 
 - the task, the agent's prompt, a knowledge block (when present), a Flows
-  node's upstream outputs and transcript digests. The last three are passed by
+  node's upstream outputs and transcript digests. The agent's own prompt is
+  scanned for secret patterns only, not for credential-file names: framework
+  prompts say "never edit `.env*`" and that is policy prose, not a request to
+  read the file. Zero-width and soft-hyphen characters are stripped before the
+  scan. The last three are passed by
   the caller as `Params.ScanExtra` / `Request.ScanExtra`
   (`dispatch.ClassifyFlowOutput` tells an engine whether an output is sensitive
   before it dispatches the node).
@@ -386,11 +390,20 @@ secret-shaped string or names a never-path:
   Anthropic and Google keys, PEM private keys). Never-paths: the egress layer's
   built-in list (`.env*`, `*.pem`, `*.key`, `secrets/**`, `credentials/**`,
   `id_rsa*`, `.aws/credentials`, `.netrc`, ...) matched case-insensitively
-  against every path-like word in the text.
+  against every path-like word in the text, plus `id_ecdsa*`, `id_dsa*`,
+  `.kube/config`, `.pypirc`, `*.tfvars` and gcloud application-default
+  credentials. Words are split on whitespace and punctuation of any script, and
+  `@`, `*`, `_` and similar decoration is trimmed (`@.env`, `**.env**`); a word
+  over 1024 bytes is matched by its first and last 1024 bytes. Base64, hex and
+  split-up keys are out of scope for a routing class.
 
 A project adds its own paths in `.yakos.yml`:
 `router: {never_paths: ["internal/billing/*"]}`. It can only add: the built-in
 patterns and paths are merged in on every scan, and no project key removes one.
+At most 32 entries are read, and a glob with more than 8 wildcard characters or
+more than two `**` is dropped with a warning (a scan-cost bound). One request
+is scanned once: the result is remembered by content hash for 30 seconds, so a
+chat pre-check and the dispatch after it share it.
 Looser, higher-false-positive patterns (entropy, generic `password=`) are not
 shipped; they would be opt-in.
 

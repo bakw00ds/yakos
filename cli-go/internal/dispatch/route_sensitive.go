@@ -103,7 +103,8 @@ func classifyRequest(class string, ci chainInput, agent *agentscompose.ComposedA
 		in.Material = append(in.Material, task)
 	}
 	if agent != nil && agent.Prompt != "" {
-		in.Material = append(in.Material, agent.Prompt)
+		// Secret patterns only: the roster's own prompts say "never edit .env*".
+		in.SecretOnly = append(in.SecretOnly, agent.Prompt)
 	}
 	for _, x := range extra {
 		if x != "" {
