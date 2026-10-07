@@ -260,3 +260,24 @@ func TestParity_BashReader(t *testing.T) {
 		}
 	}
 }
+
+// The router: block can only switch runtimes and models off.
+func TestParse_RouterBlockOnlyDisables(t *testing.T) {
+	cfg, warns := Parse([]byte("router:\n  disable_runtimes: [codex, codex, agy]\n  disable_models: [gpt-5.6-sol, 'bad id']\n  enable_runtimes: [x]\n  rules: []\n"))
+	if got := strings.Join(cfg.DisableRuntimes, ","); got != "codex,agy" {
+		t.Errorf("DisableRuntimes = %q", got)
+	}
+	if got := strings.Join(cfg.DisableModels, ","); got != "gpt-5.6-sol" {
+		t.Errorf("DisableModels = %q", got)
+	}
+	if !cfg.RuntimeDisabled("agy") || cfg.RuntimeDisabled("claude") || !cfg.ModelDisabled("gpt-5.6-sol") || cfg.ModelDisabled("sonnet") {
+		t.Errorf("predicates wrong: %+v", cfg)
+	}
+	// One warning for the bad model id and one per ignored key, none naming a path.
+	if len(warns) != 3 {
+		t.Errorf("warnings = %v", warns)
+	}
+	if cfg, warns := Parse([]byte("router: nope\n")); len(cfg.DisableRuntimes) != 0 || len(warns) != 1 {
+		t.Errorf("a non-mapping router key is ignored with one warning: %+v %v", cfg, warns)
+	}
+}

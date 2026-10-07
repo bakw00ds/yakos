@@ -319,6 +319,8 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		Agent:           p.Agent,
 		RuntimeOverride: p.Runtime,
 		ModelOverride:   p.Model,
+		TaskBytes:       int64(len(p.Task)),
+		ConversationID:  p.ConversationID,
 	})
 	if err != nil {
 		return Result{}, err
@@ -344,6 +346,10 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		WorkDirOverride: p.WorkDirOverride,
 		Effort:          p.Effort,
 		Surface:         p.Surface,
+		RouteRule:       rr.Decision.RuleID,
+		RouteReason:     rr.Decision.Reason,
+		RouteClass:      rr.Decision.RouteClass,
+		PolicySHA:       rr.Decision.PolicySHA,
 	}
 
 	chatReq := runtime.ChatDispatchRequest{
@@ -585,6 +591,8 @@ func execWithStreaming(
 			}
 		}
 	}
+
+	noteRun(ctx, req.Runtime, exitCode, execErr)
 
 	tsEnd := time.Now()
 	durationS := tsEnd.Sub(tsStart).Seconds()

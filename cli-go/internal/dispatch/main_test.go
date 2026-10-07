@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/bakw00ds/yakos/internal/router"
 	rt "github.com/bakw00ds/yakos/internal/runtime"
 )
 
@@ -38,7 +39,8 @@ func TestMain(m *testing.M) {
 	}
 	runtimeProbe = func(context.Context, string) probeResult { return probeResult{OK: true} }
 	stateDefaultRuntime = func() (string, string) { return "", "" }
-	probeTTL = 0 // no answer is reused between tests
+	routerPolicyDir = func() string { return "" } // never the operator's real policy
+	probeTTL = 0                                  // no answer is reused between tests
 	rt.SetAliasTableForTest(testAliasTable())
 	os.Exit(m.Run())
 }
@@ -95,4 +97,15 @@ func withStateDefaultWarn(t *testing.T, name, warning string) {
 	orig := stateDefaultRuntime
 	stateDefaultRuntime = func() (string, string) { return name, warning }
 	t.Cleanup(func() { stateDefaultRuntime = orig })
+}
+
+// resetRouterState gives the test a fresh cooldown table, sticky table and no
+// policy, and restores the originals afterwards: the router keeps process-wide
+// state, and a runtime that failed in one test must not cool down in the next.
+func resetRouterState(t *testing.T) {
+	t.Helper()
+	oc, ost, od := routerCooldown, routerSticky, routerPolicyDir
+	routerCooldown, routerSticky = router.NewCooldown(nil), router.NewSticky()
+	routerPolicyDir = func() string { return "" }
+	t.Cleanup(func() { routerCooldown, routerSticky, routerPolicyDir = oc, ost, od })
 }

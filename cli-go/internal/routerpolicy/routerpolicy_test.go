@@ -1,12 +1,16 @@
 package routerpolicy
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func skipIfNoPosixModes(t *testing.T) {
@@ -175,5 +179,26 @@ func TestStateDir_IgnoresDispatchLogRelocation(t *testing.T) {
 	want := filepath.Join(home, ".yakos-state")
 	if got := StateDir(); got != want {
 		t.Fatalf("StateDir() = %q, want %q (YAKOS_DISPATCH_LOG must not relocate the policy)", got, want)
+	}
+}
+
+// Load hands the rules over undecoded and cites the digest of the bytes it read.
+func TestLoad_RulesAndSHA(t *testing.T) {
+	dir := t.TempDir()
+	body := "allow_unsandboxed_runtimes: [codex]\nrules:\n  - {action: {runtime: codex}}\n  - 7\n"
+	writePolicy(t, dir, body, 0o600)
+	f, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(body))
+	if f.SHA != hex.EncodeToString(sum[:]) {
+		t.Errorf("SHA = %q", f.SHA)
+	}
+	if f.Rules.Kind != yaml.SequenceNode || len(f.Rules.Content) != 2 {
+		t.Errorf("rules node = kind %v, %d items; a malformed item must not fail the file", f.Rules.Kind, len(f.Rules.Content))
+	}
+	if empty, _ := Load(t.TempDir()); empty.SHA != "" || empty.Rules.Kind != 0 {
+		t.Errorf("a missing file has no sha or rules: %+v", empty)
 	}
 }

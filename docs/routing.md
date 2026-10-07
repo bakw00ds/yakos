@@ -285,3 +285,46 @@ pins today's behaviour so changing it is deliberate.
 - Dispatch does not refuse a disabled model today; `enabled` is for routing
   candidates and for `list`. No dispatch-log field, accounting rule, listener or
   console page changes.
+
+## Router rules (`rules:` in router-policy.yml)
+
+The router sits at the one step `Run` and `RunStream` share. **R0** is the
+default rule: the resolve chain described above (override, agent frontmatter,
+per-domain, default-runtime, env, state default, claude; then the fallbacks,
+filtered by the sign-in probe). With no rules in the policy file every decision
+is R0 and equals that chain exactly.
+
+Rules live in `~/.yakos-state/router-policy.yml`, the file that also holds
+`allow_unsandboxed_runtimes`, read by the same reader under the same trust check
+(a regular file you own, not group or world writable; otherwise it is ignored
+with a warning that names no path). At most six rules are read; they are numbered
+`R1`..`R6` in file order and the first match wins.
+
+```yaml
+rules:
+  - match: {domain: code-review}        # class, agent, domain, task_bytes_gt, tags
+    action: {runtime: codex, model: gpt-5.5, fallbacks: [claude]}
+  - match: {task_bytes_gt: 20000}
+    action: {model: haiku}
+    override_pins: true                 # outrank the agent's runtime:/model: pins
+```
+
+- A key left out of `match` matches anything; every key that is set must hold.
+  `tags` has no source yet, so a rule that lists tags does not match.
+- `action` keys left out leave the default choice alone. A rule's `model` is
+  checked against the runtime that runs it, and dropped with a notice when that
+  runtime cannot take it (a Claude tier never goes to codex or agy, another
+  vendor's id never to Claude Code). It is not carried to a fallback runtime.
+- Frontmatter `runtime:` and `model:` pins outrank a rule unless it sets
+  `override_pins: true`. An explicit `--runtime`, `--model`, a bare runtime name
+  as the agent, and a conversation's earlier routing always outrank a rule.
+- A runtime that fails three times in a row is skipped for 60 seconds (in memory).
+  This is a preference: if nothing else can run, it is tried anyway.
+- When a rule is in force a conversation keeps the runtime and model of its first
+  turn. The router never moves it; an explicit runtime on the request does.
+- A project `.yakos.yml` may only switch things off:
+  `router: {disable_runtimes: [codex], disable_models: [gpt-5.5]}`. It cannot add
+  a rule, a runtime or a provider.
+
+The ledger row of a dispatch carries `route_rule`, `route_reason`, `route_class`
+and (when rules are in force) `policy_sha`. None of it goes into a prompt.
