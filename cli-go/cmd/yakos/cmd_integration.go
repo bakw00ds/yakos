@@ -544,10 +544,12 @@ func printWorkflowHelp(w io.Writer) {
 	_, _ = fmt.Fprint(w, `yakos workflow <subcommand> [args...]
 
 Subcommands:
-  run <name> [--run-id <id>] [--operator <id>]
+  run <name> [--run-id <id>] [--operator <id>] [--dry-run]
       Load <work>/current/workflows/<name>.yaml and execute it headlessly.
       Blocks until the graph drains (or ctx is cancelled). --run-id defaults
-      to a time-based id when omitted.
+      to a time-based id when omitted. A node's runtime and model may be
+      "auto" (the router decides). --dry-run prints where each node would
+      run, per the router, and dispatches nothing.
 
   resume <name> --prior-run-id <id> --new-run-id <id> [--operator <id>]
       Resume a failed workflow run from a prior runID. Fails loudly if the
@@ -614,7 +616,9 @@ func runWorkflow(yakosRoot string, args []string) {
 
 func runWorkflowRun(yakosRoot, workspaceRoot, workDir string, args []string) {
 	var runID, operatorID string
+	var dryRun bool
 	fs := &cliflag.Set{Cmd: "workflow run", Specs: []cliflag.Spec{
+		{Name: "--dry-run", Kind: cliflag.Bool, Bool: &dryRun},
 		{Name: "--run-id", Kind: cliflag.String, Str: &runID, ValueDesc: "a value"},
 		{Name: "--operator", Kind: cliflag.String, Str: &operatorID, ValueDesc: "a value"},
 	}}
@@ -662,6 +666,13 @@ func runWorkflowRun(yakosRoot, workspaceRoot, workDir string, args []string) {
 		os.Exit(1)
 	}
 
+	if dryRun {
+		if !printWorkflowRoutePlan(context.Background(), os.Stdout, wf, yakosRoot, workspaceRoot) {
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Build a dispatch.Service for this CLI run.
 	svc := dispatch.NewService(dispatch.ServiceConfig{
 		WorkspaceRoot: workspaceRoot,
@@ -689,6 +700,33 @@ func runWorkflowRun(yakosRoot, workspaceRoot, workDir string, args []string) {
 	if rs.Status != "completed" {
 		os.Exit(1)
 	}
+}
+
+// printWorkflowRoutePlan writes one line per node: where the router would run
+// it. Nothing is dispatched or logged. It returns false when any node could not
+// be routed (unknown agent, no runtime available), so --dry-run doubles as a
+// check.
+func printWorkflowRoutePlan(ctx context.Context, w io.Writer, wf *workflow.Workflow, yakosRoot, project string) bool {
+	ok := true
+	_, _ = fmt.Fprintf(w, "workflow %s: planned routes (prompt size is the unsubstituted prompt's)\n", wf.Name)
+	for _, pr := range workflow.PlanRoutes(ctx, wf, yakosRoot, project) {
+		if pr.Err != nil {
+			ok = false
+			_, _ = fmt.Fprintf(w, "  %-20s agent=%s  ERROR %v\n", pr.Node, pr.Agent, pr.Err)
+			continue
+		}
+		pin := "-"
+		if pr.Pinned != "" {
+			pin = pr.Pinned
+		}
+		model := pr.Model
+		if model == "" {
+			model = "(harness default)"
+		}
+		_, _ = fmt.Fprintf(w, "  %-20s agent=%s  runtime=%s model=%s rule=%s pinned=%s  %s\n",
+			pr.Node, pr.Agent, pr.Runtime, model, pr.Rule, pin, pr.Reason)
+	}
+	return ok
 }
 
 func runWorkflowResume(yakosRoot, workspaceRoot, workDir string, args []string) {

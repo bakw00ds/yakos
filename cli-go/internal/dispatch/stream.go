@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -273,6 +274,14 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 	if err := validateIdentityField("resume_session_id", p.ResumeSessionID); err != nil {
 		return Result{}, err
 	}
+	for rt, id := range p.NativeSessions {
+		if !slices.Contains(runtime.Known, rt) {
+			return Result{}, fmt.Errorf("dispatch: native_sessions: unknown runtime")
+		}
+		if err := validateIdentityField("native_sessions id", id); err != nil {
+			return Result{}, err
+		}
+	}
 
 	// --- Dual-regime operator_id (mirrors Service.Run) ---
 	var operatorID string
@@ -366,9 +375,11 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		// AllowRoot is not plumbed through Params (CLI-only flag); defaults to
 		// false for console/gRPC-originated streaming dispatches.
 	}
-	// Continuity: only the claude adapter resumes a native session. The id was
-	// format-checked above; other runtimes ignore the field anyway.
-	if rr.Runtime == "claude" {
+	// Continuity: resume the native session of the runtime that was resolved.
+	// Ids were format-checked above.
+	if id := p.NativeSessions[rr.Runtime]; id != "" {
+		chatReq.ResumeSessionID, chatReq.ResumeRuntime = id, rr.Runtime
+	} else if rr.Runtime == "claude" {
 		chatReq.ResumeSessionID = p.ResumeSessionID
 	}
 

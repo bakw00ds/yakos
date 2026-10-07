@@ -294,3 +294,37 @@ func TestNativeSession_ResumeFailuresCountAndReset(t *testing.T) {
 		t.Error("an unknown runtime must be rejected")
 	}
 }
+
+// K-147a: the one meta file holds a session id per runtime, and a file written
+// when only claude was stored still reads and keeps its claude entry.
+func TestNativeSession_AllRuntimesKeyedAndLegacyFile(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "chats")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tr := consoleui.NewTranscripts(filepath.Dir(dir))
+	legacy := `{"native_sessions":{"claude":"sess-A"},"owner_operator_id":"alice"}`
+	if err := os.WriteFile(filepath.Join(dir, "conv-1.meta.json"), []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := tr.NativeSession("conv-1", "claude", op); got != "sess-A" {
+		t.Fatalf("legacy claude-only file: got %q", got)
+	}
+	for rt, id := range map[string]string{"codex": "019a-thread", "agy": "conv-42"} {
+		if err := tr.SetNativeSession("conv-1", rt, id, op); err != nil {
+			t.Fatalf("%s: %v", rt, err)
+		}
+	}
+	for rt, want := range map[string]string{"claude": "sess-A", "codex": "019a-thread", "agy": "conv-42"} {
+		if got := tr.NativeSession("conv-1", rt, op); got != want {
+			t.Errorf("%s = %q, want %q", rt, got, want)
+		}
+	}
+	// A different operator gets none of them.
+	if got := tr.NativeSession("conv-1", "codex", "bob"); got != "" {
+		t.Errorf("non-owner read %q", got)
+	}
+	if ents, _ := filepath.Glob(filepath.Join(dir, "conv-1*")); len(ents) != 1 {
+		t.Errorf("want only the meta file, got %v", ents)
+	}
+}
