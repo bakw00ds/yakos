@@ -10,13 +10,13 @@ package consoleui_test
 // hanging mode is `exec sleep` so a kill reaches the sleep itself.
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -44,6 +44,7 @@ printf '%s\n' '{"event":"result","result":{"conversation_id":"conv-agy-1","statu
 type resumeFixture struct {
 	ledgerServer
 	argvLog, pids, hang string
+	convs               *[]string // conversations dispatched, for the fail-fast refusal check
 }
 
 func newResumeServer(t *testing.T, harness, script string) resumeFixture {
@@ -53,14 +54,18 @@ func newResumeServer(t *testing.T, harness, script string) resumeFixture {
 	}
 	s := newLedgerServer(t)
 	dir := t.TempDir()
-	f := resumeFixture{ledgerServer: s, argvLog: filepath.Join(dir, "argv.log"), pids: filepath.Join(dir, "pids"), hang: filepath.Join(dir, "hang")}
+	f := resumeFixture{ledgerServer: s, argvLog: filepath.Join(dir, "argv.log"), pids: filepath.Join(dir, "pids"), hang: filepath.Join(dir, "hang"), convs: new([]string)}
 	bin := t.TempDir()
 	script = strings.NewReplacer("@FAKE_ARGV_LOG@", f.argvLog, "@FAKE_PIDS@", f.pids, "@FAKE_HANG@", f.hang).Replace(script)
 	if err := os.WriteFile(filepath.Join(bin, harness), []byte(script), 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// The runtime availability probe (auth.ProbeRuntime) needs a signed-in
+	// harness: seed both so the result does not depend on the machine's own
+	// sign-in state (an unseeded agy fails the probe on a clean Linux runner).
 	t.Setenv("OPENAI_API_KEY", "sk-test-not-real")
+	t.Setenv("ANTIGRAVITY_API_KEY", "k-test-not-real")
 	t.Cleanup(func() {
 		for _, pid := range f.pidList() {
 			killPID(pid)
@@ -90,8 +95,30 @@ func (f resumeFixture) calls(t *testing.T) [][]string {
 	return out
 }
 
+// waitForEvents shadows the ledger's: it fails at once, with the refusal's
+// text, when a dispatched conversation holds an error entry (the availability
+// probe or the budget refused the turn) instead of waiting out 15 s.
+func (f resumeFixture) waitForEvents(t *testing.T, n int) []map[string]any {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		if ev := f.events(t); len(ev) >= n {
+			return ev
+		}
+		for _, c := range *f.convs {
+			if errs := f.transcriptErrors(t, c); len(errs) > 0 {
+				t.Fatalf("conversation %s was refused before it ran: %q", c, errs)
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %d dispatch-log events; have %v", n, f.events(t))
+	return nil
+}
+
 func (f resumeFixture) dispatchTurn(t *testing.T, harness, conv, task string) {
 	t.Helper()
+	*f.convs = append(*f.convs, conv)
 	resp := f.post(t, "/api/chat/dispatch", map[string]any{
 		"agent": harness, "runtime": harness, "task": task, "sessionId": "sess-" + conv,
 		"operatorId": "alice", "conversationId": conv, "interactive": true,
@@ -217,7 +244,7 @@ func TestResumePane_SecondSendDuringTurnIs409AndCloseLeavesNoOrphan(t *testing.T
 	}
 
 	f.mgr.Close(conv)
-	waitUntil(t, "harness process gone", func() bool { return syscall.Kill(pid, 0) != nil })
+	waitUntil(t, "harness process gone", func() bool { return !pidAlive(pid) })
 	// The killed turn is not an error pane: nothing re-launched the harness.
 	time.Sleep(200 * time.Millisecond)
 	if n := len(f.calls(t)); n != 1 {
@@ -238,4 +265,90 @@ func TestResumePane_ClaudePaneStillUsesTurnLedger(t *testing.T) {
 	if s.mgr.AccountsOwnTurns("conv-cl", "alice") {
 		t.Error("a claude pane must not be a ResumeEngine")
 	}
+}
+
+// A codex or agy pane at its agent's hard stop is refused exactly as a one-shot
+// turn is, before the harness is launched, and writes nothing. The refusal comes
+// from RunStream's budget pre-flight and surfaces as a turn error on the stream
+// and in the transcript (a claude pane answers a send with 429; a resume pane
+// has no pre-flight at the send, so the refusal is a turn error).
+func TestResumePane_AtAHardStopIsRefusedBeforeTheHarnessRuns(t *testing.T) {
+	for _, tc := range []struct{ harness, script string }{{"codex", fakeCodexScript}, {"agy", fakeAgyScript}} {
+		t.Run(tc.harness, func(t *testing.T) {
+			f := newResumeServer(t, tc.harness, tc.script)
+			f.limit(t, tc.harness)
+			seedTokens(t, tc.harness, 500) // over the limit of 100, without a turn having run
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			frames := f.sseFrames(t, ctx, "alice")
+			time.Sleep(100 * time.Millisecond)
+
+			conv := "conv-hs-" + tc.harness
+			f.dispatchTurn(t, tc.harness, conv, "hello")
+			t.Cleanup(func() { f.mgr.Close(conv) })
+			got := nextError(t, frames, tc.harness+" dispatch")
+			if !strings.HasPrefix(got, refusedPrefix+`"`+tc.harness+`"`) {
+				t.Fatalf("the refusal is the budget's: %q", got)
+			}
+			if errs := f.transcriptErrors(t, conv); len(errs) != 1 || errs[0] != got {
+				t.Errorf("the refusal is in the stored transcript: %v", errs)
+			}
+			if n := len(f.calls(t)); n != 0 {
+				t.Errorf("the harness was launched %d time(s) for a refused turn", n)
+			}
+			f.noMoreEvents(t, 2, "only the seed is in the log")
+
+			// Control: with the window reset the same request runs.
+			f.resetWindow(t, tc.harness)
+			*f.convs = nil // the refused conversation is expected to hold its error
+			conv2 := conv + "-ok"
+			f.dispatchTurn(t, tc.harness, conv2, "hello")
+			t.Cleanup(func() { f.mgr.Close(conv2) })
+			f.waitForEvents(t, 4)
+			if n := len(f.calls(t)); n != 1 {
+				t.Errorf("with the budget clear the harness runs once: %d", n)
+			}
+		})
+	}
+}
+
+// A conversation's live engine fixes its kind: a dispatch for the other kind of
+// runtime is a 409, not a turn delivered to the wrong engine.
+func TestResumePane_DispatchToAnotherEngineKindIs409(t *testing.T) {
+	post := func(f resumeFixture, runtime, conv, sess string) int {
+		resp := f.post(t, "/api/chat/dispatch", map[string]any{
+			"agent": runtime, "runtime": runtime, "task": "x", "sessionId": sess,
+			"operatorId": "alice", "conversationId": conv, "interactive": true,
+		})
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	t.Run("claude into a codex pane", func(t *testing.T) {
+		f := newResumeServer(t, "codex", fakeCodexScript)
+		f.dispatchTurn(t, "codex", "conv-mix-a", "first")
+		t.Cleanup(func() { f.mgr.Close("conv-mix-a") })
+		f.waitForEvents(t, 2)
+		if got := post(f, "claude", "conv-mix-a", "sess-mix-a2"); got != http.StatusConflict {
+			t.Fatalf("claude into a live codex ResumeEngine: %d, want 409", got)
+		}
+		f.pairsAfter(t, 1) // nothing ran
+		if got := post(f, "codex", "conv-mix-a", "sess-mix-a3"); got != http.StatusAccepted {
+			t.Fatalf("the pane's own runtime still dispatches: %d", got)
+		}
+	})
+	t.Run("codex into a claude pane", func(t *testing.T) {
+		f := newResumeServer(t, "codex", fakeCodexScript)
+		if got := post(f, "claude", "conv-mix-b", "sess-mix-b1"); got != http.StatusAccepted {
+			t.Fatalf("claude dispatch: %d", got)
+		}
+		t.Cleanup(func() { f.mgr.Close("conv-mix-b") })
+		f.waitForEvents(t, 2)
+		if got := post(f, "codex", "conv-mix-b", "sess-mix-b2"); got != http.StatusConflict {
+			t.Fatalf("codex into a live claude engine: %d, want 409", got)
+		}
+		f.pairsAfter(t, 1)
+		if n := len(f.calls(t)); n != 0 {
+			t.Errorf("the codex harness ran %d time(s)", n)
+		}
+	})
 }

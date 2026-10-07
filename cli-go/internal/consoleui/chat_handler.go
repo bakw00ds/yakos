@@ -655,6 +655,19 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// A conversation's live engine decides what kind of pane it is. A dispatch
+	// that would build the other kind (claude into a codex or agy ResumeEngine,
+	// or the reverse) is refused instead of being delivered to the wrong engine.
+	if dispReq.Interactive && ch.interactiveMgr != nil {
+		if live, resume := ch.interactiveMgr.LiveEngineKind(conversationID, capturedOperatorID); live && resume != (runtimeName != "claude") {
+			cancel()
+			ch.state.remove(dispReq.SessionID, stateGen)
+			ch.hub.CloseSession(dispReq.SessionID)
+			http.Error(w, "conversation is pinned to a different runtime; start a new conversation to switch", http.StatusConflict)
+			return
+		}
+	}
+
 	// Append the user turn to the transcript.
 	_ = ch.transcripts.Append(TranscriptEntry{
 		SessionID:      dispReq.SessionID,

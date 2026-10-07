@@ -303,6 +303,21 @@ func (m *Manager) AccountsOwnTurns(conversationID, ownerOperatorID string) bool 
 	return ok && a.AccountsOwnTurns()
 }
 
+// LiveEngineKind reports whether conversationID holds a live engine owned by
+// ownerOperatorID and, if so, whether it is a ResumeEngine (a codex or agy pane)
+// rather than a claude engine. A dispatch uses it to refuse a runtime that does
+// not match the engine already serving the conversation.
+func (m *Manager) LiveEngineKind(conversationID, ownerOperatorID string) (live, resume bool) {
+	m.mu.Lock()
+	entry, ok := m.entries[conversationID]
+	m.mu.Unlock()
+	if !ok || entry.session.IsClosed() || entry.session.OwnerOperatorID() != ownerOperatorID {
+		return false, false
+	}
+	a, isA := entry.session.(interface{ AccountsOwnTurns() bool })
+	return true, isA && a.AccountsOwnTurns()
+}
+
 // Ensure returns (or creates) the live engine for conversationID.
 //
 // If no engine exists, a new Session (CLI engine) is created and started.

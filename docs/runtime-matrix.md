@@ -565,6 +565,27 @@ its dispatch refuses unless `ANTHROPIC_API_KEY` holds an API key, and the python
 it starts inherits no OAuth variables; its `launch` is claude.sh and is
 unchanged.
 
+### Codex and agy panes (K-147)
+
+With the Interactive toggle on, a codex or agy pane keeps its context across
+turns. It has no persistent process: each turn is one dispatch, and the
+harness's own session id (codex `thread_id`, agy `conversation_id`) is stored
+with the conversation and passed to the next turn (`codex exec resume`, agy
+`--conversation`), also after a console restart. Each turn writes its own
+dispatch-log event pair. A pane is pinned to its runtime: dispatching a
+different kind of runtime (claude into a codex or agy pane, or the reverse)
+into a conversation that has a live engine is refused with 409. Structured
+questions stay claude-only.
+
+With the toggle off (one-shot panes), codex and agy do not resume: every send
+starts a fresh harness session with no memory of the earlier turns.
+
+At an agent's hard budget stop the two kinds differ. A claude pane answers a
+follow-up send with 429 and the budget text. A codex or agy pane has no
+pre-flight at the send: the turn runs through the dispatch layer, whose budget
+check refuses it before the harness starts, and the refusal arrives as a turn
+error on the pane's stream and in its transcript.
+
 ## Jev is not a runtime
 
 TypeSafe's Jev is deliberately absent from this matrix. It has no session, no
