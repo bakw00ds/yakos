@@ -296,27 +296,36 @@ func TestFeedWorkCurrent_FollowsRequestProject(t *testing.T) {
 	t.Setenv("HOME", home)
 	t.Setenv("YAKOS_INPLACE_WORK", "")
 	t.Setenv("YAKOS_WORK_DIR", "")
+	// absolute on every OS (a "/srv/x" literal has no drive on Windows)
+	base := t.TempDir()
+	projA := filepath.Join(base, "projA")
+	projB := filepath.Join(base, "projB")
+	ops := filepath.Join(base, "ops", "work")
 	// the daemon's environment names project B; the request is for A
 	t.Setenv("YAKOS_PROJECT_NAME", "projB")
-	if got, want := feedWorkCurrent("/srv/projA"), filepath.Join(home, "agent-control", "projA", "work", "current"); got != want {
+	if got, want := feedWorkCurrent(projA), filepath.Join(home, "agent-control", "projA", "work", "current"); got != want {
 		t.Errorf("env named another project: got %q want %q", got, want)
 	}
 	// YAKOS_WORK_DIR is honoured only for the project the same environment names
-	t.Setenv("YAKOS_WORK_DIR", "/ops/work")
-	if got := feedWorkCurrent("/srv/projA"); strings.HasPrefix(got, "/ops") {
+	t.Setenv("YAKOS_WORK_DIR", ops)
+	if got := feedWorkCurrent(projA); strings.HasPrefix(got, ops) {
 		t.Errorf("a daemon-wide work dir was applied to another project: %q", got)
 	}
-	if got := feedWorkCurrent("/srv/projB"); got != filepath.Join("/ops/work", "current") {
+	if got := feedWorkCurrent(projB); got != filepath.Join(ops, "current") {
 		t.Errorf("matching project did not get the override: %q", got)
 	}
 	// in-place work follows the request project, not CLAUDE_PROJECT_DIR
 	t.Setenv("YAKOS_INPLACE_WORK", "1")
-	t.Setenv("CLAUDE_PROJECT_DIR", "/elsewhere")
-	if got := feedWorkCurrent("/srv/projA"); got != filepath.Join("/srv/projA", "work", "current") {
+	t.Setenv("CLAUDE_PROJECT_DIR", filepath.Join(base, "elsewhere"))
+	if got := feedWorkCurrent(projA); got != filepath.Join(projA, "work", "current") {
 		t.Errorf("in-place: %q", got)
 	}
 	// no usable request project: findings are counted only
-	for _, p := range []string{"", "relative/proj", "/"} {
+	root := string(filepath.Separator)
+	if v := filepath.VolumeName(base); v != "" {
+		root = v + root
+	}
+	for _, p := range []string{"", "relative/proj", root} {
 		if got := feedWorkCurrent(p); got != "" {
 			t.Errorf("project %q resolved to %q", p, got)
 		}
