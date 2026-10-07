@@ -59,6 +59,10 @@ const maxFlowsRequestBodyBytes = 2 << 20 // 2 MiB
 type flowsHandlers struct {
 	engine  *workflow.Engine
 	workDir string // <work>/current/ root
+	// slug names the user-level schedules file that enables triggers (K-152);
+	// yakosRoot locates the framework's workflow templates.
+	slug      string
+	yakosRoot string
 	// serverCtx is cancelled on server shutdown; background run goroutines
 	// derive their context from this so they are cancelled on daemon exit.
 	serverCtx context.Context

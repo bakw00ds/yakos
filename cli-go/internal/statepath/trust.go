@@ -43,6 +43,19 @@ func (e *UntrustedError) Error() string { return fmt.Sprintf("%s: %s", e.Path, e
 // (*UntrustedError). The file is opened and then compared with the entry that
 // was checked, so a swap between the check and the read is refused too.
 func ReadTrusted(path string, max int64) ([]byte, error) {
+	return readTrusted(path, max, 0o022)
+}
+
+// ReadTrustedPrivate is ReadTrusted for a file that must also be private: any
+// group or other permission bit (read, write or execute) makes it untrusted
+// (chmod 0600). The schedules file that enables workflow triggers uses it.
+func ReadTrustedPrivate(path string, max int64) ([]byte, error) {
+	return readTrusted(path, max, 0o077)
+}
+
+// readTrusted is the one reader behind both entry points; fileMask is the set of
+// permission bits that must be clear on the file.
+func readTrusted(path string, max int64, fileMask os.FileMode) ([]byte, error) {
 	if err := checkTrustedDir(filepath.Dir(path)); err != nil {
 		return nil, err
 	}
@@ -59,8 +72,11 @@ func ReadTrusted(path string, max int64) ([]byte, error) {
 	if !ownedBy(fi) {
 		return nil, &UntrustedError{path, "is owned by another user"}
 	}
-	if runtime.GOOS != "windows" && fi.Mode().Perm()&0o022 != 0 {
-		return nil, &UntrustedError{path, "is group or world writable (chmod go-w)"}
+	if runtime.GOOS != "windows" && fi.Mode().Perm()&fileMask != 0 {
+		if fileMask == 0o022 {
+			return nil, &UntrustedError{path, "is group or world writable (chmod go-w)"}
+		}
+		return nil, &UntrustedError{path, "is accessible to group or others (chmod 600)"}
 	}
 	afterCheck(path)
 	f, err := os.Open(path) //nolint:gosec // checked above

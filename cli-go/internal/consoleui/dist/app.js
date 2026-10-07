@@ -4945,6 +4945,10 @@
                 'aria-label="Create a new workflow" title="New workflow">' +
                 '+ New' +
               '</button>' +
+              '<button id="flows-gallery-btn" class="flows-new-btn" type="button" ' +
+                'aria-label="Browse workflow templates" title="Workflow templates">' +
+                'Templates' +
+              '</button>' +
             '</div>' +
             '<div id="flows-new-error" class="flows-new-error" role="alert" style="display:none"></div>' +
             '<div id="flows-workflow-list" class="flows-workflow-list"></div>' +
@@ -5165,9 +5169,27 @@
       createNewFlowsWorkflow();
     });
 
+    // Template gallery (K-152): the module loads on first use.
+    document.getElementById('flows-gallery-btn').addEventListener('click', openFlowsGallery);
+
     renderFlowsWorkflowList();
     // Initialize Drawflow after layout is mounted.
     initDrawflowEditor();
+  }
+
+  function openFlowsGallery() {
+    function go() {
+      window.YakosFlowsGallery.open({
+        apiFetch: apiFetch,
+        onSaved: function(name) { loadFlowsWorkflowList(); loadFlowsWorkflow(name); },
+      });
+    }
+    if (window.YakosFlowsGallery) { go(); return; }
+    var script = document.createElement('script');
+    script.src = '/flows-gallery.js';
+    script.onload = go;
+    script.onerror = function() { announceFlows('Template gallery failed to load'); };
+    document.head.appendChild(script);
   }
 
   // idRe mirrors workflow.ValidateID — ^[a-z0-9][a-z0-9-]{0,63}$

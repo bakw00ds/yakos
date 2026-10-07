@@ -115,6 +115,10 @@ type Workflow struct {
 	// Nodes is the ordered list of workflow nodes. Order has no semantic
 	// significance; the engine derives execution order from the Needs edges.
 	Nodes []Node `yaml:"nodes"`
+
+	// Triggers (K-152) declares cron and webhook starts. A declaration never
+	// fires by itself: the operator enables it in the user-level schedules file.
+	Triggers *Triggers `yaml:"triggers,omitempty"`
 }
 
 // maxWorkflowYAMLBytes caps how much of a workflow YAML file we read.

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,5 +123,44 @@ func TestWorkflowParams_HaveNoOperatorField(t *testing.T) {
 		if _, ok := m["operator_id"]; ok {
 			t.Errorf("workflow.%s params still expose operator_id", name)
 		}
+	}
+}
+
+// K-166: yakos.workflow.status returned any run's state to any socket caller.
+// A run owned by another operator must read exactly like a missing run.
+func TestWorkflowStatus_OwnerCheck(t *testing.T) {
+	cfg, ws, stateDir := newWorkflowOwnerCfg(t)
+	self := loopbackowner.LoadOrCreate(stateDir)
+	runsDir := filepath.Join(workflowWorkDir(ws), "workflows", "runs")
+	for id, owner := range map[string]string{
+		"run-mine": self, "run-legacy": "", "run-theirs": "someone-else",
+	} {
+		dir := filepath.Join(runsDir, id)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		body, _ := json.Marshal(map[string]any{"run_id": id, "workflow_name": "my-flow", "status": "completed", "owner_operator_id": owner})
+		if err := os.WriteFile(filepath.Join(dir, "run.json"), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h := handleWorkflowStatus(cfg)
+	call := func(id string) (any, error) {
+		p, _ := json.Marshal(map[string]string{"run_id": id})
+		return h(context.Background(), p)
+	}
+	for _, id := range []string{"run-mine", "run-legacy"} {
+		if _, err := call(id); err != nil {
+			t.Errorf("%s: %v, want readable", id, err)
+		}
+	}
+	_, errTheirs := call("run-theirs")
+	_, errMissing := call("run-nope")
+	if errTheirs == nil || errMissing == nil {
+		t.Fatalf("foreign run readable (%v) or missing run readable (%v)", errTheirs, errMissing)
+	}
+	norm := func(e error, id string) string { return strings.ReplaceAll(e.Error(), id, "ID") }
+	if norm(errTheirs, "run-theirs") != norm(errMissing, "run-nope") {
+		t.Errorf("foreign run is distinguishable from a missing one:\n  %v\n  %v", errTheirs, errMissing)
 	}
 }

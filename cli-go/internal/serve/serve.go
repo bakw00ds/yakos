@@ -585,6 +585,16 @@ func Run(ctx context.Context, cfg Config) error {
 			WorkDir:   workDir,
 		})
 
+		// K-152: the cron scheduler. It fires only workflows the operator
+		// enabled in the trusted ~/.yakos-state/schedules/<slug>.yaml.
+		slug := workflow.ProjectSlug(cfg.WorkspaceRoot)
+		sched := &workflow.Scheduler{
+			Engine:    workflowEngine,
+			Load:      func() (workflow.Schedules, error) { return workflow.LoadSchedules(slug) },
+			OwnerOpID: workflowOwnerID(cfg),
+		}
+		go sched.Run(ctx)
+
 		bindAddr := cfg.consoleBind()
 		networked := isNonLoopbackBind(bindAddr)
 

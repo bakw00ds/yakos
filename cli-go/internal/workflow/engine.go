@@ -82,6 +82,10 @@ type Engine struct {
 
 	// persist tracks run.json persistence failures for API consumers (K-95).
 	persist persistTracker
+
+	// trig counts in-flight runs per workflow for the one-active-run trigger
+	// guard (K-152).
+	trig triggerState
 }
 
 // EngineConfig groups the fields a production caller needs to construct an
@@ -268,6 +272,10 @@ func (e *Engine) run(
 	if err := ValidateID("runID", runID); err != nil {
 		return nil, err
 	}
+
+	// Count this run so a trigger sees it as active (K-152).
+	e.trig.add(wf.Name)
+	defer e.trig.done(wf.Name)
 
 	// Compute YAML hash for this run.
 	hash, err := yamlHash(wf)

@@ -1,0 +1,32 @@
+# Review the last day of changes each night. Cron is declared here and fires
+# only after you enable it in ~/.yakos-state/schedules/<project>.yaml.
+version: 1
+name: nightly-review
+inputs:
+  window: "the last 24 hours of commits on the default branch"
+triggers:
+  cron: "0 2 * * *"
+nodes:
+  - id: review
+    agent: code-reviewer
+    runtime: auto
+    model: auto
+    prompt: "Review ${inputs.window}. List risky changes and anything missing tests."
+    output_limit: 8000
+  - id: security
+    agent: security-reviewer
+    runtime: auto
+    model: auto
+    prompt: "Scan ${inputs.window} for security regressions."
+    output_limit: 8000
+  - id: digest
+    agent: code-reviewer
+    runtime: auto
+    model: auto
+    needs: [review, security]
+    prompt: |
+      Write a short morning digest from these two reports.
+
+      Review: ${nodes.review.output}
+      Security: ${nodes.security.output}
+    output_limit: 16000
