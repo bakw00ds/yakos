@@ -55,6 +55,7 @@ package runtime
 // is needed.
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 )
@@ -67,6 +68,8 @@ type agyLineParser struct {
 
 	structured bool
 	dropped    int // lines dropped for length
+	badIDs     int // harness ids dropped for failing the identity alphabet
+	skipped    int // lines of a structured stream that were not a recognised event
 
 	conversationID string
 	modelID        string
@@ -94,7 +97,7 @@ func (u *agyUsage) usage() Usage {
 	if u == nil {
 		return Usage{}
 	}
-	return Usage{InputTokens: u.InputTokens, OutputTokens: u.OutputTokens, CacheRead: u.CacheReadTokens}
+	return Usage{InputTokens: clampTokens(u.InputTokens), OutputTokens: clampTokens(u.OutputTokens), CacheRead: clampTokens(u.CacheReadTokens)}
 }
 
 // agyTally sums the usage carried by the DONE steps seen so far.
@@ -104,9 +107,9 @@ type agyTally struct {
 }
 
 func (t *agyTally) add(u Usage) {
-	t.sum.InputTokens += u.InputTokens
-	t.sum.OutputTokens += u.OutputTokens
-	t.sum.CacheRead += u.CacheRead
+	t.sum.InputTokens = addTokens(t.sum.InputTokens, u.InputTokens)
+	t.sum.OutputTokens = addTokens(t.sum.OutputTokens, u.OutputTokens)
+	t.sum.CacheRead = addTokens(t.sum.CacheRead, u.CacheRead)
 	t.seen = true
 }
 
@@ -285,8 +288,11 @@ func (p *agyLineParser) markStructured() {
 // learn records the conversation and model ids; it reports whether either was new.
 func (p *agyLineParser) learn(conversationID, modelID string) bool {
 	changed := false
-	if conversationID = stripNUL(conversationID); conversationID != "" && p.conversationID == "" {
-		p.conversationID = conversationID
+	id, ok := cleanHarnessID(conversationID)
+	if !ok {
+		p.badIDs++
+	} else if id != "" && p.conversationID == "" {
+		p.conversationID = id
 		changed = true
 	}
 	if modelID = stripNUL(modelID); modelID != "" && p.modelID == "" {
@@ -306,8 +312,10 @@ func (p *agyLineParser) step(st agyStep) []NativeEvent {
 				p.deltas.beginMessage()
 			}
 			p.lastTextStep, p.haveTextStep = st.StepIndex, true
-			p.deltas.add(st.TextDelta)
-			evs = append(evs, NativeEvent{Kind: EventToken, Text: stripNUL(st.TextDelta)})
+			// The kept text, separator included, so the tokens add up to Text.
+			if kept := p.deltas.addKept(st.TextDelta); kept != "" {
+				evs = append(evs, NativeEvent{Kind: EventToken, Text: kept})
+			}
 		}
 
 	case st.StepType == "tool":
@@ -348,7 +356,7 @@ func (p *agyLineParser) result(r agyResult) []NativeEvent {
 	var frame agyFrame
 	if r.Usage != nil {
 		frame = agyFrame{usage: r.Usage.usage(), numTurns: r.NumTurns, have: true}
-		frame.usage.DurationMs = int64(r.DurationSeconds * 1000)
+		frame.usage.DurationMs = clampDurationMs(r.DurationSeconds)
 		p.frame = frame
 	}
 	// The turn this frame closes: its own steps, not the conversation's total.
@@ -417,6 +425,9 @@ func agyRawText(raw json.RawMessage) string {
 
 // plainLine handles a line that is not an agy event.
 func (p *agyLineParser) plainLine(line []byte) []NativeEvent {
+	if p.structured && len(bytes.TrimSpace(line)) > 0 { // a blank line is not a defect
+		p.skipped++
+	}
 	return plainFallbackLine(p.structured, &p.plain, line)
 }
 
@@ -435,6 +446,8 @@ func (p *agyLineParser) Finish() ParseResult {
 	pr.Text = chosen.text()
 	pr.TextAll = pr.Text
 	pr.noteTruncation(chosen.truncated, chosen.truncated, p.dropped)
+	pr.LinesSkipped = p.skipped + p.badIDs
+	pr.PlainText = !p.structured
 	// This run's own tokens, and the conversation total the result frame kept.
 	pr.Usage = p.run.own(p.frame)
 	pr.CumulativeUsage = p.frame.usage

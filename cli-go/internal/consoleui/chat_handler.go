@@ -491,11 +491,11 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		}
 		modelName = resolved
 	}
-	// The persistent interactive session (CLI and SDK engines) is a claude
-	// process. Until codex/agy have their own engines, refuse the toggle for any
-	// other resolved runtime instead of quietly answering from claude.
-	if req.Interactive && runtimeName != "claude" {
-		http.Error(w, "interactive mode is only available for the claude runtime", http.StatusBadRequest)
+	// The persistent claude engines (CLI and SDK) are claude processes. A codex
+	// or agy pane gets a ResumeEngine instead, so the toggle is accepted; only
+	// the SDK engine's structured questions stay claude-only.
+	if req.Interactive && req.StructuredQuestions && runtimeName != "claude" {
+		http.Error(w, "structured questions are only available for the claude runtime", http.StatusBadRequest)
 		return
 	}
 
@@ -653,6 +653,19 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		slog.Error("consoleui: SetConversationID", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
+	}
+
+	// A conversation's live engine decides what kind of pane it is. A dispatch
+	// that would build the other kind (claude into a codex or agy ResumeEngine,
+	// or the reverse) is refused instead of being delivered to the wrong engine.
+	if dispReq.Interactive && ch.interactiveMgr != nil {
+		if live, resume := ch.interactiveMgr.LiveEngineKind(conversationID, capturedOperatorID); live && resume != (runtimeName != "claude") {
+			cancel()
+			ch.state.remove(dispReq.SessionID, stateGen)
+			ch.hub.CloseSession(dispReq.SessionID)
+			http.Error(w, "conversation is pinned to a different runtime; start a new conversation to switch", http.StatusConflict)
+			return
+		}
 	}
 
 	// Append the user turn to the transcript.
@@ -816,7 +829,11 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		// session outlives any single call, so the dispatch layer cannot open and
 		// finish an Account around a turn. A one-shot turn is accounted inside
 		// Service.RunStream and must not be counted a second time.
-		interactiveTurns := dispReq.Interactive && ch.interactiveMgr != nil
+		//
+		// A codex or agy pane (resumePane) is the exception: its ResumeEngine runs
+		// each turn through RunStream, which writes the Account pair itself.
+		resumePane := dispReq.Interactive && ch.interactiveMgr != nil && runtimeName != "claude"
+		interactiveTurns := dispReq.Interactive && ch.interactiveMgr != nil && !resumePane
 
 		onChunk := func(chunk dispatch.StreamChunk) {
 			ev := SSEEvent{
@@ -938,6 +955,25 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				}
 			}
 			ch.hub.Route(ev)
+		}
+
+		// K-147: a codex or agy pane keeps its context across turns through a
+		// ResumeEngine (one RunStream per turn, the harness's own session id
+		// threaded from turn to turn). No turnLedger: RunStream accounts each turn.
+		if resumePane {
+			ch.runResumePane(ctx, resumePaneArgs{
+				dispReq:          dispReq,
+				conversationID:   conversationID,
+				operatorID:       capturedOperatorID,
+				runtimeName:      runtimeName,
+				model:            requestedModel,
+				identity:         capturedIdentityForGoroutine,
+				worktreeOverride: capturedWorktreeOverride,
+				onChunk:          onChunk,
+				fail:             func() { outcome.fail(-1) },
+			})
+			sharedAtFinish = ch.hub.IsShared(dispReq.SessionID)
+			return
 		}
 
 		// Interactive-P2c: when interactive=true AND structuredQuestions=true,
@@ -1197,7 +1233,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		// the same way forever. See forgetDeadResume for how a dead session is
 		// recognised.
 		if resumeID != "" && ctx.Err() == nil {
-			ch.forgetDeadResume(conversationID, capturedOperatorID, res)
+			ch.forgetDeadResume(conversationID, capturedOperatorID, "claude", res)
 		}
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
@@ -1277,11 +1313,11 @@ func resumeTargetGone(text string) bool {
 // message cannot leave a dead id failing every follow-up. One failure that does
 // not look like a missing session (a rate limit, a network error) keeps the id.
 // A successful turn stores its own id, which resets the count.
-func (ch *chatHandlers) forgetDeadResume(conversationID, operatorID string, res dispatch.Result) {
+func (ch *chatHandlers) forgetDeadResume(conversationID, operatorID, rt string, res dispatch.Result) {
 	if res.ExitCode == 0 {
 		return
 	}
-	n, err := ch.transcripts.NoteResumeFailure(conversationID, "claude", operatorID)
+	n, err := ch.transcripts.NoteResumeFailure(conversationID, rt, operatorID)
 	if err != nil {
 		slog.Warn("consoleui: count resume failure", "conversation", conversationID, "err", err)
 		return
@@ -1289,7 +1325,7 @@ func (ch *chatHandlers) forgetDeadResume(conversationID, operatorID string, res 
 	if !resumeTargetGone(res.StderrTail) && n < resumeFailureLimit {
 		return
 	}
-	if clrErr := ch.transcripts.ClearNativeSession(conversationID, "claude", operatorID); clrErr != nil {
+	if clrErr := ch.transcripts.ClearNativeSession(conversationID, rt, operatorID); clrErr != nil {
 		slog.Warn("consoleui: clear native session id", "conversation", conversationID, "err", clrErr)
 	}
 }
@@ -1742,7 +1778,10 @@ func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	// through to the engine's own refusal (403) and learns nothing about the
 	// owner's agent or budget. The refusal is a 429 whose body the pane shows, and
 	// an error turn in the transcript, like the one-shot path's.
-	if agent, owner, ok := ch.turns.sessionOf(req.ConversationID); ok && owner == effectiveOperatorID {
+	// A ResumeEngine pane is neither pre-flighted nor ledgered here: its RunStream
+	// turn runs the budget check and writes the Account pair itself.
+	ownTurns := ch.interactiveMgr.AccountsOwnTurns(req.ConversationID, effectiveOperatorID)
+	if agent, owner, ok := ch.turns.sessionOf(req.ConversationID); ok && !ownTurns && owner == effectiveOperatorID {
 		if perr := dispatch.PreflightBudget(agent, ch.workspaceRoot); perr != nil {
 			slog.Warn("consoleui: interactive chat send refused", "conversation", req.ConversationID, "agent", agent, "err", perr)
 			errText := "dispatch failed: " + perr.Error()
@@ -1761,11 +1800,16 @@ func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	// The turn's ledger entry is opened before the frame is written and dropped
 	// when the engine refuses it, so a refused send (404/403/409/500) leaves no
 	// event and a delivered one always finishes as a pair (K-136).
-	turn := ch.turns.begin(req.ConversationID, req.Text, req.SessionID, effectiveOperatorID)
+	var turn *pendingTurn
+	if !ownTurns {
+		turn = ch.turns.begin(req.ConversationID, req.Text, req.SessionID, effectiveOperatorID)
+	}
 	frame := runtime.EncodeUserTurn(req.Text)
 	err := ch.interactiveSend.Send(req.ConversationID, effectiveOperatorID, frame)
 	if err != nil {
-		ch.turns.drop(req.ConversationID, turn)
+		if !ownTurns {
+			ch.turns.drop(req.ConversationID, turn)
+		}
 		switch {
 		case errors.Is(err, interactive.ErrNoSession):
 			http.Error(w, "no live session for this conversationId", http.StatusNotFound)

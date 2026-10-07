@@ -211,6 +211,10 @@ type Config struct {
 	// (cmd/yakos wraps auth.ProbeRuntime). Nil skips that check. See policy.go.
 	PolicyProbeRuntime func(ctx context.Context, id string) RuntimeProbe
 
+	// PolicyRuntimeVersion returns a harness CLI's installed version for the
+	// parser version-skew hint (K-144). Nil skips it. See policy.go.
+	PolicyRuntimeVersion func(ctx context.Context, id string) string
+
 	// PreflightFast skips the Preflight sub-checks that make a network call
 	// (gh auth status) or dial the daemon socket — used by `yakos start`'s
 	// banner integration so composing the banner never adds subprocess/

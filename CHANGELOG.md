@@ -18,6 +18,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   implementation dispatch uses, and `doctor --policy` now flags
   `YAKOS_IMPL=bash` instead of an unset variable.
 
+- **Model ceilings are registry-aware (K-139c).** An agent's `max_model` now
+  governs every runtime. A ceilinged codex agent is refused until the codex
+  aliases are mapped in the user overlay (`model-registry.yml` in the yakOS state
+  directory), and a codex agent with no pinned model never ranks, with or without
+  the overlay: pin one. A fallback chain skips a candidate whose model fails the
+  ceiling or `router.disable_models` and fails only when none is left; a runtime
+  you named (`--runtime`, a sticky pin) is refused, never moved. The passthrough
+  clamp now knows the project (a renamed supervisor keeps its ceiling) and
+  refuses an unranked id.
+- **`yakos agent --extends` reads framework templates only.** It no longer
+  accepts a project agent, and `yakos agent lint` errors on a project-local
+  `extends:`.
+
 ### Added
 
 - **test(parity): `dispatch-dry-run-parity`.** Resolves every roster agent

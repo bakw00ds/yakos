@@ -148,7 +148,7 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	var stderrBuf bytes.Buffer
 	dispatchOut, exitCode, dispatchErr := execWithStderrCapture(ctx, adapter, dispatchReq, &stderrBuf)
 
-	noteRun(ctx, runtimeName, exitCode, dispatchErr)
+	noteRun(ctx, req.Project, runtimeName, exitCode, dispatchErr)
 
 	tsEnd := time.Now()
 	durationS := tsEnd.Sub(tsStart).Seconds()
@@ -218,6 +218,7 @@ func execWithStderrCapture(
 
 	if cp, ok := adapter.(cmdProvider); ok {
 		cmd := cp.ExecCmd(ctx, req)
+		runtime.ConfigureGroupKill(cmd) // ctx cancel kills the whole group; Wait is bounded
 		var outBuf bytes.Buffer
 		cmd.Stdout = &outBuf
 		cmd.Stderr = stderrBuf

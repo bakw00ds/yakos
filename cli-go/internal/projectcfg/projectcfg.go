@@ -91,6 +91,19 @@ func (c Config) RuntimeDisabled(name string) bool { return contains(c.DisableRun
 // ModelDisabled reports whether the project switches model id off.
 func (c Config) ModelDisabled(id string) bool { return contains(c.DisableModels, id) }
 
+// ModelDisabledBy reports whether any entry of router.disable_models satisfies
+// match, and returns the first that does. A caller that can resolve tier names and
+// harness aliases through the model registry passes its matcher (modelreg
+// Registry.Matches); the entries are listed words, not only concrete ids.
+func (c Config) ModelDisabledBy(match func(listed string) bool) (string, bool) {
+	for _, d := range c.DisableModels {
+		if match(d) {
+			return d, true
+		}
+	}
+	return "", false
+}
+
 func contains(list []string, s string) bool {
 	for _, x := range list {
 		if x == s {

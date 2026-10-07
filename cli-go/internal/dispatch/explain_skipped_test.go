@@ -5,8 +5,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/bakw00ds/yakos/internal/router"
 )
 
 // A runtime skipped for the cooldown reaches the explain output as a cooling
@@ -18,10 +16,7 @@ func TestExplain_ReportsACoolingRuntimeAsSkipped(t *testing.T) {
 	project := projectWithYML(t, "")
 	setPolicy(t, "# a policy file with no rules still engages the cooldown\n")
 	clk := &fakeClock{t: time.Unix(5_000, 0)}
-	routerCooldown = router.NewCooldown(clk.now)
-	for i := 0; i < 3; i++ {
-		noteRun(context.Background(), "agy", 1, nil)
-	}
+	seedCooldownForTest(t, project, "agy", clk.now)
 	d, err := Explain(context.Background(), ExplainQuery{YakosRoot: root, Project: project, Agent: "pinned-fb"})
 	if err != nil {
 		t.Fatal(err)

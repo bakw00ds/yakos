@@ -288,7 +288,7 @@ func main() {
 	case "plugin":
 		runPlugin(args[1:])
 	case "teach":
-		runTeach(args[1:])
+		runTeach(yakosRoot, args[1:])
 	case "soul":
 		runSoul(yakosRoot, args[1:])
 	case "retro":

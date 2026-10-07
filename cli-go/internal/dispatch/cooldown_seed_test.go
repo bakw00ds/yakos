@@ -4,8 +4,6 @@ import (
 	"context"
 	"testing"
 	"time"
-
-	"github.com/bakw00ds/yakos/internal/router"
 )
 
 // seedCooldownForTest puts runtime into the router cooldown (three failed runs)
@@ -14,9 +12,8 @@ import (
 // edits this body.
 func seedCooldownForTest(t *testing.T, project, runtime string, now func() time.Time) {
 	t.Helper()
-	_ = project // the cooldown is process-wide until K-139c scopes it per project
-	routerCooldown = router.NewCooldown(now)
+	routerCooldown = newCooldownSet(now)
 	for i := 0; i < 3; i++ {
-		noteRun(context.Background(), runtime, 1, nil)
+		noteRun(context.Background(), project, runtime, 1, nil)
 	}
 }
