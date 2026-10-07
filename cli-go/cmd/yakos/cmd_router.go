@@ -36,8 +36,8 @@ var (
 )
 
 // Exit codes of `yakos router explain`: 0 ok, 1 the route could not be decided
-// (no runtime can run, unknown agent), 2 a usage error (bad flag, bad agent
-// name, unknown class). It is not a hook, so 2 here is only a usage error.
+// (no runtime can run), 2 a usage error (bad flag, bad agent name, unknown
+// agent, unknown class). It is not a hook, so 2 here is only a usage error.
 const (
 	explainExitFail  = 1
 	explainExitUsage = 2
@@ -67,7 +67,8 @@ Flags:
     --json                Machine-readable output.
 
 The same output for one dispatch: yakos dispatch --explain <agent> [task] [flags].
-Exit codes: 0 ok, 1 no route could be decided, 2 usage error. See docs/routing.md.
+Exit codes: 0 ok, 1 no route could be decided, 2 usage error (including an
+unknown agent or class). See docs/routing.md.
 `)
 }
 
@@ -239,8 +240,15 @@ func explainRun(stdout, stderr io.Writer, env explainEnv, a explainArgs, cmd str
 		ConversationID: a.ConversationID,
 	})
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "%s: %s\n", cmd, sanitizeForTerminal(strings.TrimPrefix(dispatch.PrefixedMessage(err), "dispatch: ")))
-		return explainExitFail
+		msg := strings.TrimPrefix(dispatch.PrefixedMessage(err), "dispatch: ")
+		code := explainExitFail
+		// An unknown agent is a usage error, and its message names no path.
+		if i := strings.Index(msg, " not found in composed set"); i >= 0 {
+			msg = msg[:i+len(" not found in composed set")]
+			code = explainExitUsage
+		}
+		_, _ = fmt.Fprintf(stderr, "%s: %s\n", cmd, sanitizeForTerminal(msg))
+		return code
 	}
 	v := router.ExplainView{Agent: a.Agent, Decision: d}
 	if rt != "" {

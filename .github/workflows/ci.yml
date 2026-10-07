@@ -112,7 +112,7 @@ jobs:
           log="$(mktemp)"
           go test -v -count=1 -timeout 5m -run 'TestRouterExplain|TestDispatchExplain' ./cmd/yakos | tee "$log"
           # A -run pattern that matches nothing passes; refuse that.
-          grep -q -- '--- PASS: TestRouterExplainGoldenWithPolicy' "$log"
+          grep -q -- '^--- PASS: TestRouterExplainGoldenWithPolicy' "$log"
 
   soul-skill-noop:
     name: soul/skill silent no-op regression coverage

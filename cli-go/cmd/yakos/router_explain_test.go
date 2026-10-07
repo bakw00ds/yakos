@@ -305,9 +305,19 @@ func TestRouterExplainArgvSafety(t *testing.T) {
 			}
 		})
 	}
-	// An agent that does not exist is a routing failure, exit 1.
-	if code, out := f.run(t, nil, "router", "explain", "ghost", "--project", f.project); code != 1 {
-		t.Errorf("unknown agent: exit %d, want 1:\n%s", code, out)
+	// An agent that does not exist is a usage error, exit 2, and names no path.
+	for _, args := range [][]string{
+		{"router", "explain", "ghost", "--project", f.project},
+		{"dispatch", "--explain", "ghost", "--project", f.project},
+	} {
+		code, out := f.run(t, nil, args...)
+		if code != 2 {
+			t.Errorf("%v unknown agent: exit %d, want 2:\n%s", args, code, out)
+		}
+		if !strings.Contains(out, `"ghost" not found`) || strings.Contains(out, "/") ||
+			strings.Contains(out, "yakosRoot=") || strings.Contains(out, "project=") {
+			t.Errorf("%v unknown agent output leaks a path or lacks the name:\n%s", args, out)
+		}
 	}
 }
 

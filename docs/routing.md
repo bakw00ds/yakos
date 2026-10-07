@@ -391,7 +391,7 @@ policy_sha: 3f4135ea62d49d5ac61c14051d709ac1dc84442814bc2d268d3e4d3abcc09a72
   memory, so a one-off CLI process sees it only for the process it runs in.
 - Output is deterministic (fixed order, no timestamps, no paths). `--json` has a
   fixed key set and never emits `null` for a list. Exit codes: 0 ok, 1 no route
-  could be decided, 2 usage error.
+  could be decided, 2 usage error (an unknown agent or class included).
 - The router has no bash twin (K-143): `yakos router` always runs the Go
   implementation, and the bash CLI answers that it requires `YAKOS_IMPL=go`.
 - The goldens are in `cli-go/cmd/yakos/testdata/router-explain/`; the
