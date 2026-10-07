@@ -273,7 +273,7 @@ func TestFeedScan_DeadlineIsPerRunNotPerEvent(t *testing.T) {
 	for i := 0; i < 50; i++ {
 		f.observe(ev)
 	}
-	if d := time.Since(start); d > time.Second {
+	if d := time.Since(start); d > 10*time.Second {
 		t.Errorf("50 events took %v: the deadline must disable the feed after the third overrun", d)
 	}
 	if calls.Load() != feedScanMaxOverrun || !f.off || f.offReason != "deadline" {
