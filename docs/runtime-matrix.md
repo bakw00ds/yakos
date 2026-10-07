@@ -28,6 +28,7 @@ was removed on 2026-09-01 in favor of agy).
 | Headless resume | ✅ `--resume <id>` | ✅ `codex exec resume <thread_id>` | ✅ `--conversation <id>` |
 | Sandbox flag (K-133) | n/a (permission mode) | ✅ `--sandbox workspace-write`: an OS sandbox, network off by default | ⚠ `--sandbox` blocks writes outside the workspace by default only; not a containment boundary (K-158, below) |
 | Agent file yakOS writes | (none — JSON injection) | `.codex/agents/yakos-<id>.toml` | `.agents/skills/yakos-<id>/SKILL.md` |
+| Output scan (K-146) | ✅ the `output-injection-scan` PostToolUse hook, in-session; the dispatch stream is not re-scanned | ⚠ detect-and-report: every normalized `tool_result` and text event is scanned in dispatch | ⚠ detect-and-report: every normalized `tool_result` and text event is scanned in dispatch |
 
 ✅ = supported. ❌ = not supported (degrade or workaround). ⚠ = partial or unverified.
 
@@ -368,6 +369,40 @@ read `usage` at all: it totals the chars/4 estimates `est_input_tokens` and
   that reads `usage.total_cost_usd` directly gets the same answer for such a row,
   because the 0 is already there. Tokens are the primary unit; dollars matter only
   for runs billed per API call.
+
+## Output scan over normalized events (K-146)
+
+codex and agy have no PostToolUse hook that fires on tool output, so dispatch
+scans the events its parsers already normalize. Every `tool_result` event and
+every structured text event passes through `outputinjectionscan` and the
+supervisor pre-filter's risk patterns (`dispatch/feedscan.go`), in the streaming
+path (live) and the one-shot path (after the run, report-only).
+
+| | claude | codex | agy |
+|---|---|---|---|
+| Scanned in dispatch | no (its hook scans in-session) | yes | yes |
+| Finding written | by the hook | `supervisor-findings.ndjson` + `.supervisor-pending.<session>` | same |
+| `yakos supervise pending` lists it | n/a | critical findings | critical findings |
+| `kill_on_critical` | n/a | streaming path only | streaming path only |
+
+- **Detect and report.** The default leaves the run untouched. A finding is
+  `overall: WARN` (so a hostile tool result cannot trip the CRITICAL block gate),
+  `severity: critical` for the injection family and `warn` otherwise. Only
+  critical findings get `recommended_action: surface_to_operator` and so appear in
+  `yakos supervise pending`. A finding carries static labels only: no event
+  content, tool name or path.
+- **`kill_on_critical: true`** in the trusted user policy
+  (`~/.yakos-state/supervisor-policy.yml`, same trust bar as the launch-gate
+  limits; a project `.yakos.yml` cannot set it) cancels the dispatch on a
+  critical finding through the process-group kill. The ledger's
+  `dispatch_finished` carries `cancel_reason: kill_on_critical:<label>` and
+  `scan_findings`.
+- **Bounds.** At most 32 KiB per event (head and tail), 4 MiB per run, 16
+  findings per run (identical findings are recorded once), and a 500 ms deadline
+  per scan; an overrun or the byte budget switches the feed off for the rest of
+  the run. Nothing is buffered.
+- **Findings need a work directory** (`YAKOS_WORK_DIR`, in-place work, or
+  `YAKOS_PROJECT_NAME`); without one the scan still counts findings into the ledger.
 
 ## Soft-degrade rules
 

@@ -188,6 +188,7 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	// some, so the dispatch_finished line below gains a usage object exactly
 	// when there is something to record.
 	res.applyOutput(adapter.Name(), dispatchOut)
+	res.ScanFindings = scanCaptured(adapter.Name(), req.SessionID, dispatchOut) // K-146, report-only
 
 	// --- 10. Finish the ledger entry: dispatch_finished (PR #40) ---
 	acct.FinishAt(res, tsEnd)

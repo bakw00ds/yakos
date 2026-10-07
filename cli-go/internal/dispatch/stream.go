@@ -440,6 +440,7 @@ func execWithStreaming(
 	tsStart := acct.Started()
 
 	cp, hasChatCmd := adapter.(chatCmdProvider)
+	var tap *feedScanner
 
 	var (
 		allText        []byte
@@ -459,6 +460,10 @@ func execWithStreaming(
 
 	if hasChatCmd {
 		// Use the unframed chat exec path (every harness streams its events).
+		// K-146: detect-and-report scan of the normalized events (nil for claude).
+		ctx, cancelRun := context.WithCancel(ctx)
+		defer cancelRun()
+		tap = newFeedScanner(adapter.Name(), req.SessionID, cancelRun)
 		cmd := cp.ChatExecCmd(ctx, chatReq)
 		runtime.ConfigureGroupKill(cmd) // ctx cancel kills the whole group; Wait is bounded
 
@@ -545,6 +550,7 @@ func execWithStreaming(
 					bufferedInputBytes += len(line) + 1
 					for _, ev := range bufParser.Feed(line) {
 						emitNativeEvent(ev, &streamedText, onChunk)
+						tap.observe(ev)
 					}
 				}
 			}
@@ -628,6 +634,9 @@ func execWithStreaming(
 	}
 
 	noteRun(ctx, req.Project, req.Runtime, exitCode, execErr)
+	if tap != nil && tap.cancelled != "" {
+		onChunk(StreamChunk{Type: "error", Text: "dispatch cancelled: critical finding in the run's output (kill_on_critical)"})
+	}
 
 	tsEnd := time.Now()
 	durationS := tsEnd.Sub(tsStart).Seconds()
@@ -673,6 +682,10 @@ func execWithStreaming(
 		result.SessionID = nativeSession
 		// and the concrete model id (K-136: the ledger records it).
 		result.ModelID = streamModelID
+	}
+
+	if tap != nil {
+		result.ScanFindings, result.CancelReason = tap.findings, tap.cancelled
 	}
 
 	// Finish the ledger entry identically to Run (parity invariant).
