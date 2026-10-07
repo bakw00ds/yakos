@@ -5798,7 +5798,18 @@
     panel.style.display = flowsState.selectedNodeId ? '' : 'none';
     if (!flowsState.selectedNodeId) return;
 
-    if (titleEl) titleEl.textContent = 'Node: ' + flowsState.selectedNodeId;
+    if (titleEl) {
+      // K-142: route chip. run.json nodes[id].route is the router's decision for
+      // this node (runtime/model, rule id, reason); text only, via textContent.
+      const snap = flowsState.runs.get(flowsState.activeRunId);
+      const rt = snap && snap.nodes[flowsState.selectedNodeId] && snap.nodes[flowsState.selectedNodeId].route;
+      let chip = '';
+      if (rt && (rt.runtime || rt.model)) {
+        chip = ' [route: ' + (rt.runtime || '?') + '/' + (rt.model || 'default') +
+          (rt.rule ? ' ' + rt.rule : '') + (rt.reason ? ' - ' + rt.reason : '') + ']';
+      }
+      titleEl.textContent = 'Node: ' + flowsState.selectedNodeId + chip;
+    }
     if (outputEl) outputEl.textContent = flowsState.nodeOutput; // textContent is XSS-safe
     if (truncEl) {
       truncEl.style.display = flowsState.nodeOutputTruncated ? '' : 'none';

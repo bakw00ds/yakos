@@ -42,6 +42,13 @@ func ValidateID(label, id string) error {
 	return nil
 }
 
+// Auto is the value of a node's runtime or model that leaves the choice to the
+// router (K-142). It means "no pin": the engine passes an empty value to
+// dispatch, so the node follows the policy rules and the resolve chain, and the
+// decision is recorded in run.json. A concrete runtime or model is an explicit
+// pin for that node only and wins over any policy rule.
+const Auto = "auto"
+
 // Node is a single agent dispatch step in a workflow graph.
 type Node struct {
 	// ID is the unique node identifier within this workflow.
@@ -51,15 +58,16 @@ type Node struct {
 	// Agent is the agent name dispatched for this node (required).
 	Agent string `yaml:"agent"`
 
-	// Runtime is the runtime override (claude|codex|agy|gemini). Optional;
-	// resolved from agent frontmatter when absent.
+	// Runtime is the runtime override (claude|codex|agy) or "auto" (router
+	// decides). Optional; resolved from agent frontmatter when absent.
 	Runtime string `yaml:"runtime,omitempty"`
 
 	// Model is the model override: a Claude tier (haiku|sonnet|opus|fable) or an
 	// alias (cheap|balanced|best|reasoning|frontier) on claude; an alias or a
 	// model id on codex and agy. Validated against Runtime at validate time and
 	// passed to dispatch verbatim, which resolves it for the runtime that runs.
-	// Optional; resolved from agent frontmatter when absent.
+	// "auto" leaves the model to the router. Optional; resolved from agent
+	// frontmatter when absent.
 	Model string `yaml:"model,omitempty"`
 
 	// Timeout is the per-node dispatch timeout in seconds. 0 means use the

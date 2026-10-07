@@ -46,6 +46,27 @@ type NodeState struct {
 	OutputTruncated bool `json:"output_truncated,omitempty"`
 	// ErrorMsg is a short error string on failure (go error or non-zero exit description).
 	ErrorMsg string `json:"error_msg,omitempty"`
+	// Route is the router's decision for this node's dispatch (K-142), recorded
+	// once the dispatch has been routed. Absent on runs that predate K-142 and on
+	// nodes that never reached routing; readers must tolerate its absence.
+	Route *NodeRoute `json:"route,omitempty"`
+}
+
+// NodeRoute is the per-node record of how the router placed a dispatch: where
+// it ran, which rule chose it and why. Metadata only; it is never part of a
+// prompt, system prompt or --agents payload. Every string is sanitised by
+// newNodeRoute before it reaches run.json.
+type NodeRoute struct {
+	Runtime   string `json:"runtime,omitempty"`
+	Model     string `json:"model,omitempty"`
+	Rule      string `json:"rule,omitempty"`   // route rule id ("R0".."R6")
+	Reason    string `json:"reason,omitempty"` // router's one-line reason
+	Class     string `json:"class,omitempty"`  // route class ("default")
+	PolicySHA string `json:"policy_sha,omitempty"`
+	// RuntimeRequested and ModelRequested echo the node's YAML: "auto", a
+	// concrete pin, or "" when the node said nothing.
+	RuntimeRequested string `json:"runtime_requested,omitempty"`
+	ModelRequested   string `json:"model_requested,omitempty"`
 }
 
 // RunState is the persisted state of a single workflow run.
@@ -239,6 +260,16 @@ func (rs *RunState) markNodeFailed(id string, exitCode int, errMsg string) {
 		if n.StartedAt != nil {
 			n.DurationS = now.Sub(*n.StartedAt).Seconds()
 		}
+	}
+	rs.dirty = true
+}
+
+// setNodeRoute stores the router's decision on a node. Safe for an unknown id.
+func (rs *RunState) setNodeRoute(id string, r *NodeRoute) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	if n, ok := rs.Nodes[id]; ok {
+		n.Route = r
 	}
 	rs.dirty = true
 }
