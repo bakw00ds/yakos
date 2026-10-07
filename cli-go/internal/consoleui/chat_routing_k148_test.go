@@ -540,3 +540,80 @@ func TestK148_InteractivePaneRoutesOncePerPane(t *testing.T) {
 		t.Errorf("transcript holds %d route turns, want 1", n)
 	}
 }
+
+// firstOf returns the first frame of the session that is a route or an error.
+func (k k148) firstOf(sess string) map[string]any {
+	k.t.Helper()
+	deadline := time.After(15 * time.Second)
+	for {
+		select {
+		case ev := <-k.frames:
+			if ev["session_id"] == sess && (ev["type"] == "route" || ev["type"] == "error") {
+				return ev
+			}
+		case <-deadline:
+			k.t.Fatalf("no route or error frame for %s", sess)
+		}
+	}
+}
+
+func (k k148) interactiveFirstTurn(sess, conv, runtime, task string) int {
+	k.t.Helper()
+	k.t.Cleanup(func() { k.mgr.Close(conv) })
+	resp := k.post(k.t, "/api/chat/dispatch", map[string]any{"agent": "alpha", "runtime": runtime, "task": task,
+		"sessionId": sess, "operatorId": "alice", "conversationId": conv, "interactive": true})
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+// A secret in the first turn of an interactive pane makes it sensitive (K-140):
+// the pane's engine starts on claude whatever runtime the pane asked for, and the
+// chip says so (sec-347 F2).
+func TestK148_InteractiveFirstTurnIsClassified(t *testing.T) {
+	k := newK148(t)
+	task := "deploy with AKIA" + "IOSFODNN7EXAMPLE please"
+	if st := k.interactiveFirstTurn("s-int-sens", "conv-int-sens", "codex", task); st != http.StatusAccepted {
+		t.Fatalf("status %d", st)
+	}
+	ev := k.firstOf("s-int-sens")
+	if ev["type"] != "route" {
+		t.Fatalf("first frame = %v, want a route", ev)
+	}
+	r := routeOf(t, ev)
+	if r["runtime"] != "claude" || r["class"] != "sensitive" {
+		t.Errorf("route = %v, want claude/sensitive", r)
+	}
+	if got := argvCalls(t, k.codexLog); len(got) != 0 {
+		t.Errorf("codex was started for a sensitive pane: %v", got)
+	}
+}
+
+// With claude out of reach the same turn is refused: an error frame and a
+// transcript error turn, no route chip and no engine.
+func TestK148_InteractiveSensitiveFirstTurnIsRefusedWhenClaudeIsDown(t *testing.T) {
+	k := newK148(t)
+	// Claude's CLI is off the PATH: the cheap pre-check (PreferredRuntime) does
+	// not probe, so only the router's own probe sees it gone.
+	t.Setenv("PATH", "/usr/bin:/bin")
+	task := "deploy with AKIA" + "IOSFODNN7EXAMPLE please"
+	if st := k.interactiveFirstTurn("s-int-ref", "conv-int-ref", "codex", task); st != http.StatusAccepted {
+		t.Fatalf("status %d", st)
+	}
+	ev := k.firstOf("s-int-ref")
+	if ev["type"] != "error" || !strings.Contains(ev["text"].(string), "route refused") {
+		t.Fatalf("first frame = %v, want a route-refused error", ev)
+	}
+	if strings.Contains(ev["text"].(string), "IOSFODNN7EXAMPLE") {
+		t.Error("the refusal carries the secret")
+	}
+	if got := argvCalls(t, k.codexLog); len(got) != 0 {
+		t.Errorf("codex was started: %v", got)
+	}
+	var refused bool
+	for _, e := range k.events(t) {
+		refused = refused || e["type"] == "route_refused"
+	}
+	if !refused {
+		t.Error("no route_refused event in the dispatch log")
+	}
+}

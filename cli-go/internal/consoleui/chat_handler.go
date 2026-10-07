@@ -509,13 +509,22 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	// its first turn (K-148): the decision picks the engine's runtime and, when a
 	// rule supplied it, the model. Later turns ride /api/chat/send.
 	var interactiveRoute *routeView
+	// interactiveRefusal is an Explain error: the router could not (or, for a
+	// sensitive task, would not) place this first turn. The turn is refused the
+	// way a one-shot turn is (an error frame after the 202) and no engine starts
+	// on a runtime nobody decided (sec-347 F2).
+	var interactiveRefusal error
 	if req.Interactive && ch.svc != nil {
 		interactiveRoute = &routeView{Runtime: runtimeName, Pinned: routePinned}
-		if d, exErr := dispatch.Explain(r.Context(), dispatch.ExplainQuery{
+		d, exErr := dispatch.Explain(r.Context(), dispatch.ExplainQuery{
 			YakosRoot: ch.yakosRoot, Project: ch.workspaceRoot, Agent: req.Agent,
 			Runtime: requestedRuntime, Model: requestedModel,
 			TaskBytes: int64(len(req.Task)), ConversationID: req.ConversationID,
-		}); exErr == nil && isKnownRuntime(d.Runtime) {
+			Task: req.Task, // the sensitive class (K-140) reads it, as RunStream will
+		})
+		if exErr != nil {
+			interactiveRefusal = exErr
+		} else if isKnownRuntime(d.Runtime) {
 			runtimeName = d.Runtime
 			if modelName == "" && d.RuleID != router.RuleDefault {
 				modelName, requestedModel = d.ModelID, d.ModelID
@@ -1030,6 +1039,17 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 
 		// An interactive pane's route is decided above, once, and sent here before
 		// its engine starts; a one-shot turn gets its route chunk from RunStream.
+		if dispReq.Interactive && interactiveRefusal != nil {
+			if refused, ok := dispatch.AsRouteRefused(interactiveRefusal); ok {
+				dispatch.NewAccount(dispatch.Request{AgentName: dispReq.Agent, Project: ch.workspaceRoot,
+					OperatorID: capturedOperatorID, ConversationID: conversationID, SessionID: dispReq.SessionID}).
+					Refuse(refused.Class, refused.Reason)
+			}
+			outcome.fail(-1)
+			ch.failInteractiveStart(dispReq.SessionID, conversationID, capturedOperatorID, interactiveRefusal)
+			sharedAtFinish = ch.hub.IsShared(dispReq.SessionID)
+			return
+		}
 		if dispReq.Interactive && ch.interactiveMgr != nil {
 			ch.emitRoute(dispReq.SessionID, conversationID, capturedOperatorID, interactiveRoute, handoffInfo)
 		}
