@@ -31,11 +31,7 @@ func printGatewayEnv(w io.Writer, runtimeName, stateDir string, env map[string]s
 		_, _ = fmt.Fprintf(w, "# %s: no class aliases (they apply to the claude runtime only)\n", runtimeName)
 		return
 	}
-	base := make([]string, 0, len(env))
-	for k, v := range env {
-		base = append(base, k+"="+v)
-	}
-	g := runtimeenv.ResolveGatewayAliases(stateDir, runtimeenv.FilterEnvFor("claude", base))
+	g := GatewayAliasesFor(stateDir, env)
 	for _, c := range g.Set {
 		_, _ = fmt.Fprintf(w, "%s=%s  # class %s\n", c.EnvName, c.Model, c.Class)
 	}
@@ -45,4 +41,16 @@ func printGatewayEnv(w io.Writer, runtimeName, stateDir string, env map[string]s
 	if len(g.Set) == 0 && len(g.Overridden) == 0 {
 		_, _ = fmt.Fprintln(w, "# no gateway_classes aliases are active")
 	}
+}
+
+// GatewayAliasesFor resolves the gateway_classes aliases the claude runtime would
+// get from the policy in stateDir, on top of env (the operator's environment,
+// filtered the way a claude launch filters it). It is what `yakos start
+// --print-env` and `yakos router explain --class` both report.
+func GatewayAliasesFor(stateDir string, env map[string]string) runtimeenv.GatewayAliases {
+	base := make([]string, 0, len(env))
+	for k, v := range env {
+		base = append(base, k+"="+v)
+	}
+	return runtimeenv.ResolveGatewayAliases(stateDir, runtimeenv.FilterEnvFor("claude", base))
 }

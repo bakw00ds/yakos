@@ -292,7 +292,9 @@ The router sits at the one step `Run` and `RunStream` share. **R0** is the
 default rule: the resolve chain described above (override, agent frontmatter,
 per-domain, default-runtime, env, state default, claude; then the fallbacks,
 filtered by the sign-in probe). With no rules in the policy file every decision
-is R0 and equals that chain exactly.
+is R0 and equals that chain exactly. Pins and the cooldown (below) still apply
+once any trusted `router-policy.yml` exists, rules or not: an operator who only
+sets `gateway_classes` (K-141) also gets sticky conversations and the cooldown.
 
 Rules live in `~/.yakos-state/router-policy.yml`, the file that also holds
 `allow_unsandboxed_runtimes`, read by the same reader under the same trust check
@@ -352,6 +354,48 @@ just `env-alias` only if the router left it empty. `policy_sha` is the SHA-256
 of the one trusted `router-policy.yml`; the router and the alias stamp read it
 through the same helper (`routerpolicy.FileSHA` / `routerpolicy.Load`). It is
 present when rules are in force or aliases were applied, absent otherwise.
+
+### Explaining a route
+
+`yakos router explain` answers "where would this dispatch go, and why" without
+dispatching: it runs the same routing step `Run` does (probes included) and
+starts nothing, writes no ledger row, pins no conversation and prints no notice.
+
+```
+$ yakos router explain backend --class chat
+claude/sonnet rule=R3 chain=[claude codex]
+agent: backend
+runtime: claude
+model: sonnet
+provider: anthropic
+rule: R3
+chain: [claude codex]
+reason: rule R3 matched [class=chat]: runtime=claude model=sonnet fallbacks=[codex]
+fallback_from: -
+route_class: chat
+policy_sha: 3f4135ea62d49d5ac61c14051d709ac1dc84442814bc2d268d3e4d3abcc09a72
+```
+
+- `yakos router explain <agent> [--task-file F] [--class C] [--project DIR]
+  [--json]`. `--task-file` supplies the task size for `task_bytes_gt` rules (the
+  file is only measured, never read). `--class` is a route class a rule matches
+  on, `default`, or a Claude Code request class; any other class is a usage error.
+- `yakos dispatch --explain <agent> [task]` prints the same and exits 0. It takes
+  every flag `dispatch` takes; an explicit `--runtime` or `--model` shows as
+  `rule=override` (with `underlying_rule`: what the policy alone would have done).
+- A `--class` of `subagent`, `opus`, `sonnet`, `haiku` or `fable` also prints
+  `env: NAME=model` for the `gateway_classes` alias of that class, or says the
+  operator's environment already sets it.
+- A runtime skipped on its cooldown is listed as `skipped: <runtime> (cooling)`
+  (the seconds left are left out so the output stays stable). The cooldown is in
+  memory, so a one-off CLI process sees it only for the process it runs in.
+- Output is deterministic (fixed order, no timestamps, no paths). `--json` has a
+  fixed key set and never emits `null` for a list. Exit codes: 0 ok, 1 no route
+  could be decided, 2 usage error.
+- The router has no bash twin (K-143): `yakos router` always runs the Go
+  implementation, and the bash CLI answers that it requires `YAKOS_IMPL=go`.
+- The goldens are in `cli-go/cmd/yakos/testdata/router-explain/`; the
+  `route-explain-golden` CI job runs them under `YAKOS_IMPL=go`.
 
 ### Not routed yet
 
@@ -434,7 +478,8 @@ have no documented knob and wait for the gateway hint headers (K-151).
 ### Commands
 
 - `yakos start --print-env` prints the aliases the claude runtime would get and
-  exits (names and model ids only). `yakos router explain --class` will replace
-  it (K-139).
+  exits (names and model ids only). `yakos router explain <agent> --class
+  <subagent|opus|sonnet|haiku|fable>` prints the aliases of one class together
+  with the routing decision (see "Explaining a route").
 - `yakos doctor --policy` lists the active classes and the ones the operator's
   environment overrides.

@@ -57,6 +57,7 @@ complete -c yakos -n '__fish_use_subcommand' -a 'model-routing'  -d 'evaluate an
 complete -c yakos -n '__fish_use_subcommand' -a 'decide'        -d 'ask a typed decision provider (Jev or mock)'
 complete -c yakos -n '__fish_use_subcommand' -a 'budget'        -d 'per-agent dollar budgets with a hard stop'
 complete -c yakos -n '__fish_use_subcommand' -a 'models'        -d 'provider-aware model registry (list, show, probe)'
+complete -c yakos -n '__fish_use_subcommand' -a 'router'        -d 'explain how the router routes a dispatch'
 complete -c yakos -n '__fish_use_subcommand' -a 'plan'           -d 'score and correlate plan quality'
 complete -c yakos -n '__fish_use_subcommand' -a 'work'           -d 'record plan outcome and close work session'
 complete -c yakos -n '__fish_use_subcommand' -a 'workflow'       -d 'run a named multi-step workflow'
