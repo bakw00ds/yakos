@@ -328,3 +328,77 @@ rules:
 
 The ledger row of a dispatch carries `route_rule`, `route_reason`, `route_class`
 and (when rules are in force) `policy_sha`. None of it goes into a prompt.
+
+## Claude Code request-class aliases (K-141)
+
+The user-level router policy (`~/.yakos-state/router-policy.yml`, the same
+owner-only file `allow_unsandboxed_runtimes` lives in) has a `gateway_classes`
+key that maps Claude Code request classes to Claude model ids:
+
+```yaml
+gateway_classes:
+  subagent: haiku
+  haiku: claude-haiku-4-5-20251001
+```
+
+yakOS realises it only by setting documented Claude Code environment variables
+on the `claude` child process; it does not proxy anything.
+
+### Verified env knobs
+
+Checked against Claude Code **2.1.293** (`claude --version`; the installed
+binary reads every name below, and `claude --help` lists no model-class flag
+besides `--model` and `--fallback-model`). The names were confirmed in the
+installed binary. The meaning of each knob is the one in Anthropic's published
+model-configuration page; this environment had no network access to re-fetch
+it, so re-check the table when the Claude Code version moves.
+
+| Class     | Variable                         | Value accepted by yakOS                    |
+|-----------|----------------------------------|--------------------------------------------|
+| `subagent`| `CLAUDE_CODE_SUBAGENT_MODEL`     | tier name (haiku, sonnet, opus, fable) or a Claude id |
+| `opus`    | `ANTHROPIC_DEFAULT_OPUS_MODEL`   | a Claude id                                |
+| `sonnet`  | `ANTHROPIC_DEFAULT_SONNET_MODEL` | a Claude id                                |
+| `haiku`   | `ANTHROPIC_DEFAULT_HAIKU_MODEL`  | a Claude id                                |
+| `fable`   | `ANTHROPIC_DEFAULT_FABLE_MODEL`  | a Claude id (the CLI's own fallback message tells users to set it) |
+
+The `opus`, `sonnet`, `haiku` and `fable` classes redefine what that tier alias
+resolves to, so a bare tier name is refused there (an alias pointed at itself).
+Whatever else Claude Code sends through a tier alias (for example its small
+background model, which follows the haiku alias) is the harness's decision;
+yakOS records what it set, not what Claude chose.
+
+Present in the binary but **not mapped**, because they are not documented:
+`ANTHROPIC_SMALL_FAST_MODEL` (the old name of the haiku knob),
+`CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, `CLAUDE_CODE_AUTO_MODE_MODEL`,
+`CLAUDE_CODE_BG_CLASSIFIER_MODEL`. Compaction, workflow and main-model-by-class
+have no documented knob and wait for the gateway hint headers (K-151).
+
+### Rules
+
+- Only Claude model ids (`^[a-z0-9][a-z0-9._:-]{0,63}$`, starting `claude-`, or
+  the Bedrock and Vertex `anthropic.claude-` and `us.anthropic.claude-`
+  spellings). An unknown class, a duplicate, a non-Claude id or a wrong shape
+  ignores the whole key, with one path-free note on stderr. Claude Code is never
+  routed to a non-Claude model.
+- Only the user-level file: a project `.yakos.yml` cannot set classes.
+- An operator's own value of the variable, already in the environment, always
+  wins. `yakos doctor --policy` says which classes that affects.
+- Applied once per process and never varied per turn: the table is read once
+  and the same values go into the framed dispatch, the chat dispatch, the
+  interactive session and `yakos start`, through one helper
+  (`runtime.ApplyGatewayAliases`). A different model is a different prompt
+  cache. Edit the policy, then restart the daemon.
+- Not applied to codex or agy, and not to the Agent-SDK sidecar.
+- `yakos start` applies them on the Go implementation (`YAKOS_IMPL=go`); the
+  bash `cli/lib/start.sh` path does not know the policy and sets nothing.
+- The one-shot dispatch ledger row of a claude run that had aliases set carries
+  `route_reason=env-alias` and `policy_sha` (sha256 of the sorted
+  `NAME=model` lines that were set).
+
+### Commands
+
+- `yakos start --print-env` prints the aliases the claude runtime would get and
+  exits (names and model ids only). `yakos router explain --class` will replace
+  it (K-139).
+- `yakos doctor --policy` lists the active classes and the ones the operator's
+  environment overrides.

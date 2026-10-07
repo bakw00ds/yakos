@@ -157,6 +157,9 @@ func (s runtimeEnvSpec) allows(key string) bool {
 // exact M4 class this allowlist exists to close, since claude's CLI never
 // reads GOOGLE_API_KEY. GCLOUD_* was dropped outright: nothing in Claude
 // Code's Vertex support reads a GCLOUD_-prefixed variable.
+// K-141: the ANTHROPIC_ and CLAUDE_ prefixes already pass the router-policy class
+// aliases (ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL and
+// CLAUDE_CODE_SUBAGENT_MODEL); TestGatewayAliases_AllowlistPassesTheNamesForClaudeOnly pins it.
 var claudeEnvSpec = runtimeEnvSpec{
 	prefixes: []string{
 		"ANTHROPIC_", "CLAUDE_",

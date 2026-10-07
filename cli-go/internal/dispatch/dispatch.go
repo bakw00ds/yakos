@@ -113,6 +113,7 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	materializeAgentFiles(runtimeName, req.Project, req.WorkDirOverride, *targetAgent)
 
 	// --- 7. Open the ledger entry: dispatch_started (PR #40: includes project) ---
+	stampEnvAlias(&req, runtimeName)
 	acct := NewAccount(req)
 	acct.Start()
 	tsStart := acct.Started()
