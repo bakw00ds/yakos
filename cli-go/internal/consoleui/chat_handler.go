@@ -1051,7 +1051,8 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		if dispReq.Interactive && interactiveRefusal != nil {
 			if refused, ok := dispatch.AsRouteRefused(interactiveRefusal); ok {
 				dispatch.NewAccount(dispatch.Request{AgentName: dispReq.Agent, Project: ch.workspaceRoot,
-					OperatorID: capturedOperatorID, ConversationID: conversationID, SessionID: dispReq.SessionID}).
+					OperatorID: capturedOperatorID, ConversationID: conversationID, SessionID: dispReq.SessionID,
+					Surface: dispatch.SurfaceConsoleChat}).
 					Refuse(refused.Class, refused.Reason)
 			}
 			outcome.fail(-1)
