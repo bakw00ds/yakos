@@ -333,8 +333,11 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		ModelOverride:   p.Model,
 		TaskBytes:       int64(len(p.Task)),
 		ConversationID:  p.ConversationID,
+		Task:            p.Task,
+		Extra:           p.ScanExtra,
 	})
 	if err != nil {
+		noteRefused(Request{AgentName: p.Agent, Project: project, OperatorID: operatorID, ConversationID: p.ConversationID, SessionID: p.SessionID}, err)
 		return Result{}, err
 	}
 	targetAgent := rr.Agent
@@ -460,6 +463,7 @@ func execWithStreaming(
 	if hasChatCmd {
 		// Use the unframed chat exec path (every harness streams its events).
 		cmd := cp.ChatExecCmd(ctx, chatReq)
+		runtime.ConfigureGroupKill(cmd) // ctx cancel kills the whole group; Wait is bounded
 
 		stdoutPipe, pipeErr := cmd.StdoutPipe()
 		if pipeErr != nil {

@@ -569,6 +569,10 @@ after the owner unshared it. A session claude no longer has is forgotten, on a
 **Interactive mode and effort selector:** panes can be started in
 interactive mode (multi-turn with persistent session) and support an
 in-browser effort selector for model-tier overrides.
+Claude, codex and agy panes support interactive mode; codex and agy resume
+the harness session between turns, while one-shot (non-interactive) codex and
+agy panes do not resume and start fresh on every send (see
+[runtime-matrix.md](runtime-matrix.md)).
 
 **Answerable AskUserQuestion:** when an agent calls `AskUserQuestion`
 and `--console-structured-questions` is active, the pane renders the
