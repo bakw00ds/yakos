@@ -526,6 +526,13 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			TaskBytes: int64(len(req.Task)), ConversationID: req.ConversationID,
 			Task: req.Task, // the sensitive class (K-140) reads it, as RunStream will
 		})
+		if exErr != nil && sdkPaneToleratesRouteError(req.StructuredQuestions, runtimeName, exErr) {
+			// The SDK engine is a sidecar on ANTHROPIC_API_KEY and never runs the
+			// claude CLI, so "CLI not found" says nothing about it. Let the engine
+			// gate (K-137) answer with its own operator-facing message. A sensitive
+			// task never lands here: its every router error is a RouteRefusedError.
+			exErr = nil
+		}
 		if exErr != nil {
 			interactiveRefusal = exErr
 		} else if isKnownRuntime(d.Runtime) {
@@ -2214,4 +2221,22 @@ func resolveAgentSystemPrompt(yakosRoot, project, agentName string) string {
 		}
 	}
 	return ""
+}
+
+// sdkPaneToleratesRouteError reports whether a router error may be left to the
+// SDK engine's own start gate: the pane is a structured-questions (SDK) pane on
+// claude, the error is the claude runtime being unavailable on this machine, and
+// it is not a sensitive refusal or a project disable.
+func sdkPaneToleratesRouteError(structured bool, runtimeName string, err error) bool {
+	if !structured || runtimeName != "claude" {
+		return false
+	}
+	if _, refused := dispatch.AsRouteRefused(err); refused {
+		return false
+	}
+	var ex *dispatch.ExplicitRuntimeError
+	if !errors.As(err, &ex) {
+		return false
+	}
+	return ex.Runtime == "claude" && ex.Reason != dispatch.DisabledByProjectReason
 }

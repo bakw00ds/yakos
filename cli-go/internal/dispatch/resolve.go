@@ -580,7 +580,7 @@ func walkChain(ctx context.Context, in chainInput, probe func(context.Context, s
 			continue
 		}
 		if in.project.RuntimeDisabled(c.name) {
-			choice.Skipped = append(choice.Skipped, SkippedRuntime{c.name, "disabled by this project's .yakos.yml (router.disable_runtimes)"})
+			choice.Skipped = append(choice.Skipped, SkippedRuntime{c.name, DisabledByProjectReason})
 			continue
 		}
 		if honorCooling && !c.explicit() {
@@ -618,6 +618,11 @@ func walkChain(ctx context.Context, in chainInput, probe func(context.Context, s
 	}
 	return choice, notes, noRuntimeError(in.agentName, choice.Skipped)
 }
+
+// DisabledByProjectReason is the skip reason of a runtime the project turned
+// off. Callers that tolerate an availability refusal compare against it so a
+// project's disable is never treated as "just unavailable".
+const DisabledByProjectReason = "disabled by this project's .yakos.yml (router.disable_runtimes)"
 
 // ExplicitRuntimeError is the failure of a runtime the operator named: with
 // --runtime, a console pane's runtime, the runtime parameter of an API call or
