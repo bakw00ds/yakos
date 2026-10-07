@@ -434,15 +434,64 @@ policy_sha: 3f4135ea62d49d5ac61c14051d709ac1dc84442814bc2d268d3e4d3abcc09a72
 
 ### Not routed yet
 
-- Console interactive turns (the chat panes) do not go through the router: they
-  carry no `route_*` fields and ignore rules (K-147, K-148). Console one-shot
-  chat and gRPC use `RunStream`, which does.
+- A console interactive pane (the Interactive toggle) is routed once, at its
+  first turn, by `dispatch.Explain` (the same step `yakos router explain` runs);
+  the engine it starts then keeps that runtime for the whole conversation, so a
+  rule cannot move a live pane. Follow-up turns ride `/api/chat/send` and carry
+  no route (K-148).
 - The runtime pre-checks (`PreferredRuntime`, `ResolveRuntime`: validating a
   model or a pane's runtime before the run) see no task size and no route class
   (K-140), so a `task_bytes_gt` or `class` rule can make a pre-check validate
   against a different runtime than `Run` picks.
 - The bash dispatch path has no router at all (K-143); `YAKOS_IMPL` does not
   select a router.
+
+## Console chat routing (K-148)
+
+The console chat panes go through the router. Everything below is SSE,
+transcript and user-turn text; none of it enters a system prompt,
+`--append-system-prompt` or the `--agents` JSON (`rule:cache-stability`).
+
+- **Pane mode.** The pane's two selects are its routing mode, labelled in the
+  header: `auto` (runtime `auto`: the router decides), `runtime` (a runtime, no
+  model) and `pinned` (both). The runtime and model selects are filled from
+  `GET /api/models` (RoleRead), the model registry with the operator overlay and
+  the workspace's disables applied; ids outside the registry's id rule
+  (`^[a-z0-9][a-z0-9._:-]{0,63}$`) are never offered. The last answer is cached in
+  `localStorage` so a reload keeps a registry-only model; without it the static
+  lists apply. The response has no path: registry warnings are a count.
+- **`@prefix`.** A message that starts with `@claude`, `@codex` or `@agy`,
+  optionally `:model` (`@codex:gpt-5 fix it`), is an override for that turn. The
+  browser strips the prefix and sends `overrideRuntime` / `overrideModel`; the
+  server validates both again (known runtime, id rule, model checked against that
+  runtime) and applies them over the pane's selects. The pane's model is dropped
+  unless the override names the same runtime. A live interactive pane refuses an
+  override: its engine is one runtime.
+- **Route event.** The first event of a one-shot turn is `route` (runtime,
+  provider, model, rule id, reason, class, `fallback_from`, and `pinned`:
+  `override`, `pane` or `router`). `dispatch.Params.EmitRoute` turns it on, so a
+  transport that forwards every chunk (gRPC) sees no new frame. It is persisted as
+  a transcript turn with role `route` (`runtime`, `model`, `text` = reason,
+  `rule_id`, `fallback_from`, `pinned`); the schema only grew, and a reader that
+  does not know the role skips the line. The console shows it as the "why this
+  model" chip.
+- **Native sessions per runtime.** The conversation's meta store keeps one
+  session id per runtime. A one-shot turn hands over all of them and `RunStream`
+  resumes the one it routes to, so claude, codex, claude again finds the first
+  claude session. The id of the runtime that answered is stored from its summary.
+- **Handoff.** When the operator moves a conversation to another runtime (the
+  request names a runtime that differs from the last `route` turn's, and the new
+  runtime has no session of its own in the conversation), a digest of the earlier
+  turns is appended to that turn's task, after the operator's words: the 12 latest
+  user and assistant turns, each cut to 1500 bytes, 6 KiB in all, newest kept,
+  oldest first, labelled as context and not as an instruction. It is scanned
+  first: private-key blocks, cloud and token prefixes, JWTs, bearer values and
+  `key=value` secrets become `[redacted]`. The scan is a safety net for text
+  headed to another vendor's model, not a guarantee. The transcript keeps the
+  operator's own words. A `handoff` event follows the `route` event, and the
+  console shows the "context reset (cache)" banner: the new runtime starts without
+  the earlier prompt cache. The router's own moves (sticky, fallback, auto) are
+  not handoffs.
 
 ## Claude Code request-class aliases (K-141)
 

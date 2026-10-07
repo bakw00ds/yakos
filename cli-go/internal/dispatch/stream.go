@@ -108,8 +108,25 @@ const toolOutputTruncationMarker = "\n[...tool output truncated...]"
 // glance whether it was the input or the output that was truncated.
 const toolInputTruncationMarker = "\n[...tool input truncated...]"
 
+// RouteInfo is the router's decision for one streamed turn, as a console chip
+// shows it. It carries no prompt text and no path; Reason is built by the router
+// from rule ids and runtime names.
+type RouteInfo struct {
+	Runtime      string
+	Provider     string
+	Model        string // "" = the harness default
+	RuleID       string
+	Reason       string
+	Class        string
+	FallbackFrom string
+}
+
 // StreamChunk is one incremental unit of streaming output.
 type StreamChunk struct {
+	// Route is set only on Type=="route", the first chunk of a turn whose Params
+	// asked for it (Params.EmitRoute).
+	Route *RouteInfo
+
 	// Type is "token" for incremental text, "summary" for the terminal record,
 	// "tool_use" when the agent invoked a tool, "tool_result" when the tool
 	// returned a result, "thinking" for an incremental extended-thinking delta,
@@ -398,6 +415,15 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 			Project: project,
 			TS:      time.Now().UTC(),
 		}, wsbus.EventMeta{OwnerOperatorID: operatorID})
+	}
+
+	// --- Route chunk (K-148): first thing a console turn sees ---
+	if p.EmitRoute && onChunk != nil {
+		d := rr.Decision
+		onChunk(StreamChunk{Type: "route", Route: &RouteInfo{
+			Runtime: d.Runtime, Provider: d.Provider, Model: d.ModelID, RuleID: d.RuleID,
+			Reason: d.Reason, Class: d.RouteClass, FallbackFrom: d.FallbackFrom,
+		}})
 	}
 
 	// --- Execute (streaming) ---

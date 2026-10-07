@@ -72,12 +72,14 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/interactive"
 	"github.com/bakw00ds/yakos/internal/netid"
+	"github.com/bakw00ds/yakos/internal/router"
 	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/worktreemgr"
 	"github.com/bakw00ds/yakos/internal/wsbus"
@@ -381,6 +383,12 @@ type DispatchRequest struct {
 	// When false (default): uses the existing CLI engine (Session) path.  Zero
 	// regression on all existing clients.
 	StructuredQuestions bool `json:"structuredQuestions"`
+
+	// OverrideRuntime and OverrideModel are the one-turn override an "@codex:gpt-5"
+	// message prefix becomes (parsed client-side, K-148). They beat the pane's
+	// runtime and model selects for this turn only.
+	OverrideRuntime string `json:"overrideRuntime,omitempty"`
+	OverrideModel   string `json:"overrideModel,omitempty"`
 }
 
 // DispatchResponse is the JSON body returned by POST /api/chat/dispatch.
@@ -413,6 +421,13 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// --- Per-turn override (K-148): an @prefix beats the pane's selects ---
+	routePinned, ovErr := applyRouteOverride(&req)
+	if ovErr != nil {
+		http.Error(w, "invalid override", http.StatusBadRequest)
 		return
 	}
 
@@ -483,6 +498,27 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	}
 	runtimeName := pref.Runtime
 	modelName := requestedModel
+	// An interactive pane is a long-lived engine, so the router decides once, at
+	// its first turn (K-148): the decision picks the engine's runtime and, when a
+	// rule supplied it, the model. Later turns ride /api/chat/send.
+	var interactiveRoute *routeView
+	if req.Interactive && ch.svc != nil {
+		interactiveRoute = &routeView{Runtime: runtimeName, Pinned: routePinned}
+		if d, exErr := dispatch.Explain(r.Context(), dispatch.ExplainQuery{
+			YakosRoot: ch.yakosRoot, Project: ch.workspaceRoot, Agent: req.Agent,
+			Runtime: requestedRuntime, Model: requestedModel,
+			TaskBytes: int64(len(req.Task)), ConversationID: req.ConversationID,
+		}); exErr == nil && isKnownRuntime(d.Runtime) {
+			runtimeName = d.Runtime
+			if modelName == "" && d.RuleID != router.RuleDefault {
+				modelName, requestedModel = d.ModelID, d.ModelID
+			}
+			interactiveRoute = routeViewFrom(&dispatch.RouteInfo{
+				Runtime: d.Runtime, Provider: d.Provider, Model: d.ModelID, RuleID: d.RuleID,
+				Reason: d.Reason, Class: d.RouteClass, FallbackFrom: d.FallbackFrom,
+			}, routePinned)
+		}
+	}
 	if modelName != "" {
 		resolved, ok := dispatch.CheckModelOverride(runtimeName, modelName)
 		if !ok {
@@ -668,6 +704,14 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	// Handoff (K-148): an operator-initiated runtime switch carries a bounded,
+	// scanned digest of the earlier turns at the tail of this turn's task. The
+	// transcript and the fleet keep the operator's own words; only the turn
+	// delivered to the runtime grows. Planned before the user turn is appended so
+	// the digest holds earlier turns only.
+	handoffDigest, handoffInfo := ch.planHandoff(conversationID, capturedOperatorID, runtimeName,
+		routePinned != "router", len(req.Task))
+
 	// Append the user turn to the transcript.
 	_ = ch.transcripts.Append(TranscriptEntry{
 		SessionID:      dispReq.SessionID,
@@ -749,6 +793,10 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	}
 	// capturedMgr is non-nil only when we need to clean up the worktree on session close.
 	capturedMgr := ch.worktreeMgr
+
+	// The turn handed to the runtime: the operator's task, plus the handoff digest
+	// when this is the first turn after a runtime switch (see planHandoff).
+	dispReq.Task += handoffDigest
 
 	// Launch RunStream in a goroutine.  The goroutine owns the cancel function
 	// and the hub session for its lifetime.
@@ -835,6 +883,9 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		resumePane := dispReq.Interactive && ch.interactiveMgr != nil && runtimeName != "claude"
 		interactiveTurns := dispReq.Interactive && ch.interactiveMgr != nil && !resumePane
 
+		// routedRuntime is the runtime the router sent a one-shot turn to, for
+		// forgetting a dead native session of that runtime afterwards.
+		var routedRuntime atomic.Value
 		onChunk := func(chunk dispatch.StreamChunk) {
 			ev := SSEEvent{
 				SessionID:      dispReq.SessionID,
@@ -844,6 +895,17 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				TS:             time.Now().UTC().Format(time.RFC3339Nano),
 			}
 			switch chunk.Type {
+			case "route":
+				// The router's decision, first chunk of a one-shot turn (K-148).
+				// Persisted and sent by emitRoute, with the handoff notice when
+				// this turn follows a runtime switch.
+				if chunk.Route != nil {
+					routedRuntime.Store(chunk.Route.Runtime)
+					ch.emitRoute(dispReq.SessionID, conversationID, capturedOperatorID,
+						routeViewFrom(chunk.Route, routePinned), handoffInfo)
+				}
+				return
+
 			case "summary":
 				// Use pointers so exit_code:0 (success) serialises correctly
 				// (omitempty on int zero-value would suppress it).
@@ -876,8 +938,10 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				// Not for an interactive session either (K-136): its process still
 				// holds that session, and a one-shot --resume of the same id while
 				// it is open would have two claude processes writing one session.
-				if chunk.NativeSessionID != "" && chunk.RuntimeResolved == "claude" && capturedWorktreeOverride == "" && !interactiveTurns {
-					if err := ch.transcripts.SetNativeSession(conversationID, "claude", chunk.NativeSessionID, capturedOperatorID); err != nil {
+				// Every runtime keeps its own session id (K-148); a codex or agy pane
+				// stores its ids through its ResumeEngine instead.
+				if chunk.NativeSessionID != "" && isKnownRuntime(chunk.RuntimeResolved) && capturedWorktreeOverride == "" && !interactiveTurns && !resumePane {
+					if err := ch.transcripts.SetNativeSession(conversationID, chunk.RuntimeResolved, chunk.NativeSessionID, capturedOperatorID); err != nil {
 						slog.Warn("consoleui: store native session id", "conversation", conversationID, "err", err)
 					}
 				}
@@ -955,6 +1019,12 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				}
 			}
 			ch.hub.Route(ev)
+		}
+
+		// An interactive pane's route is decided above, once, and sent here before
+		// its engine starts; a one-shot turn gets its route chunk from RunStream.
+		if dispReq.Interactive && ch.interactiveMgr != nil {
+			ch.emitRoute(dispReq.SessionID, conversationID, capturedOperatorID, interactiveRoute, handoffInfo)
 		}
 
 		// K-147: a codex or agy pane keeps its context across turns through a
@@ -1193,9 +1263,17 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 
 		// Continuity (K-132): a follow-up one-shot turn on claude resumes the
 		// conversation's native session, so it remembers the previous turn.
-		resumeID := ""
-		if runtimeName == "claude" && capturedWorktreeOverride == "" {
-			resumeID = ch.transcripts.NativeSession(conversationID, "claude", capturedOperatorID)
+		// Every runtime has its own session id (K-148): hand over all of them and
+		// RunStream resumes the one it routes to, so a conversation moved to codex
+		// and back finds its claude session again.
+		var nativeIDs map[string]string
+		if capturedWorktreeOverride == "" {
+			nativeIDs = map[string]string{}
+			for _, rt := range runtime.Known {
+				if id := ch.transcripts.NativeSession(conversationID, rt, capturedOperatorID); id != "" {
+					nativeIDs[rt] = id
+				}
+			}
 		}
 
 		params := dispatch.Params{
@@ -1205,12 +1283,13 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			// resolved above for validation: the dispatcher resolves both again
 			// against the runtime it actually picks, so an alias follows a
 			// fallback and an auto pane lands where the agent's pin says.
-			Runtime:         requestedRuntime,
-			Model:           requestedModel,
-			ResumeSessionID: resumeID,
-			OperatorID:      capturedOperatorID,
-			ConversationID:  conversationID,
-			SessionID:       dispReq.SessionID,
+			Runtime:        requestedRuntime,
+			Model:          requestedModel,
+			NativeSessions: nativeIDs,
+			EmitRoute:      true,
+			OperatorID:     capturedOperatorID,
+			ConversationID: conversationID,
+			SessionID:      dispReq.SessionID,
 			// Effort was validated in the handler (ValidateEffort); empty = no flag.
 			Effort: dispReq.Effort,
 			// Project is intentionally omitted: Service.RunStream pins it to
@@ -1232,8 +1311,14 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		// forget it and let the next turn start a fresh session rather than fail
 		// the same way forever. See forgetDeadResume for how a dead session is
 		// recognised.
-		if resumeID != "" && ctx.Err() == nil {
-			ch.forgetDeadResume(conversationID, capturedOperatorID, "claude", res)
+		if ctx.Err() == nil {
+			rt, _ := routedRuntime.Load().(string)
+			if rt == "" {
+				rt = res.Runtime
+			}
+			if nativeIDs[rt] != "" {
+				ch.forgetDeadResume(conversationID, capturedOperatorID, rt, res)
+			}
 		}
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {

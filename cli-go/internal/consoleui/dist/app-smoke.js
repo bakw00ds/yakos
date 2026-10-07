@@ -135,6 +135,7 @@ global.WebSocket = function() {
 global._domContentLoadedRegistered = false;
 
 try {
+  require('./chat-routing.js');
   require('./app.js');
 } catch (e) {
   process.stderr.write('FAIL: app.js threw during load: ' + e + '\n');
@@ -503,6 +504,146 @@ function chatPaneTest() {
   }
 }
 try { chatPaneTest(); } catch (e) { chatFail(String(e && e.stack || e)); }
+
+
+// ── K-148: routing module — @prefix, registry selects, mode, route chip, banner ──
+function rtFail(m) { process.stderr.write('FAIL: chat-routing: ' + m + '\n'); process.exit(1); }
+function routingTest() {
+  var cp = global.__yakosChatPanes, yr = global.YakChatRouting;
+  if (!yr) rtFail('window.YakChatRouting not exposed');
+  function same(what, got, want) {
+    if (JSON.stringify(got) !== JSON.stringify(want)) rtFail(what + ': got ' + JSON.stringify(got) + ', want ' + JSON.stringify(want));
+  }
+  function has(what, hay, needle) { if (hay.indexOf(needle) < 0) rtFail(what + ': missing ' + needle + ' in ' + hay); }
+  function lacks(what, hay, needle) { if (hay.indexOf(needle) >= 0) rtFail(what + ': unexpected ' + needle + ' in ' + hay); }
+
+  // @prefix: only a well-formed prefix with a task is an override.
+  same('plain runtime', yr.parseOverride('@codex fix the bug'), { runtime: 'codex', model: '', task: 'fix the bug' });
+  same('runtime and model', yr.parseOverride('@codex:gpt-5 fix it'), { runtime: 'codex', model: 'gpt-5', task: 'fix it' });
+  same('model with dots and colon', yr.parseOverride('  @agy:gemini-3.8-flash-high:x go\nmore').model, 'gemini-3.8-flash-high:x');
+  same('multi-line task kept', yr.parseOverride('@claude a\nb').task, 'a\nb');
+  ['@codex', '@codex   ', '@gemini hi', '@Codex hi', '@codexx hi', '@codex:Bad hi', '@codex: hi', '@codex:<img> hi',
+   'hello @codex hi', '', null, undefined, '@codex:' + 'a'.repeat(65) + ' hi'].forEach(function(t) {
+    same('not an override: ' + JSON.stringify(t), yr.parseOverride(t), null);
+  });
+
+  // The dispatch body: an override adds two fields, no override adds none.
+  var pane = cp.makePane('rt-1', 'conv-rt-1');
+  pane.runtime = 'claude'; pane.model = 'opus';
+  var plain = cp.buildDispatchBody(pane, 't', 's');
+  same('no override: no routing fields', ['overrideRuntime' in plain, 'overrideModel' in plain], [false, false]);
+  var ob = cp.buildDispatchBody(pane, 't', 's', yr.parseOverride('@codex:gpt-5 x'));
+  same('override fields', [ob.overrideRuntime, ob.overrideModel, ob.runtime, ob.model], ['codex', 'gpt-5', 'claude', 'opus']);
+  same('override without a model omits it', 'overrideModel' in cp.buildDispatchBody(pane, 't', 's', yr.parseOverride('@agy x')), false);
+
+  // Send path: the prefix is stripped from the task and the override rides along.
+  var posted = [];
+  var realFetch = global.fetch, realGet = document.getElementById;
+  global.fetch = function(url, o) {
+    posted.push({ url: url, body: JSON.parse(o.body) });
+    return Promise.resolve({ ok: true, status: 202, headers: { get: function() { return null; } } });
+  };
+  var typed = '@codex:gpt-5 fix it';
+  document.getElementById = function(id) { return /^pane-input-/.test(id) ? { value: typed } : null; };
+  try {
+    var sp = cp.makePane('rt-send', 'conv-rt-send');
+    cp.sendPaneMessage(sp);
+    clearInterval(sp.elapsedTimer);
+    var last = posted[posted.length - 1];
+    same('prefix stripped, override sent', [last.body.task, last.body.overrideRuntime, last.body.overrideModel, last.body.runtime],
+      ['fix it', 'codex', 'gpt-5', '']);
+    same('the user turn shows what was typed', sp.messages[0].text, typed);
+    typed = 'hello @codex there';
+    var sp2 = cp.makePane('rt-send2', 'conv-rt-send2');
+    cp.sendPaneMessage(sp2);
+    clearInterval(sp2.elapsedTimer);
+    last = posted[posted.length - 1];
+    same('an inner @ is not an override', ['overrideRuntime' in last.body, last.body.task], [false, 'hello @codex there']);
+    // A live interactive pane cannot switch runtime: nothing is sent.
+    typed = '@agy hi';
+    var n = posted.length;
+    var ip = cp.makePane('rt-int', 'conv-rt-int');
+    ip.interactive = true; ip.interactiveLive = true;
+    cp.sendPaneMessage(ip);
+    same('live interactive pane refuses an override', posted.length, n);
+    same('and says why', ip.messages.length === 1 && ip.messages[0].role, 'system');
+  } finally {
+    global.fetch = realFetch;
+    document.getElementById = realGet;
+  }
+
+  // Registry-driven selects: ids come from /api/models; unusable and malformed
+  // ones never reach an <option>.
+  same('no registry: static list', cp.modelOptionsFor('codex').indexOf('gpt-5.6-sol'), -1);
+  yr._setModels([
+    { id: 'gpt-5.6-sol', harness: 'codex', usable: true },
+    { id: 'gpt-reserve', harness: 'codex', usable: false },
+    { id: 'gemini-3.8-flash-high', harness: 'agy', usable: true },
+    { id: 'haiku', harness: 'claude', usable: true },
+    { id: '"><img src=x onerror=alert(1)>', harness: 'codex', usable: true },
+    { id: 'UPPER', harness: 'codex', usable: true },
+    { id: 'x', harness: 'gemini', usable: true },
+  ]);
+  var codexOpts = cp.modelOptionsFor('codex');
+  same('codex options from the registry', codexOpts.slice(0, 2), ['', 'gpt-5.6-sol']);
+  same('unusable and malformed ids are dropped', codexOpts.filter(function(m) { return /reserve|img|UPPER/.test(m); }), []);
+  same('aliases still offered', codexOpts.indexOf('balanced') >= 0, true);
+  same('agy options', cp.modelOptionsFor('agy').indexOf('gemini-3.8-flash-high') >= 0, true);
+  same('claude keeps the registry tiers', cp.modelOptionsFor('claude').indexOf('haiku') >= 0, true);
+  same('auto stays on the static list', cp.modelOptionsFor('auto').indexOf('gpt-5.6-sol'), -1);
+  var cpane = cp.makePane('rt-hdr', 'conv-rt-hdr');
+  cpane.runtime = 'codex'; cpane.model = 'gpt-5.6-sol';
+  var hdr = cp.buildPaneHeaderHTML(cpane);
+  has('header offers the registry id', hdr, '<option value="gpt-5.6-sol" selected>gpt-5.6-sol</option>');
+  lacks('header never carries a raw tag from the registry', hdr, '<img');
+  has('header shows the routing mode', hdr, 'pane-route-mode-pinned');
+  yr._setModels(null);
+
+  // Pane routing mode: auto | runtime | pinned.
+  same('mode auto', yr.routeMode({ runtime: 'auto', model: 'balanced' }), 'auto');
+  same('mode runtime', yr.routeMode({ runtime: 'codex', model: '' }), 'runtime');
+  same('mode pinned', yr.routeMode({ runtime: 'codex', model: 'gpt-5' }), 'pinned');
+  has('badge for a default pane', cp.buildPaneHeaderHTML(cp.makePane('rt-b', 'c')), 'pane-route-mode-auto');
+
+  // Route chip and handoff banner: server text goes in as text, never as markup.
+  function fakeDoc() {
+    return { createElement: function(tag) {
+      var e = { tag: tag, className: '', attrs: {}, children: [], textContent: '',
+        setAttribute: function(k, v) { this.attrs[k] = String(v); },
+        appendChild: function(c) { this.children.push(c); } };
+      Object.defineProperty(e, 'innerHTML', { set: function() { rtFail('innerHTML written by the routing module'); }, get: function() { return ''; } });
+      return e;
+    } };
+  }
+  var evil = '<img src=x onerror=alert(1)>';
+  var chip = yr.buildElement({ role: 'route', route: { runtime: 'codex', model: 'gpt-5', reason: evil, rule_id: 'R1', pinned: 'override', fallback_from: 'claude' } }, fakeDoc());
+  var chipText = chip.children.map(function(c) { return c.textContent; }).join('');
+  has('chip says where', chipText, 'codex / gpt-5');
+  has('chip says who set it', chipText, 'set by @prefix');
+  has('chip says why (as text)', chipText, evil);
+  has('chip names the fallback', chipText, 'fell back from claude');
+  has('chip names the rule', chipText, '[R1]');
+  same('chip title holds the reason', chip.attrs.title, evil);
+  var banner = yr.buildElement({ role: 'handoff', handoff: { from: evil, to: 'codex', turns: 3, digest_bytes: 812, redactions: 1 } }, fakeDoc());
+  has('banner wording', banner.textContent, 'Context reset (cache): moved from ' + evil + ' to codex');
+  has('banner counts', banner.textContent, '3 earlier turns (812 bytes, 1 secret-like value redacted)');
+  same('other roles are not ours', yr.buildElement({ role: 'assistant', text: 'x' }, fakeDoc()), null);
+
+  // SSE events and transcript turns become the same messages; route lands before tokens.
+  var p = cp.makePane('rt-sse', 'conv-rt-sse');
+  cp.handleSSE(p, { type: 'route', session_id: 's1', ts: 't0', route: { runtime: 'agy', reason: 'r', pinned: 'router' } });
+  cp.handleSSE(p, { type: 'handoff', session_id: 's1', ts: 't1', handoff: { from: 'claude', to: 'agy', turns: 1, digest_bytes: 10, redactions: 0 } });
+  cp.handleSSE(p, { type: 'token', session_id: 's1', ts: 't2', text: 'hi' });
+  same('message order', p.messages.map(function(m) { return m.role; }), ['route', 'handoff', 'assistant']);
+  cp.handleSSE(p, { type: 'route', session_id: 's1' });  // malformed: no route object
+  same('a route event without data adds nothing', p.messages.length, 3);
+  var tm = yr.fromTranscript({ role: 'route', ts: 't', session_id: 's', runtime: 'codex', model: 'gpt-5', text: 'why', rule_id: 'R2', pinned: 'pane' });
+  same('transcript route turn', [tm.role, tm.route.runtime, tm.route.model, tm.route.reason, tm.route.rule_id, tm.route.pinned], ['route', 'codex', 'gpt-5', 'why', 'R2', 'pane']);
+  same('other transcript roles are ignored', yr.fromTranscript({ role: 'assistant' }), null);
+  var el = cp.buildMessageElement(p.messages[0], p, 'rt-sse');
+  same('app.js renders the chip through the module', el.className, 'chat-msg chat-route-chip');
+}
+try { routingTest(); } catch (e) { rtFail(String(e && e.stack || e)); }
 
 treeRescanTest().then(function() {
   process.stdout.write(

@@ -177,6 +177,14 @@ type SSEEvent struct {
 	// Delivered OWNER-PRIVATE (same rule as AskToolUseID).
 	AskQuestionsJSON string `json:"ask_questions_json,omitempty"`
 
+	// Route is set on Type=="route", the first event of a turn: where the router
+	// sent it and why (K-148). Persisted as a transcript "route" turn.
+	Route *routeView `json:"route,omitempty"`
+
+	// Handoff is set on Type=="handoff": the operator moved the conversation to
+	// another runtime and its first turn carries a digest of the earlier ones.
+	Handoff *handoffView `json:"handoff,omitempty"`
+
 	// TS is the hub-stamped delivery time (RFC3339Nano).
 	TS string `json:"ts"`
 }

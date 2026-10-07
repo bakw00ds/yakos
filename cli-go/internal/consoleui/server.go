@@ -882,6 +882,7 @@ func (s *Server) registerRoutes() {
 	// conflict with the path-prefix handlers below (which are also method-neutral).
 	s.mux.HandleFunc("/", s.handleIndex)
 	s.mux.HandleFunc("/app.js", s.handleAppJS)
+	s.mux.HandleFunc("/chat-routing.js", s.handleChatRoutingJS)
 	s.mux.HandleFunc("/styles.css", s.handleCSS)
 	// Service Worker served from a real same-origin path so browsers accept
 	// registration at scope '/'.  Blob-URL registration is rejected by
@@ -1051,6 +1052,8 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/chat/dispatch", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatDispatch))
 	s.mux.HandleFunc("/api/chat/cancel", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatCancel))
 	s.mux.HandleFunc("/api/chat/transcript", requireRoleFunc(netid.RoleRead, s.chat.handleChatTranscript))
+	// GET /api/models — the model registry for the pane selects (K-148). RoleRead.
+	s.mux.HandleFunc("/api/models", requireRoleFunc(netid.RoleRead, s.chat.handleModels))
 	// POST /api/chat/share — flip shared flag; owner-gated.
 	s.mux.HandleFunc("/api/chat/share", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatShare))
 	// POST /api/chat/send — deliver a follow-up turn to a persistent interactive
@@ -1535,7 +1538,7 @@ func isStaticAsset(r *http.Request) bool {
 		return false
 	}
 	switch r.URL.Path {
-	case "/", "/app.js", "/styles.css", "/sw.js", "/ide-editor.js", "/ide/editor":
+	case "/", "/app.js", "/chat-routing.js", "/styles.css", "/sw.js", "/ide-editor.js", "/ide/editor":
 		return true
 	}
 	// Vendored pinned blobs are same-origin static assets; no token required.

@@ -147,6 +147,12 @@ type Params struct {
 	// over ResumeSessionID for the runtime it names. Ignored by Run.
 	NativeSessions map[string]string
 
+	// EmitRoute asks RunStream to hand onChunk a Type "route" chunk, carrying the
+	// router's RouteDecision, before anything else. Off by default: a transport
+	// that forwards every chunk type (gRPC) would otherwise get a frame it never
+	// asked for. The console chat turns it on (K-148).
+	EmitRoute bool
+
 	// Surface is the entry point that built this Params, one of the Surface*
 	// constants (rest, jsonrpc, grpc, mcp, flows, console-chat). The transport
 	// sets it as a constant of its own; it is recorded on the dispatch_finished
