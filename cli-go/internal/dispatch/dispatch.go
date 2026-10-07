@@ -76,8 +76,11 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 		EvalRunID:            req.EvalRunID,
 		TaskBytes:            int64(len(req.Task)),
 		ConversationID:       req.ConversationID,
+		Task:                 req.Task,
+		Extra:                req.ScanExtra,
 	})
 	if err != nil {
+		noteRefused(req, err)
 		return nil, Result{}, err
 	}
 	targetAgent := rr.Agent

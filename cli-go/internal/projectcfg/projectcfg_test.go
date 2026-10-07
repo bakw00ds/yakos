@@ -1,6 +1,7 @@
 package projectcfg
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -279,5 +280,71 @@ func TestParse_RouterBlockOnlyDisables(t *testing.T) {
 	}
 	if cfg, warns := Parse([]byte("router: nope\n")); len(cfg.DisableRuntimes) != 0 || len(warns) != 1 {
 		t.Errorf("a non-mapping router key is ignored with one warning: %+v %v", cfg, warns)
+	}
+}
+
+// router.never_paths (K-140) adds credential globs; a malformed entry is dropped
+// without echoing it, and the key can only add (there is no way to name a
+// built-in to remove).
+func TestParse_RouterNeverPaths(t *testing.T) {
+	cfg, warns := Parse([]byte("router:\n  never_paths: [\"internal/billing/*\", \"bad path\", \"**/.vault*\", 7]\n"))
+	if got := strings.Join(cfg.NeverPaths, ","); got != "internal/billing/*,**/.vault*" {
+		t.Errorf("NeverPaths = %q", got)
+	}
+	if len(warns) != 2 {
+		t.Errorf("warns = %v", warns)
+	}
+	for _, w := range warns {
+		if strings.Contains(w, "bad path") || strings.Contains(w, "billing") {
+			t.Errorf("warning echoes an entry: %q", w)
+		}
+	}
+	if cfg, _ := Parse([]byte("router:\n  never_paths: nope\n")); len(cfg.NeverPaths) != 0 {
+		t.Errorf("non-list accepted: %v", cfg.NeverPaths)
+	}
+}
+
+// router.never_paths is bounded (K-140 fixup F3): at most 32 entries, and no glob
+// whose wildcards could make a match expensive.
+func TestParse_NeverPathsAreBounded(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("router:\n  never_paths:\n")
+	b.WriteString("    - \"*" + strings.Repeat("[!b]", 60) + "b\"\n")
+	b.WriteString("    - \"**/a/**/b/**\"\n")
+	for i := 0; i < 50; i++ {
+		fmt.Fprintf(&b, "    - \"vault%d/*\"\n", i)
+	}
+	cfg, warns := Parse([]byte(b.String()))
+	if len(cfg.NeverPaths) != MaxNeverPaths {
+		t.Errorf("kept %d, want %d", len(cfg.NeverPaths), MaxNeverPaths)
+	}
+	for _, g := range cfg.NeverPaths {
+		if strings.Contains(g, "[!b]") || g == "**/a/**/b/**" {
+			t.Errorf("kept %q", g)
+		}
+	}
+	if len(warns) == 0 {
+		t.Error("no warning for the dropped entries")
+	}
+	for _, ok := range []string{"internal/billing/*", "**/.vault*", "secrets/**", "*.tfvars"} {
+		if !NeverPathSimpleEnough(ok) {
+			t.Errorf("%q rejected", ok)
+		}
+	}
+}
+
+// N1: a long bracket expression is a CPU sink even in a short glob, and the
+// total length is bounded.
+func TestNeverPathSimpleEnough_BracketAndLengthBounds(t *testing.T) {
+	if NeverPathSimpleEnough("*[!" + strings.Repeat("c", 30) + "]x") {
+		t.Error("30-char bracket accepted")
+	}
+	if NeverPathSimpleEnough("**/" + strings.Repeat("a", 130)) {
+		t.Error("130-byte glob accepted")
+	}
+	for _, ok := range []string{"**/.env*", "*[!b]x", "secrets/[a-z]*.json", "*[abc"} {
+		if !NeverPathSimpleEnough(ok) {
+			t.Errorf("%q rejected", ok)
+		}
 	}
 }

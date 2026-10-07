@@ -116,6 +116,50 @@ func (a *Account) FinishAt(res Result, end time.Time) {
 	writeFinished(a.req, res, end, a.path)
 }
 
+// Refuse writes a route_refused event: a sensitive request that no permitted
+// runtime could take (K-140). It is the only event of such a dispatch (no
+// dispatch_started or dispatch_finished follows), carries a fixed-vocabulary
+// reason and no task text, project path or runtime output, and is written once.
+func (a *Account) Refuse(class, reason string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.finished || a.opened {
+		return
+	}
+	a.finished, a.opened = true, true
+	ev := refusedEvent{
+		Type:           "route_refused",
+		Ts:             a.started.UTC().Format(time.RFC3339),
+		Agent:          a.req.AgentName,
+		RouteClass:     logIdent(class, 64),
+		RouteReason:    logIdent(reason, 64),
+		OperatorID:     a.req.OperatorID,
+		ConversationID: a.req.ConversationID,
+		SessionID:      a.req.SessionID,
+	}
+	if line, err := json.Marshal(ev); err == nil {
+		_ = appendEvent(a.path, line)
+	}
+}
+
+// noteRefused writes the route_refused event when err is a RouteRefusedError.
+func noteRefused(req Request, err error) {
+	if e, ok := AsRouteRefused(err); ok {
+		NewAccount(req).Refuse(e.Class, e.Reason)
+	}
+}
+
+type refusedEvent struct {
+	Type           string `json:"type"`
+	Ts             string `json:"ts"`
+	Agent          string `json:"agent"`
+	RouteClass     string `json:"route_class,omitempty"`
+	RouteReason    string `json:"route_reason,omitempty"`
+	OperatorID     string `json:"operator_id,omitempty"`
+	ConversationID string `json:"conversation_id,omitempty"`
+	SessionID      string `json:"session_id,omitempty"`
+}
+
 // writeStarted writes a dispatch_started event to the dispatch-log.
 // Schema matches PR #40: includes the project field.
 // Identity fields (operator_id, conversation_id, session_id) are emitted

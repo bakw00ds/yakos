@@ -210,6 +210,7 @@ func runDispatch(yakosRoot string, args []string) {
 		Override:      runtimeOverride,
 		EnvDefault:    envRuntime,
 		FallbackOptIn: fallbackOptIn,
+		Task:          task,
 	})
 
 	// Log the dispatch parameters to stderr (mirrors dispatch.sh:347).

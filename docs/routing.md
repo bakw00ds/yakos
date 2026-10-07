@@ -437,12 +437,72 @@ policy_sha: 3f4135ea62d49d5ac61c14051d709ac1dc84442814bc2d268d3e4d3abcc09a72
 - Console interactive turns (the chat panes) do not go through the router: they
   carry no `route_*` fields and ignore rules (K-147, K-148). Console one-shot
   chat and gRPC use `RunStream`, which does.
-- The runtime pre-checks (`PreferredRuntime`, `ResolveRuntime`: validating a
-  model or a pane's runtime before the run) see no task size and no route class
-  (K-140), so a `task_bytes_gt` or `class` rule can make a pre-check validate
-  against a different runtime than `Run` picks.
+- The runtime pre-checks (`PreferredRuntime`, `ResolveRuntime`) see the route
+  class only when the caller passes the task (`RouteQuery.Task`, and `Extra` for
+  upstream outputs); the console chat handler and `yakos dispatch` do. A caller
+  that omits it can still get a different runtime than `Run` picks for a
+  sensitive request. They see no task size (`task_bytes_gt` rules).
 - The bash dispatch path has no router at all (K-143); `YAKOS_IMPL` does not
   select a router.
+
+## Sensitive class (K-140)
+
+A routing class that keeps a request holding a secret off a vendor the operator
+did not choose to trust with it. It is **not an egress guarantee**: a harness
+can still read any file it is told to, and a secret the scan cannot recognise
+passes. Pair it with the sandbox's read denial (`allow_unsandboxed_runtimes`
+stays off), which is what stops a file leaving the machine.
+
+A dispatch is classified `sensitive` when any of this text contains a
+secret-shaped string or names a never-path:
+
+- the task, the agent's prompt, a knowledge block (when present), a Flows
+  node's upstream outputs and transcript digests. The agent's own prompt is
+  scanned for secret patterns only, not for credential-file names: framework
+  prompts say "never edit `.env*`" and that is policy prose, not a request to
+  read the file. Zero-width and soft-hyphen characters are stripped before the
+  scan. The last three are passed by
+  the caller as `Params.ScanExtra` / `Request.ScanExtra`
+  (`dispatch.ClassifyFlowOutput` tells an engine whether an output is sensitive
+  before it dispatches the node).
+- Secret-shaped: the secret-scan hook's patterns (AWS, GitHub, Slack, Stripe,
+  Anthropic and Google keys, PEM private keys). Never-paths: the egress layer's
+  built-in list (`.env*`, `*.pem`, `*.key`, `secrets/**`, `credentials/**`,
+  `id_rsa*`, `.aws/credentials`, `.netrc`, ...) matched case-insensitively
+  against every path-like word in the text, plus `id_ecdsa*`, `id_dsa*`,
+  `.kube/config`, `.pypirc`, `*.tfvars` and gcloud application-default
+  credentials. Words are split on whitespace and punctuation of any script, and
+  `@`, `*`, `_` and similar decoration is trimmed (`@.env`, `**.env**`); a word
+  over 1024 bytes is matched by its first and last 1024 bytes. Base64, hex and
+  split-up keys are out of scope for a routing class.
+
+A project adds its own paths in `.yakos.yml`:
+`router: {never_paths: ["internal/billing/*"]}`. It can only add: the built-in
+patterns and paths are merged in on every scan, and no project key removes one.
+At most 32 entries are read, and a glob with more than 8 wildcard characters or
+more than two `**`, a bracket expression over 16 characters, or a length over 128 bytes is dropped with a warning (a scan-cost bound). One request
+is scanned once: the result is remembered by content hash for 30 seconds, so a
+chat pre-check and the dispatch after it share it.
+Looser, higher-false-positive patterns (entropy, generic `password=`) are not
+shipped; they would be opt-in.
+
+For a sensitive request the candidate chain is restricted to `claude` (the
+primary) and any runtime whose every catalog model is `billing=local` (none ships
+today). The restriction covers an explicit `--runtime`, an agent pin, a policy
+rule and every fallback list. If nothing is left the chain falls closed to
+`claude`. If `claude` is unavailable (not signed in, disabled by the project)
+the dispatch is **refused** with a `RouteRefusedError`, nothing runs, and one
+`route_refused` event is written to the ledger (class and a fixed reason, never
+request text). The class reaches the ledger as `route_class: sensitive`, and
+`route_reason` ends `sensitive -> primary only (<reason>)`.
+
+Reasons (a fixed vocabulary; the matched text and path are never logged):
+`secret-pattern`, `never-path`, `scan-timeout`, `scan-oversize`,
+`classifier-error`, `declared`. A scan that times out (2 s), finds more than
+16 MiB of text, or panics classifies the request sensitive: it fails closed.
+A caller-supplied class (`--class default`) never hides a sensitive request when
+there is text to scan; `--class sensitive` on `yakos router explain` shows the
+restriction without any text.
 
 ## Claude Code request-class aliases (K-141)
 
