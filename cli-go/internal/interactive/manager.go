@@ -318,6 +318,23 @@ func (m *Manager) LiveEngineKind(conversationID, ownerOperatorID string) (live, 
 	return true, isA && a.AccountsOwnTurns()
 }
 
+// LiveResumeRuntime is the runtime a live ResumeEngine pane is pinned to, or ""
+// when there is no live engine of that kind for this owner. A codex pane and an
+// agy pane are both ResumeEngines, so LiveEngineKind cannot tell them apart.
+func (m *Manager) LiveResumeRuntime(conversationID, ownerOperatorID string) string {
+	m.mu.Lock()
+	entry, ok := m.entries[conversationID]
+	m.mu.Unlock()
+	if !ok || entry.session.IsClosed() || entry.session.OwnerOperatorID() != ownerOperatorID {
+		return ""
+	}
+	r, isR := entry.session.(interface{ Runtime() string })
+	if !isR {
+		return ""
+	}
+	return r.Runtime()
+}
+
 // Ensure returns (or creates) the live engine for conversationID.
 //
 // If no engine exists, a new Session (CLI engine) is created and started.
