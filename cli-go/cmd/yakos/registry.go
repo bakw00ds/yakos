@@ -255,7 +255,7 @@ var commandRegistry = []commandEntry{
 	},
 	{
 		Name:   "dispatch",
-		Specs:  specSet("dispatch", "--runtime", "--runtime-fallback", "--model", "--project", "--timeout", "--eval-run-id", "--allow-root"),
+		Specs:  specSet("dispatch", "--runtime", "--runtime-fallback", "--model", "--project", "--timeout", "--eval-run-id", "--allow-root", "--explain"),
 		HelpFn: printDispatchHelp,
 	},
 	{
@@ -374,6 +374,14 @@ var commandRegistry = []commandEntry{
 		Name:   "retro",
 		HelpFn: retro.PrintHelp,
 		Specs:  helpDerivedSpecs("retro", retro.PrintHelp),
+	},
+	{
+		Name:   "router",
+		Specs:  specSet("router", "--json", "--task-file", "--class", "--project"),
+		HelpFn: printRouterHelp,
+		AllowUnparsed: []flagAllow{
+			{Flag: "--explain", Reason: "printRouterHelp points at `yakos dispatch --explain`, dispatch's flag"},
+		},
 	},
 	{
 		Name: "serve",

@@ -166,6 +166,9 @@ const (
 // select's `auto`).
 const autoRuntime = "auto"
 
+// coolingReasonPrefix starts the reason of a runtime skipped for the cooldown.
+const coolingReasonPrefix = "cooling down after repeated failures"
+
 // SkippedRuntime is a chain candidate that was passed over, and why.
 type SkippedRuntime struct {
 	Runtime string
@@ -557,7 +560,7 @@ func walkChain(ctx context.Context, in chainInput, probe func(context.Context, s
 		if honorCooling && !c.explicit() {
 			if cool, left := in.cooling(c.name); cool {
 				*cooled = true
-				choice.Skipped = append(choice.Skipped, SkippedRuntime{c.name, fmt.Sprintf("cooling down after repeated failures (%ds left)", int(left.Seconds())+1)})
+				choice.Skipped = append(choice.Skipped, SkippedRuntime{c.name, fmt.Sprintf(coolingReasonPrefix+" (%ds left)", int(left.Seconds())+1)})
 				continue
 			}
 		}
