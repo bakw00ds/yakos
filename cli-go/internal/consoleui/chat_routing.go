@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/hooks/secretscan"
 	"github.com/bakw00ds/yakos/internal/modelreg"
 )
 
@@ -201,7 +202,10 @@ func buildHandoffDigest(entries []TranscriptEntry, from string) (text string, tu
 		default:
 			continue
 		}
-		body, n := scanSecrets(truncateUTF8(strings.TrimSpace(e.Text), handoffEntryBytes))
+		// Scan the whole turn, then cut: a key that straddles the cut would
+		// otherwise lose its tail to the scanner and keep its head (sec-347 F1).
+		body, n := scanSecrets(strings.TrimSpace(e.Text))
+		body = truncateUTF8(body, handoffEntryBytes)
 		line := label + strings.ReplaceAll(body, "\n", "\n  ") + "\n"
 		if len(line) > budget {
 			break
@@ -232,7 +236,19 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}`),
 	regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}`),
-	regexp.MustCompile(`(?i)\b(?:api[_-]?key|secret|token|passwd|password)\b["']?\s*[:=]\s*["']?[^\s"',;\[][^\s"',;]{5,}`),
+	// A credential-looking name (it may sit inside a longer one: AWS_SECRET_ACCESS_KEY,
+	// GITHUB_TOKEN, "client_secret") followed by : or = and a value.
+	regexp.MustCompile(`(?i)[A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|secret|token|passwd|password|credential)s?[A-Za-z0-9_.-]*["']?\s*[:=]\s*["']?[^\s"',;\[][^\s"',;]{5,}`),
+	// user:pass@host in a URL.
+	regexp.MustCompile(`://[^\s/@:]*:[^\s@]+@`),
+}
+
+func init() {
+	// The secret-scan hook's own table (AIza, sk_live_, ...) as well, so a shape
+	// the hook blocks on a write is never sent to another vendor.
+	for _, p := range secretscan.DefaultPatterns {
+		secretPatterns = append(secretPatterns, p.Regex)
+	}
 }
 
 // scanSecrets replaces anything that looks like a credential with [redacted] and

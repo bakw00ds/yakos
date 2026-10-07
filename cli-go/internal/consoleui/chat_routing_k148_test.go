@@ -617,3 +617,35 @@ func TestK148_InteractiveSensitiveFirstTurnIsRefusedWhenClaudeIsDown(t *testing.
 		t.Error("no route_refused event in the dispatch log")
 	}
 }
+
+// Every shape the digest must redact, one case each (sec-347 F1). The values are
+// fixtures, assembled so the source holds no whole key.
+func TestHandoffDigest_ShapeTable(t *testing.T) {
+	tail := strings.Repeat("Ab1", 12)
+	cases := []struct{ name, text, secret string }{
+		{"google api key", "key AIza" + "SyA" + strings.Repeat("b", 32) + " ok", "AIzaSyA"},
+		{"stripe live key", "use sk_" + "live_" + strings.Repeat("a1", 14), "sk_live_"},
+		{"aws secret env", "AWS_SECRET_" + "ACCESS_KEY=" + "wJalrXUtnFEMI" + tail, "wJalrXUtnFEMI"},
+		{"github token env", "GITHUB_" + "TOKEN=" + "abcd1234efgh5678", "abcd1234efgh5678"},
+		{"url credentials", "clone https://deploy:" + "s3cr3tPw" + "@git.example.com/x.git", "s3cr3tPw"},
+		{"client secret json", `{"client_` + `secret": "` + "qwerty123456" + `"}`, "qwerty123456"},
+		{"anthropic key", "sk-ant-" + strings.Repeat("x9", 47), "sk-ant-"},
+	}
+	for _, c := range cases {
+		digest, _, n := consoleui.BuildHandoffDigestForTest([]consoleui.TranscriptEntry{{Role: consoleui.RoleUser, Text: c.text}}, "claude")
+		if strings.Contains(digest, c.secret) || n == 0 {
+			t.Errorf("%s: secret %q survived (redactions %d):\n%s", c.name, c.secret, n, digest)
+		}
+	}
+	// A key that straddles the per-turn cut is redacted whole, not half-cut.
+	key := "AKIA" + "IOSFODNN7EXAMPLE"
+	filler := strings.Repeat("x ", 745) // 1490 bytes, the key starts 10 bytes before the cut
+	digest, _, _ := consoleui.BuildHandoffDigestForTest([]consoleui.TranscriptEntry{{Role: consoleui.RoleUser, Text: filler + key + " tail"}}, "claude")
+	if strings.Contains(digest, "AKIA") {
+		t.Errorf("the head of a key straddling the cut reached the digest")
+	}
+	// Prose about tokens is left alone.
+	if got, n := consoleui.ScanSecretsForTest("the token bucket and a secret santa: fun"); n != 0 {
+		t.Errorf("prose redacted: %q", got)
+	}
+}
