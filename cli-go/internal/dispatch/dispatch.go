@@ -151,7 +151,7 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	var stderrBuf bytes.Buffer
 	dispatchOut, exitCode, dispatchErr := execWithStderrCapture(ctx, adapter, dispatchReq, &stderrBuf)
 
-	noteRun(ctx, runtimeName, exitCode, dispatchErr)
+	noteRun(ctx, req.Project, runtimeName, exitCode, dispatchErr)
 
 	tsEnd := time.Now()
 	durationS := tsEnd.Sub(tsStart).Seconds()

@@ -306,3 +306,59 @@ func TestSensitive_EligibleRuntimes(t *testing.T) {
 		t.Errorf("an empty chain must fall closed to claude: %v", got)
 	}
 }
+
+// K-140 x K-139c: a sensitive request whose primary is under a max_model ceiling
+// is clamped on claude; the ceiling never moves it to a non-primary runtime, even
+// when a policy rule would put codex first.
+func TestSensitive_CeilingClampsOnPrimaryNeverMovesIt(t *testing.T) {
+	quietStderr(t)
+	captureRouteLog(t)
+	upProbe(t)
+	setPolicy(t, codexThenClaude)
+	withCeilings(t, map[string]string{"c-opus": "sonnet"})
+	root, project := ceilingRoot(t), projectWithYML(t, "")
+	got, err := route(t, root, project, "c-opus", func(in *routeInput) { in.Task = "deploy with " + awsKey() })
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if got.Runtime != "claude" || got.Model != "sonnet" || !got.ModelExplicit {
+		t.Errorf("landed on %s/%q explicit=%v, want claude/sonnet clamped", got.Runtime, got.Model, got.ModelExplicit)
+	}
+	for _, sk := range got.Decision.Skipped {
+		if sk.Runtime == "claude" {
+			t.Errorf("the primary was skipped: %+v", sk)
+		}
+	}
+}
+
+// K-140 x K-139c: when the project's disable_models rules out the primary's model
+// the request is refused (route_refused), not skipped on to codex.
+func TestSensitive_PrimaryModelDisabledIsRefusedNotSkipped(t *testing.T) {
+	quietStderr(t)
+	captureRouteLog(t)
+	upProbe(t)
+	setPolicy(t, codexThenClaude)
+	withCeilings(t, nil)
+	root := ceilingRoot(t)
+	project := projectWithYML(t, "router:\n  disable_models: [sonnet]\n")
+	// Control: without the secret the project's list does disable claude's model,
+	// and the chain is free to use codex.
+	got, err := route(t, root, project, "c-sonnet", func(in *routeInput) { in.Task = "plain task" })
+	if err != nil || got.Runtime != "codex" {
+		t.Fatalf("control: %+v, %v", got, err)
+	}
+	got, err = route(t, root, project, "c-sonnet", func(in *routeInput) { in.Task = "deploy with " + awsKey() })
+	if got != nil {
+		t.Fatalf("routed to %s/%q, want a refusal", got.Runtime, got.Model)
+	}
+	re, ok := AsRouteRefused(err)
+	if !ok {
+		t.Fatalf("err = %v, want RouteRefusedError", err)
+	}
+	if re.Class != router.ClassSensitive || strings.Contains(err.Error(), awsKey()) {
+		t.Errorf("refusal = %v", err)
+	}
+	if !strings.Contains(err.Error(), "disable_models") {
+		t.Errorf("refusal does not say why: %v", err)
+	}
+}
