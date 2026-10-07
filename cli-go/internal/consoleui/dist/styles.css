@@ -4993,3 +4993,4 @@ html[data-theme="light"] .term-viewport {
 .context-drawer-parts { padding-left: 16px; }
 .context-drawer-parts .dropped { opacity: 0.6; }
 .context-drawer-soul { white-space: pre-wrap; word-break: break-word; }
+.chat-route-notice { color: var(--color-warning); }

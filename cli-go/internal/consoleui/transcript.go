@@ -137,6 +137,8 @@ type TranscriptEntry struct {
 	RuleID       string `json:"rule_id,omitempty"`
 	FallbackFrom string `json:"fallback_from,omitempty"`
 	Pinned       string `json:"pinned,omitempty"`
+	// OverrideRefused: the runtime an @prefix asked for that the router refused.
+	OverrideRefused string `json:"override_refused,omitempty"`
 }
 
 // Transcripts manages per-conversation NDJSON transcript files.

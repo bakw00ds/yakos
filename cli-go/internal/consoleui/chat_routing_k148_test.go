@@ -450,7 +450,10 @@ func TestModelsEndpoint(t *testing.T) {
 	if usable, ok := seen["claude/opus"]; !ok || !usable {
 		t.Errorf("claude/opus missing or unusable: %v", seen["claude/opus"])
 	}
-	if usable, ok := seen["codex/gpt-5.6-sol"]; !ok || usable {
+	// The overlay is trust-checked (owner-only mode, non-symlink) and that check
+	// has no Windows semantics, so the overlay is ignored there and the model
+	// stays usable: assert the switch-off on POSIX only.
+	if usable, ok := seen["codex/gpt-5.6-sol"]; goruntime.GOOS != "windows" && (!ok || usable) {
 		t.Errorf("the overlay switched gpt-5.6-sol off: present=%v usable=%v", ok, usable)
 	}
 	if strings.Contains(buf.String(), home) || strings.Contains(buf.String(), "model-registry") {
@@ -647,5 +650,40 @@ func TestHandoffDigest_ShapeTable(t *testing.T) {
 	// Prose about tokens is left alone.
 	if got, n := consoleui.ScanSecretsForTest("the token bucket and a secret santa: fun"); n != 0 {
 		t.Errorf("prose redacted: %q", got)
+	}
+}
+
+// A sensitive request refuses the @codex override: the turn runs on claude, the
+// chip is the router's, and it says the override did not hold; the notice is
+// persisted with the route turn.
+func TestK148_SensitiveRequestRefusesTheOverride(t *testing.T) {
+	k := newK148(t)
+	task := "ship it, key AKIA" + "IOSFODNN7EXAMPLE"
+	frames, st := k.turn("s-ov-ref", "conv-ov-ref", task, map[string]any{"overrideRuntime": "codex"})
+	if st != http.StatusAccepted {
+		t.Fatalf("status %d", st)
+	}
+	r := routeOf(t, frames[0])
+	if r["runtime"] != "claude" || r["override_refused"] != "codex" || r["pinned"] != "router" {
+		t.Errorf("route = %v", r)
+	}
+	if got := argvCalls(t, k.codexLog); len(got) != 0 {
+		t.Errorf("codex ran a sensitive turn: %v", got)
+	}
+	waitForTurns(t, k.store, "conv-ov-ref", 1)
+	entries, _ := k.store.Read("conv-ov-ref", "")
+	var seen bool
+	for _, e := range entries {
+		if e.Role == consoleui.RoleRoute && e.OverrideRefused == "codex" && e.Runtime == "claude" {
+			seen = true
+		}
+	}
+	if !seen {
+		t.Errorf("the refused override is not in the transcript: %+v", entries)
+	}
+	// An honoured override carries no notice.
+	frames, _ = k.turn("s-ov-ok", "conv-ov-ok", "plain words", map[string]any{"overrideRuntime": "codex"})
+	if r := routeOf(t, frames[0]); r["override_refused"] != nil || r["pinned"] != "override" {
+		t.Errorf("honoured override route = %v", r)
 	}
 }

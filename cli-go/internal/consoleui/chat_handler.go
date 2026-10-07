@@ -436,6 +436,10 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "invalid override", http.StatusBadRequest)
 		return
 	}
+	overrideRuntime := ""
+	if routePinned == "override" {
+		overrideRuntime = req.Runtime
+	}
 
 	// --- Validate runtime ---
 	// An empty runtime (or "auto") asks the dispatcher to resolve the runtime
@@ -533,6 +537,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				Runtime: d.Runtime, Provider: d.Provider, Model: d.ModelID, RuleID: d.RuleID,
 				Reason: d.Reason, Class: d.RouteClass, FallbackFrom: d.FallbackFrom,
 			}, routePinned)
+			noteRefusedOverride(interactiveRoute, routePinned, overrideRuntime)
 		}
 	}
 	if modelName != "" {
@@ -918,7 +923,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				if chunk.Route != nil {
 					routedRuntime.Store(chunk.Route.Runtime)
 					ch.emitRoute(dispReq.SessionID, conversationID, capturedOperatorID,
-						routeViewFrom(chunk.Route, routePinned), handoffInfo)
+						noteRefusedOverride(routeViewFrom(chunk.Route, routePinned), routePinned, overrideRuntime), handoffInfo)
 				}
 				return
 

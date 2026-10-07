@@ -149,6 +149,9 @@
       addSpan(doc, el, 'chat-route-why', ' - ' + route.reason);
       el.setAttribute('title', route.reason);
     }
+    if (route.override_refused) {
+      addSpan(doc, el, 'chat-route-notice', ' Override @' + route.override_refused + ' refused (sensitive request, or that runtime is disabled or unavailable); this turn ran on ' + String(route.runtime || '?') + '.');
+    }
     if (route.rule_id) addSpan(doc, el, 'chat-route-rule', ' [' + route.rule_id + ']');
     return el;
   }
@@ -189,7 +192,7 @@
     return {
       role: 'route', ts: e.ts, sessionId: e.session_id,
       route: { runtime: e.runtime, model: e.model, reason: e.text, rule_id: e.rule_id,
-        fallback_from: e.fallback_from, pinned: e.pinned }
+        fallback_from: e.fallback_from, pinned: e.pinned, override_refused: e.override_refused }
     };
   }
 

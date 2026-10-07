@@ -43,6 +43,10 @@ type routeView struct {
 	// Pinned says who fixed the runtime: "override" (an @prefix), "pane" (the
 	// pane's own runtime select) or "router" (auto).
 	Pinned string `json:"pinned"`
+	// OverrideRefused names the runtime an @prefix asked for when the router put
+	// the turn elsewhere (a sensitive request, a disabled or unavailable runtime).
+	// The turn ran on Runtime; Pinned is then "router".
+	OverrideRefused string `json:"override_refused,omitempty"`
 }
 
 // handoffView is the wire form of a runtime switch.
@@ -119,6 +123,16 @@ func routeViewFrom(info *dispatch.RouteInfo, pinned string) *routeView {
 	}
 }
 
+// noteRefusedOverride marks rv when the operator's @runtime override did not
+// hold: the turn runs where the router decided, and the pane says so.
+func noteRefusedOverride(rv *routeView, pinned, overrideRuntime string) *routeView {
+	if rv == nil || pinned != "override" || overrideRuntime == "" || rv.Runtime == overrideRuntime {
+		return rv
+	}
+	rv.OverrideRefused, rv.Pinned = cleanLine(overrideRuntime, 32), "router"
+	return rv
+}
+
 // emitRoute persists the route turn and sends the route event, then the handoff
 // event when the turn is the first after a runtime switch. Route comes first.
 func (ch *chatHandlers) emitRoute(sessionID, conversationID, operatorID string, rv *routeView, hv *handoffView) {
@@ -128,7 +142,7 @@ func (ch *chatHandlers) emitRoute(sessionID, conversationID, operatorID string, 
 	_ = ch.transcripts.Append(TranscriptEntry{
 		SessionID: sessionID, ConversationID: conversationID, OperatorID: operatorID,
 		Role: RoleRoute, Text: rv.Reason, Runtime: rv.Runtime, Model: rv.Model,
-		RuleID: rv.RuleID, FallbackFrom: rv.FallbackFrom, Pinned: rv.Pinned,
+		RuleID: rv.RuleID, FallbackFrom: rv.FallbackFrom, Pinned: rv.Pinned, OverrideRefused: rv.OverrideRefused,
 	})
 	now := func() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 	ch.hub.Route(SSEEvent{SessionID: sessionID, ConversationID: conversationID, Type: "route", Route: rv, TS: now()})

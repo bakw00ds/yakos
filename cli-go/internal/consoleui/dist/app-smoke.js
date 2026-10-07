@@ -624,6 +624,8 @@ function routingTest() {
   has('chip names the fallback', chipText, 'fell back from claude');
   has('chip names the rule', chipText, '[R1]');
   same('chip title holds the reason', chip.attrs.title, evil);
+  var refusedChip = yr.buildElement({ role: 'route', route: { runtime: 'claude', pinned: 'router', override_refused: evil } }, fakeDoc());
+  has('refused override is named (as text)', refusedChip.children.map(function(c) { return c.textContent; }).join(''), 'Override @' + evil + ' refused');
   var banner = yr.buildElement({ role: 'handoff', handoff: { from: evil, to: 'codex', turns: 3, digest_bytes: 812, redactions: 1 } }, fakeDoc());
   has('banner wording', banner.textContent, 'Context reset (cache): moved from ' + evil + ' to codex');
   has('banner counts', banner.textContent, '3 earlier turns (812 bytes, 1 secret-like value redacted)');
