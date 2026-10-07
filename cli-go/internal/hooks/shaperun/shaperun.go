@@ -30,6 +30,12 @@ type Deps struct {
 	FailOpen bool
 	// YakosRoot locates lib/hooks for the runner (unused in Go mode).
 	YakosRoot string
+	// Agent is the id of the agent yakOS dispatched (from YAKOS_AGENT_TYPE, set
+	// at dispatch). When empty, hookio.AgentFrom(ctx) is used (the loopback
+	// endpoint). With no valid id, path-allowlist refuses file-path tool calls
+	// whenever a policy file exists: judging them by the "lead" policy would let
+	// a dispatched agent run under the wrong, usually empty, policy.
+	Agent string
 	// Resolve returns the hook Config and work/current dir for the workspace the
 	// envelope names ("" when it names none).
 	Resolve func(workDir string) (cfg registry.Config, workCurrentDir string)
@@ -98,8 +104,27 @@ func Run(ctx context.Context, shape, name string, data []byte, d Deps) hookio.Re
 		env["CLAUDE_PROJECT_DIR"] = cfg.ProjectDir
 	}
 
+	agent := d.Agent
+	if agent == "" {
+		agent = hookio.AgentFrom(ctx)
+	}
+	if !hookio.ValidAgent(agent) {
+		agent = ""
+		env["YAKOS_REQUIRE_AGENT_TYPE"] = "1"
+	}
+
 	for _, in := range ins {
 		in.Env = env
+		if agent != "" {
+			// A copy: the payload map belongs to the decoder, and the harness's
+			// own agent_type (if any) must not outrank yakOS's dispatch record.
+			p := make(map[string]any, len(in.Payload)+1)
+			for k, v := range in.Payload {
+				p[k] = v
+			}
+			p["agent_type"] = agent
+			in.Payload = p
+		}
 		out, runErr := r.Run(ctx, hook, in)
 		if out.ExitCode == 2 {
 			return hookio.Respond(shape, event, true, blockReason(name, out))

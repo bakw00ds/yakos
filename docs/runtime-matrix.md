@@ -112,11 +112,17 @@ that runs yakOS's Go hooks (`budget-guard`, `path-allowlist`, `secret-scan` on
 PreToolUse; `supervisor-stream` on PostToolUse) through `yakos hook run --shape
 codex|agy <name>`. The command text is fixed (no run id, no temp path) and the
 file is rewritten only when its bytes differ, because codex hashes each hook.
+The command word is the ABSOLUTE, symlink-resolved path of the running `yakos`
+binary (`--binary` takes only an absolute path to a regular, non-group/world-
+writable file; a bare or relative name is refused, because it would resolve
+through the harness's PATH or a project-controlled cwd). Install writes through
+`os.OpenRoot` and refuses a symlinked `.agents`. `yakos doctor` warns when the
+installed binary no longer exists: codex fails open when a hook cannot start.
 
 | | codex (0.154.0) | agy (1.3.0) |
 |---|---|---|
-| File | `<yakOS codex profile>/hooks.json` (`~/.yakos-state/codex-home`); never `~/.codex` | `<workspace>/.agents/hooks.json`; other hook names in an existing file are kept |
-| Trust mechanism installed | none to set up: dispatch adds `--dangerously-bypass-hook-trust` when the profile holds the file and is the CODEX_HOME in use. A user-level file needs no project trust | none: `agy -p` loads workspace hooks with no trust step. The interactive TUI asks "Do you trust the contents of this project?" once |
+| File | `<yakOS codex profile>/hooks.json` (`~/.yakos-state/codex-home`); never `~/.codex` | `<workspace>/.agents/hooks.json`; other hook names in an existing file are kept, and install lists them in a warning (agy runs them headless with no trust step; agy also reads `.agent/`, `_agents/`, `_agent/` and parent `.agents/` directories) |
+| Trust mechanism installed | none to set up: dispatch adds `--dangerously-bypass-hook-trust` only when the profile holds a file whose bytes equal what yakos renders for the running binary, owned by you and not group/world-writable, in a private profile directory and not a symlink. Any other file gets no flag (codex skips it, the gate is off), a path-free warning on stderr, and `hooks_untrusted` on the dispatch-log row. A user-level file needs no project trust | none: `agy -p` loads workspace hooks with no trust step. The interactive TUI asks "Do you trust the contents of this project?" once |
 | Deny shape | exit 2, reason on stderr | stdout `{"decision":"deny","reason":...}`, exit 0 |
 | Undecodable envelope | denied for the fail-closed hooks (`YAKOS_HOOKS_FAIL_OPEN=1` overrides) | same |
 
@@ -130,7 +136,14 @@ Login: yakOS does not copy `~/.codex/auth.json`. The profile is used once
 `yakos auth login codex` has run, or, for an API-key setup, when `OPENAI_API_KEY`
 is set in the dispatching process and the profile holds the hooks file.
 `yakos doctor` warns when a hooks file sits in a profile dispatch is not using
-and when the file has drifted from what yakOS writes.
+and when the file differs from what this yakos would write (then the gate is off, not merely "modified").
+
+Agent identity: dispatch sets `YAKOS_AGENT_TYPE=<agent>` in the codex and agy
+child environment; `yakos hook run --shape` hands it to `path-allowlist` as the
+agent, so a call is judged by the dispatched agent's policy. If the variable does
+not reach the hook (not verified for either harness; chat dispatch carries no
+agent name), `path-allowlist` refuses file-path calls whenever
+`.claude/path-allowlist.json` exists, instead of judging them as the lead.
 
 What the gate does not cover (all unverified or by design):
 
@@ -143,7 +156,8 @@ What the gate does not cover (all unverified or by design):
 - A shell command that writes a file (`echo K=... > .env`) is not inspected by
   `secret-scan` or `path-allowlist`, which gate file-write tools.
 - Agy's behaviour when the hook binary is missing or crashes was not tested; a
-  `yakos` that is not on the harness's PATH may fail open.
+  hook whose binary is missing may fail open (codex does; the installed path is
+  absolute and doctor checks it).
 - Hooks do not make agy a containment boundary (K-158 above still applies).
 
 Optional endpoint: with `hooks_endpoint: true` in `~/.yakos-state/router-policy.yml`
@@ -153,7 +167,9 @@ Optional endpoint: with `hooks_endpoint: true` in `~/.yakos-state/router-policy.
 in the `X-Yakos-Hook-Nonce` header (read it from
 `~/.yakos-state/hooks-endpoint-nonce`, rewritten at each daemon start), accepts
 64 KiB, is loopback-only, and returns `{"exit_code","stdout","stderr"}` for the
-caller to replay. The installed files use the CLI.
+caller to replay. `?agent=<id>` names the dispatched agent. The caller MUST treat
+a 413 (body over 64 KiB), and any other non-200 answer, as DENY; failing open on an
+endpoint error bypasses the gate. The installed files use the CLI.
 
 The bash adapters (`cli/lib/runtimes/{codex,agy}.sh`, used by `yakos dispatch`
 when the bash tree is present and `YAKOS_IMPL` is unset) still run with the

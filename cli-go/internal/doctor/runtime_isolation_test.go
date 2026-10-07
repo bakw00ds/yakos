@@ -121,7 +121,11 @@ func writeProfileFile(t *testing.T, home, name, body string) string {
 
 func TestRuntimeIsolation_CodexHooksHints(t *testing.T) {
 	codex := map[string]string{"codex": "/usr/bin/codex"}
-	cur, err := hooksinstall.RenderShapeFile(hooksinstall.HarnessCodex, "")
+	exe, err := hooksinstall.ResolveBinary("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cur, err := hooksinstall.RenderShapeFile(hooksinstall.HarnessCodex, exe)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,6 +138,11 @@ func TestRuntimeIsolation_CodexHooksHints(t *testing.T) {
 	if !strings.Contains(out, "skip them silently") || rep.Warnings != 1 {
 		t.Errorf("want the not-loaded warning, got %d warnings:\n%s", rep.Warnings, out)
 	}
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "codex hooks") && strings.Contains(l, home) {
+			t.Errorf("hooks line leaks the absolute home path: %s", l)
+		}
+	}
 
 	// Loaded through an API key and current: ok, no warning.
 	out, rep = runIsolation(t, home, codex, map[string]string{"OPENAI_API_KEY": "k"})
@@ -141,11 +150,44 @@ func TestRuntimeIsolation_CodexHooksHints(t *testing.T) {
 		t.Errorf("want an ok line, got %d warnings:\n%s", rep.Warnings, out)
 	}
 
-	// Drifted content: the hash would flip to modified.
+	// Drift, direction 1: bytes that differ from the render are stale, and the
+	// text says the gate is off (not "codex will report modified").
 	writeProfileFile(t, home, "hooks.json", `{"hooks":{}}`)
 	out, rep = runIsolation(t, home, codex, map[string]string{"OPENAI_API_KEY": "k"})
-	if !strings.Contains(out, "file drift") || rep.Warnings != 1 {
-		t.Errorf("want the drift warning, got %d warnings:\n%s", rep.Warnings, out)
+	if !strings.Contains(out, "differs from what this yakos installs") || !strings.Contains(out, "gate is OFF") || rep.Warnings != 1 {
+		t.Errorf("want the stale warning, got %d warnings:\n%s", rep.Warnings, out)
+	}
+
+	// Drift, direction 2: an absolute-binary install of THIS binary is current
+	// (the old check rendered with a bare name and called it stale).
+	writeProfileFile(t, home, "hooks.json", string(cur))
+	if out, rep = runIsolation(t, home, codex, map[string]string{"OPENAI_API_KEY": "k"}); rep.Warnings != 0 || !strings.Contains(out, "[ok]") {
+		t.Errorf("a current absolute install must not warn, got %d:\n%s", rep.Warnings, out)
+	}
+
+	// An install for a binary that is gone: the hooks would fail open.
+	gone := filepath.Join(t.TempDir(), "yakos")
+	if err := os.WriteFile(gone, []byte("x"), 0o755); err != nil { //nolint:gosec
+		t.Fatal(err)
+	}
+	other, _ := hooksinstall.RenderShapeFile(hooksinstall.HarnessCodex, gone)
+	writeProfileFile(t, home, "hooks.json", string(other))
+	_ = os.Remove(gone)
+	out, rep = runIsolation(t, home, codex, map[string]string{"OPENAI_API_KEY": "k"})
+	if !strings.Contains(out, "no longer exists") || rep.Warnings < 1 {
+		t.Errorf("want the missing-binary warning, got %d:\n%s", rep.Warnings, out)
+	}
+
+	// Right bytes but group-writable: not trusted.
+	if runtime.GOOS != "windows" {
+		dir := writeProfileFile(t, home, "hooks.json", string(cur))
+		if err := os.Chmod(filepath.Join(dir, "hooks.json"), 0o666); err != nil { //nolint:gosec
+			t.Fatal(err)
+		}
+		out, rep = runIsolation(t, home, codex, map[string]string{"OPENAI_API_KEY": "k"})
+		if !strings.Contains(out, "will NOT trust") || rep.Warnings != 1 {
+			t.Errorf("want the unsafe warning, got %d:\n%s", rep.Warnings, out)
+		}
 	}
 
 	// No hooks file: nothing to say.

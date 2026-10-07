@@ -39,8 +39,11 @@ func newHooksEP(t *testing.T, enabled bool) hooksEPFixture {
 		cfg.HooksEndpoint = &consoleui.HooksEndpoint{
 			NonceFile: nf,
 			Known:     func(n string) bool { return n == "secret-scan" },
-			Run: func(_ context.Context, shape, name string, body []byte) hookio.Response {
+			Run: func(ctx context.Context, shape, name string, body []byte) hookio.Response {
 				*calls++
+				if bytes.Contains(body, []byte("WHOAMI")) {
+					return hookio.Respond(shape, "PreToolUse", true, "agent="+hookio.AgentFrom(ctx))
+				}
 				if bytes.Contains(body, []byte("DENY")) {
 					return hookio.Respond(shape, "PreToolUse", true, "nope")
 				}
@@ -169,5 +172,24 @@ func TestHooksEndpointGates(t *testing.T) {
 	}
 	if w := f.do(t, func(r *http.Request) { r.Header.Set("Origin", "http://localhost:7899") }, epPath, `{}`); w.Code != 200 {
 		t.Errorf("loopback origin: status %d, want 200", w.Code)
+	}
+}
+
+func TestHooksEndpointPassesDispatchedAgent(t *testing.T) {
+	f := newHooksEP(t, true)
+	got := func(q string) string {
+		w := f.do(t, nil, epPath+q, "WHOAMI")
+		if w.Code != http.StatusOK {
+			t.Fatalf("status %d", w.Code)
+		}
+		return w.Body.String()
+	}
+	if b := got("&agent=reviewer"); !strings.Contains(b, "agent=reviewer") {
+		t.Errorf("agent not passed: %s", b)
+	}
+	for _, bad := range []string{"&agent=a%20b", "&agent=..%2Fx", "&agent=a;b", ""} {
+		if b := got(bad); strings.Contains(b, "agent=a") || strings.Contains(b, "agent=..") {
+			t.Errorf("invalid agent %q accepted: %s", bad, b)
+		}
 	}
 }

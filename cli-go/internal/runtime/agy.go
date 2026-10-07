@@ -13,7 +13,7 @@ import (
 // OPENAI_*/CODEX_* this way.
 func buildEnvAgy(req DispatchRequest) []string {
 	env := filterEnv(os.Environ(), agyEnvSpec)
-	return appendDispatchEnv(env, req)
+	return withAgentType(appendDispatchEnv(env, req), req.AgentName)
 }
 
 // AgyAdapter implements Adapter for the Antigravity (agy) CLI.

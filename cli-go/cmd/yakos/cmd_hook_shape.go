@@ -50,7 +50,9 @@ func runHookShape(yakosRoot, shape, name string) {
 	if err != nil {
 		data = nil // undecodable: shaperun applies the fail-closed posture
 	}
-	resp := shaperun.Run(context.Background(), shape, name, data, shapeDeps(yakosRoot))
+	deps := shapeDeps(yakosRoot)
+	deps.Agent = os.Getenv("YAKOS_AGENT_TYPE") // set by dispatch; see runtime.AgentTypeEnv
+	resp := shaperun.Run(context.Background(), shape, name, data, deps)
 	_, _ = os.Stdout.Write(resp.Stdout)
 	_, _ = os.Stderr.Write(resp.Stderr)
 	os.Exit(resp.ExitCode)

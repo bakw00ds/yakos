@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/registry"
 )
 
@@ -101,6 +102,7 @@ func TestRunPathAllowlistGatesEveryFileOfAPatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	d := deps(t, false)
+	d.Agent = "lead"
 	wc := t.TempDir()
 	d.Resolve = func(string) (registry.Config, string) {
 		return registry.Config{WorkCurrentDir: wc, ProjectDir: proj, StateDir: t.TempDir()}, wc
@@ -118,5 +120,56 @@ func TestRunPathAllowlistGatesEveryFileOfAPatch(t *testing.T) {
 	}
 	if got := run("ok.txt", ".env"); got != 2 {
 		t.Fatalf("denied second file passed: %d", got)
+	}
+}
+
+// M1: a call is judged by the DISPATCHED agent's policy, not the lead's.
+func TestRunPathAllowlistUsesDispatchedAgent(t *testing.T) {
+	proj := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// "lead" may write anywhere; "reviewer" may not touch src/.
+	pol := `{"lead":{"allow":["**"]},"reviewer":{"deny":["src/**"]}}`
+	if err := os.WriteFile(filepath.Join(proj, ".claude", "path-allowlist.json"), []byte(pol), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wc := t.TempDir()
+	mk := func(agent string) Deps {
+		d := deps(t, false)
+		d.Agent = agent
+		d.Resolve = func(string) (registry.Config, string) {
+			return registry.Config{WorkCurrentDir: wc, ProjectDir: proj, StateDir: t.TempDir()}, wc
+		}
+		return d
+	}
+	b, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Write", "cwd": proj,
+		"tool_input": map[string]any{"file_path": filepath.Join(proj, "src", "a.go"), "content": "x"}})
+	if got := Run(context.Background(), "codex", "path-allowlist", b, mk("reviewer")).ExitCode; got != 2 {
+		t.Errorf("reviewer policy not applied: exit %d", got)
+	}
+	if got := Run(context.Background(), "codex", "path-allowlist", b, mk("lead")).ExitCode; got != 0 {
+		t.Errorf("lead policy blocked: exit %d", got)
+	}
+	// An agent the policy does not know passes, as for Claude.
+	if got := Run(context.Background(), "codex", "path-allowlist", b, mk("other")).ExitCode; got != 0 {
+		t.Errorf("unlisted agent blocked: exit %d", got)
+	}
+	// Agent unknown (env did not reach the hook): most restrictive, never the lead.
+	for _, bad := range []string{"", "bad name", "a;b", "../x", strings.Repeat("a", 65)} {
+		if got := Run(context.Background(), "codex", "path-allowlist", b, mk(bad)).ExitCode; got != 2 {
+			t.Errorf("agent %q: exit %d, want 2", bad, got)
+		}
+	}
+	// The endpoint's route: the agent travels in the context.
+	if got := Run(hookio.WithAgent(context.Background(), "reviewer"), "codex", "path-allowlist", b, mk("")).ExitCode; got != 2 {
+		t.Errorf("context agent ignored: exit %d", got)
+	}
+	// With no policy file at all nothing is enforced and nothing is blocked.
+	if err := os.Remove(filepath.Join(proj, ".claude", "path-allowlist.json")); err != nil {
+		t.Fatal(err)
+	}
+	if got := Run(context.Background(), "codex", "path-allowlist", b, mk("")).ExitCode; got != 0 {
+		t.Errorf("no policy file but blocked: exit %d", got)
 	}
 }

@@ -3,6 +3,7 @@ package runtime
 import (
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 )
@@ -300,4 +301,30 @@ func appendDispatchEnv(env []string, req DispatchRequest) []string {
 		env = append(env, "IS_SANDBOX=1") // PR #17
 	}
 	return env
+}
+
+// AgentTypeEnv is the variable through which a dispatch tells the hooks the
+// harness runs (codex, agy via `yakos hook run --shape`) which agent was
+// dispatched, so path-allowlist applies that agent's policy and not the lead's
+// (K-145). It is set by yakOS from the dispatch request only; the allowlist
+// env spec drops any ambient value.
+const AgentTypeEnv = "YAKOS_AGENT_TYPE"
+
+var agentTypeRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+
+// withAgentType returns env with YAKOS_AGENT_TYPE set to agent when it is a
+// plain identifier; any inherited value is removed first, so a name that does
+// not validate leaves the variable unset (path-allowlist then fails closed).
+func withAgentType(env []string, agent string) []string {
+	out := make([]string, 0, len(env)+1)
+	for _, kv := range env {
+		if k, _, ok := strings.Cut(kv, "="); ok && strings.EqualFold(k, AgentTypeEnv) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	if agentTypeRE.MatchString(agent) {
+		out = append(out, AgentTypeEnv+"="+agent)
+	}
+	return out
 }

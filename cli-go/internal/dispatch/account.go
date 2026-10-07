@@ -280,6 +280,9 @@ func applyLedger(ev *finishedEvent, req Request, res Result) {
 		ev.ModelID = logIdent(res.ModelResolved, 128)
 	}
 	ev.Billing = runtime.BillingFor(runtimeName)
+	if runtimeName == "codex" && runtime.CodexHooksUntrusted() {
+		ev.HooksUntrusted = true
+	}
 
 	if res.Usage != nil {
 		u := *res.Usage

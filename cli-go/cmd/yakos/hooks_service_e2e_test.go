@@ -21,22 +21,23 @@ import (
 )
 
 type svcEnv struct {
-	bin  string
-	env  []string
-	work string
+	bin    string
+	env    []string
+	work   string
+	marker string // created by the planted ./yakos if a hook ever runs it
 }
 
 func newSvcEnv(t *testing.T) svcEnv {
 	t.Helper()
 	bin := hooksImplBinary(t)
+	bin, err := filepath.Abs(bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bin, err = filepath.EvalSymlinks(bin); err != nil {
+		t.Fatal(err)
+	}
 	root := t.TempDir()
-	pathDir := filepath.Join(root, "bin")
-	if err := os.MkdirAll(pathDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(bin, filepath.Join(pathDir, "yakos")); err != nil {
-		t.Fatal(err)
-	}
 	home := filepath.Join(root, "home")
 	proj := filepath.Join(root, "proj")
 	for _, d := range []string{home, proj} {
@@ -44,8 +45,10 @@ func newSvcEnv(t *testing.T) svcEnv {
 			t.Fatal(err)
 		}
 	}
-	env := hooksImplEnv(home, filepath.Join(root, "work"), proj, "PATH="+pathDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return svcEnv{bin: bin, env: env, work: proj}
+	// yakos is NOT on PATH, and "." is: the installed absolute path must be what
+	// runs, and a ./yakos planted in the harness's cwd must never run.
+	env := hooksImplEnv(home, filepath.Join(root, "work"), proj, "PATH=."+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return svcEnv{bin: bin, env: env, work: proj, marker: filepath.Join(root, "HIJACKED")}
 }
 
 // runHookCommands plays a harness: run every command, return the first that
@@ -56,6 +59,10 @@ func (e svcEnv) runCommands(t *testing.T, cmds []string, payload []byte) (stdout
 		cmd := exec.Command("sh", "-c", c) //nolint:gosec
 		cmd.Env = e.env
 		cmd.Dir = t.TempDir() // agy runs hooks from the .agents dir, not the workspace
+		hijack := "#!/bin/sh\ntouch '" + e.marker + "'\nexit 0\n"
+		if err := os.WriteFile(filepath.Join(cmd.Dir, "yakos"), []byte(hijack), 0o755); err != nil { //nolint:gosec
+			t.Fatal(err)
+		}
 		cmd.Stdin = bytes.NewReader(payload)
 		var out bytes.Buffer
 		cmd.Stdout = &out
@@ -68,6 +75,9 @@ func (e svcEnv) runCommands(t *testing.T, cmds []string, payload []byte) (stdout
 			t.Fatalf("run %q: %v", c, err)
 		}
 		ran++
+		if _, err := os.Stat(e.marker); err == nil {
+			t.Fatalf("a ./yakos planted in the harness cwd was run for %q", c)
+		}
 		if code == 2 || strings.Contains(out.String(), `"decision":"deny"`) {
 			return out.String(), code, ran
 		}
@@ -108,7 +118,7 @@ func secretKey() string { return "sk-ant-" + strings.Repeat("a", 93) }
 func TestFakeCodexBlocksEnvWriteViaHooksJSON(t *testing.T) {
 	e := newSvcEnv(t)
 	codexHome := t.TempDir()
-	path, changed, err := hooksinstall.InstallShape("codex", codexHome, "")
+	path, changed, err := hooksinstall.InstallShape("codex", codexHome, e.bin)
 	if err != nil || !changed {
 		t.Fatalf("install: %v changed=%v", err, changed)
 	}
@@ -116,6 +126,11 @@ func TestFakeCodexBlocksEnvWriteViaHooksJSON(t *testing.T) {
 	cmds := preCommands(t, raw, false)
 	if len(cmds) != 3 {
 		t.Fatalf("PreToolUse commands = %v", cmds)
+	}
+	for _, c := range cmds {
+		if !strings.HasPrefix(c, e.bin+" hook run --shape codex ") || !filepath.IsAbs(strings.Fields(c)[0]) {
+			t.Errorf("hook command is not the absolute yakos path: %q", c)
+		}
 	}
 
 	patch := "*** Begin Patch\n*** Add File: .env\n+ANTHROPIC_API_KEY=" + secretKey() + "\n*** End Patch"
@@ -140,12 +155,17 @@ func TestFakeCodexBlocksEnvWriteViaHooksJSON(t *testing.T) {
 func TestFakeAgyBlocksEnvWriteViaHooksJSON(t *testing.T) {
 	e := newSvcEnv(t)
 	ws := t.TempDir()
-	path, _, err := hooksinstall.InstallShape("agy", ws, "")
+	path, _, err := hooksinstall.InstallShape("agy", ws, e.bin)
 	if err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(path)
 	cmds := preCommands(t, raw, true)
+	for _, c := range cmds {
+		if !strings.HasPrefix(c, e.bin+" hook run --shape agy ") {
+			t.Errorf("hook command is not the absolute yakos path: %q", c)
+		}
+	}
 
 	payload, _ := json.Marshal(map[string]any{
 		"conversationId": "c", "workspacePaths": []string{e.work},
@@ -199,6 +219,50 @@ func TestShapeFlagValidation(t *testing.T) {
 		cmd.Env = e.env
 		if err := cmd.Run(); err == nil {
 			t.Errorf("%v accepted", args)
+		}
+	}
+}
+
+// CLAUDE_PROJECT_DIR is not set by codex or agy: the project is the envelope's
+// workspace, and the dispatched agent comes from YAKOS_AGENT_TYPE (M1).
+func TestFakeCodexWithoutClaudeProjectDirAppliesDispatchedAgentPolicy(t *testing.T) {
+	e := newSvcEnv(t)
+	var env []string
+	for _, kv := range e.env {
+		if !strings.HasPrefix(kv, "CLAUDE_PROJECT_DIR=") && !strings.HasPrefix(kv, "YAKOS_AGENT_TYPE=") {
+			env = append(env, kv)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(e.work, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pol := `{"lead":{"allow":["**"]},"reviewer":{"deny":["src/**",".env"]}}`
+	if err := os.WriteFile(filepath.Join(e.work, ".claude", "path-allowlist.json"), []byte(pol), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	codexHome := t.TempDir()
+	path, _, err := hooksinstall.InstallShape("codex", codexHome, e.bin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(path)
+	cmds := preCommands(t, raw, false)
+	payload, _ := json.Marshal(map[string]any{
+		"session_id": "s", "cwd": e.work, "hook_event_name": "PreToolUse",
+		"tool_name": "apply_patch", "tool_input": map[string]any{"input": "*** Begin Patch\n*** Add File: src/a.go\n+x\n*** End Patch"},
+	})
+	for _, tc := range []struct {
+		agent string
+		exit  int
+	}{{"reviewer", 2}, {"lead", 0}, {"", 2}} {
+		ee := e
+		ee.env = append(append([]string{}, env...), "PWD="+e.work)
+		if tc.agent != "" {
+			ee.env = append(ee.env, "YAKOS_AGENT_TYPE="+tc.agent)
+		}
+		out, code, _ := ee.runCommands(t, cmds, payload)
+		if code != tc.exit {
+			t.Errorf("agent %q: exit %d (want %d) out %q", tc.agent, code, tc.exit, out)
 		}
 	}
 }

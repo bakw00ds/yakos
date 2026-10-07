@@ -2,12 +2,18 @@ package hooksinstall
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
+	"strconv"
+	"strings"
 )
 
 // Harness-service install (K-145): hooks.json files whose command is
@@ -23,6 +29,10 @@ import (
 //	agy:   <workspace>/.agents/hooks.json, loaded by `agy -p` with no trust step.
 //
 // The command text is byte-stable (no run id, no temp path): codex hashes it.
+// The command word is the ABSOLUTE path of the yakos binary (K-145 fix): a bare
+// name resolves through the harness's PATH (fail-open when absent, hijackable
+// when PATH holds "." or a workspace dir), and a relative path resolves against
+// a project-controlled cwd.
 
 // HarnessCodex and HarnessAgy name the supported service harnesses.
 const (
@@ -30,8 +40,9 @@ const (
 	HarnessAgy   = "agy"
 )
 
-// DefaultBinary is the command word written when none is given.
-const DefaultBinary = "yakos"
+// maxShapeFile bounds every read of a hooks.json (a symlink to /dev/zero or a
+// huge file must not be slurped).
+const maxShapeFile = 1 << 20
 
 const shapeTimeoutSec = 30
 
@@ -92,14 +103,12 @@ func shapeEventsFor(harness, binary string) shapeEvents {
 	return ev
 }
 
-// RenderShapeFile returns the bytes of the hooks.json for harness. Same inputs
-// give the same bytes.
+// RenderShapeFile returns the bytes of the hooks.json for harness. binary must
+// be an absolute path (see ResolveBinary for the filesystem checks). Same
+// inputs give the same bytes.
 func RenderShapeFile(harness, binary string) ([]byte, error) {
-	if binary == "" {
-		binary = DefaultBinary
-	}
-	if !binaryRE.MatchString(binary) {
-		return nil, fmt.Errorf("hooks install: binary %q must be a plain command or path without spaces or shell characters", binary)
+	if err := checkBinaryText(binary); err != nil {
+		return nil, err
 	}
 	var v any
 	switch harness {
@@ -129,77 +138,244 @@ func ShapeTarget(harness, dir string) string {
 	return filepath.Join(dir, "hooks.json")
 }
 
-// InstallShape writes the harness hooks.json under dir, atomically, and only
-// when the content would change (so the file's mtime and codex's hook hash stay
-// put across runs). It never writes through a symlink. For agy it merges: other
-// top-level hook names in an existing file are kept byte-for-byte as parsed
-// JSON; an unparsable existing file is an error, never overwritten.
-func InstallShape(harness, dir, binary string) (path string, changed bool, err error) {
-	want, err := RenderShapeFile(harness, binary)
+// checkBinaryText validates the command word without touching the filesystem:
+// absolute, clean, and made of safe characters only.
+func checkBinaryText(binary string) error {
+	switch {
+	case binary == "":
+		return errors.New("hooks install: binary path required")
+	case !filepath.IsAbs(binary):
+		return fmt.Errorf("hooks install: binary %q must be an absolute path (a bare or relative name resolves through the harness's PATH or cwd)", binary)
+	case !binaryRE.MatchString(binary) || filepath.Clean(binary) != binary:
+		return fmt.Errorf("hooks install: binary %q must be a clean absolute path without spaces or shell characters", binary)
+	}
+	return nil
+}
+
+// ResolveBinary returns the absolute, symlink-resolved path of the yakos binary
+// the hooks will run. An empty binary means the running executable. The result
+// must be a regular file that is not group- or world-writable.
+func ResolveBinary(binary string) (string, error) {
+	if binary == "" {
+		exe, err := os.Executable()
+		if err != nil {
+			return "", fmt.Errorf("hooks install: cannot locate the running yakos binary: %w", err)
+		}
+		binary = exe
+	}
+	if err := checkBinaryText(binary); err != nil {
+		return "", err
+	}
+	resolved, err := filepath.EvalSymlinks(binary)
 	if err != nil {
-		return "", false, err
+		return "", fmt.Errorf("hooks install: binary %q: %w", binary, err)
+	}
+	if err := checkBinaryText(resolved); err != nil {
+		return "", err
+	}
+	fi, err := os.Stat(resolved)
+	if err != nil {
+		return "", fmt.Errorf("hooks install: binary %q: %w", binary, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return "", fmt.Errorf("hooks install: binary %q is not a regular file", binary)
+	}
+	if modeWritableByOthers(fi) {
+		return "", fmt.Errorf("hooks install: binary %q is group- or world-writable", binary)
+	}
+	return resolved, nil
+}
+
+// ShapeResult is what InstallShapeReport did.
+type ShapeResult struct {
+	Path    string
+	Changed bool
+	// Foreign names the other top-level hook entries kept in an existing agy
+	// hooks.json (sorted, sanitized). agy runs them headless with no trust
+	// step, so the caller must show them.
+	Foreign []string
+}
+
+// InstallShape is InstallShapeReport without the report.
+func InstallShape(harness, dir, binary string) (path string, changed bool, err error) {
+	r, err := InstallShapeReport(harness, dir, binary)
+	return r.Path, r.Changed, err
+}
+
+// InstallShapeReport writes the harness hooks.json under dir, atomically, and
+// only when the content would change (so the file's mtime and codex's hook hash
+// stay put across runs). All access below dir goes through os.OpenRoot, and a
+// symlinked .agents is refused, so neither a link nor a swap can redirect the
+// write. For agy it merges: other top-level hook names in an existing file are
+// kept as parsed JSON and reported in ShapeResult.Foreign; an unparsable existing
+// file is an error, never overwritten.
+func InstallShapeReport(harness, dir, binary string) (ShapeResult, error) {
+	var res ShapeResult
+	bin, err := ResolveBinary(binary)
+	if err != nil {
+		return res, err
+	}
+	want, err := RenderShapeFile(harness, bin)
+	if err != nil {
+		return res, err
 	}
 	if !filepath.IsAbs(dir) {
-		return "", false, errors.New("hooks install: directory must be absolute")
+		return res, errors.New("hooks install: directory must be absolute")
 	}
-	path = ShapeTarget(harness, dir)
-	if fi, lerr := os.Lstat(path); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
-		return path, false, errors.New("hooks install: refusing to write through a symlink")
+	res.Path = ShapeTarget(harness, dir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return res, fmt.Errorf("hooks install: mkdir: %w", err)
 	}
-	existing, rerr := os.ReadFile(path) //nolint:gosec
-	if rerr != nil && !os.IsNotExist(rerr) {
-		return path, false, fmt.Errorf("hooks install: read existing: %w", rerr)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return res, fmt.Errorf("hooks install: open directory: %w", err)
 	}
-	if harness == HarnessAgy && rerr == nil {
-		want, err = mergeAgy(existing, want)
+	defer func() { _ = root.Close() }()
+
+	sub, name := root, "hooks.json"
+	if harness == HarnessAgy {
+		sub, err = openAgentsDir(root)
 		if err != nil {
-			return path, false, err
+			return res, err
+		}
+		defer func() { _ = sub.Close() }()
+	}
+
+	existing, exists, err := readInRoot(sub, name)
+	if err != nil {
+		return res, err
+	}
+	if harness == HarnessAgy && exists {
+		want, res.Foreign, err = mergeAgy(existing, want)
+		if err != nil {
+			return res, err
 		}
 	}
-	if rerr == nil && bytes.Equal(existing, want) {
-		return path, false, nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return path, false, fmt.Errorf("hooks install: mkdir: %w", err)
+	if exists && bytes.Equal(existing, want) {
+		return res, nil
 	}
 	mode := os.FileMode(0o600)
 	if harness == HarnessAgy {
 		mode = 0o644
 	}
-	if err := writeAtomic(path, want, mode); err != nil {
-		return path, false, fmt.Errorf("hooks install: write: %w", err)
+	if err := writeAtomicIn(sub, name, want, mode); err != nil {
+		return res, fmt.Errorf("hooks install: write: %w", err)
 	}
-	return path, true, nil
+	res.Changed = true
+	return res, nil
 }
 
-// mergeAgy replaces the yakOS key in an existing agy hooks.json with ours.
-func mergeAgy(existing, ours []byte) ([]byte, error) {
+// openAgentsDir opens <workspace>/.agents as a root, creating it when absent.
+// It refuses a symlink or a non-directory (a cloned repo can commit
+// .agents -> /some/dir), and checks that the opened directory is the one that
+// was inspected.
+func openAgentsDir(root *os.Root) (*os.Root, error) {
+	const d = ".agents"
+	fi, err := root.Lstat(d)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := root.Mkdir(d, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("hooks install: mkdir: %w", err)
+		}
+		fi, err = root.Lstat(d)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("hooks install: %w", err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return nil, errors.New("hooks install: refusing to use .agents: it is a symlink or not a directory")
+	}
+	sub, err := root.OpenRoot(d)
+	if err != nil {
+		return nil, fmt.Errorf("hooks install: open .agents: %w", err)
+	}
+	sfi, err := sub.Stat(".")
+	if err != nil || !os.SameFile(fi, sfi) {
+		_ = sub.Close()
+		return nil, errors.New("hooks install: .agents changed while it was being opened; refusing")
+	}
+	return sub, nil
+}
+
+// readInRoot reads name inside root, refusing a symlink or non-regular file.
+func readInRoot(root *os.Root, name string) (data []byte, exists bool, err error) {
+	fi, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("hooks install: read existing: %w", err)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, false, errors.New("hooks install: refusing to write through a symlink or non-regular file")
+	}
+	f, err := root.Open(name)
+	if err != nil {
+		return nil, false, fmt.Errorf("hooks install: read existing: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	if ofi, serr := f.Stat(); serr != nil || !os.SameFile(fi, ofi) {
+		return nil, false, errors.New("hooks install: existing file changed while it was being read; refusing")
+	}
+	data, err = io.ReadAll(io.LimitReader(f, maxShapeFile+1))
+	if err != nil {
+		return nil, false, fmt.Errorf("hooks install: read existing: %w", err)
+	}
+	if len(data) > maxShapeFile {
+		return data[:maxShapeFile], true, nil // oversized: never equal to ours; agy merge rejects it
+	}
+	return data, true, nil
+}
+
+// mergeAgy replaces the yakOS key in an existing agy hooks.json with ours and
+// returns the sanitized names of the other entries that were kept.
+func mergeAgy(existing, ours []byte) ([]byte, []string, error) {
 	var cur, mine map[string]json.RawMessage
 	if err := json.Unmarshal(existing, &cur); err != nil || cur == nil {
-		return nil, errors.New("hooks install: existing .agents/hooks.json is not a JSON object; fix or remove it")
+		return nil, nil, errors.New("hooks install: existing .agents/hooks.json is not a JSON object; fix or remove it")
 	}
 	if err := json.Unmarshal(ours, &mine); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	var foreign []string
+	for k := range cur {
+		if k != agyKey {
+			foreign = append(foreign, SafeName(k))
+		}
+	}
+	sort.Strings(foreign)
 	cur[agyKey] = mine[agyKey]
 	b, err := json.MarshalIndent(cur, "", "  ") // map keys marshal sorted
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return append(b, '\n'), nil
+	return append(b, '\n'), foreign, nil
 }
 
-// writeAtomic writes via a unique temp file in the same directory, then renames.
-func writeAtomic(path string, data []byte, mode os.FileMode) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".hooks-*.tmp")
+// SafeName quotes a name taken from a file so control characters and escape
+// sequences cannot reach a terminal, and caps its length.
+func SafeName(s string) string {
+	const max = 48
+	if len(s) > max {
+		s = s[:max] + "..."
+	}
+	return strconv.QuoteToASCII(s)
+}
+
+// writeAtomicIn writes via a unique temp file in root, then renames.
+func writeAtomicIn(root *os.Root, name string, data []byte, mode os.FileMode) error {
+	var suffix [8]byte
+	if _, err := rand.Read(suffix[:]); err != nil {
+		return err
+	}
+	tmp := ".hooks-" + hex.EncodeToString(suffix[:]) + ".tmp"
+	f, err := root.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
 	if err != nil {
 		return err
 	}
-	tmp := f.Name()
 	ok := false
 	defer func() {
 		if !ok {
-			_ = os.Remove(tmp)
+			_ = root.Remove(tmp)
 		}
 	}()
 	if _, err := f.Write(data); err != nil {
@@ -213,31 +389,138 @@ func writeAtomic(path string, data []byte, mode os.FileMode) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmp, path); err != nil {
+	if err := root.Rename(tmp, name); err != nil {
 		return err
 	}
 	ok = true
 	return nil
 }
 
-// ShapeDrift reports whether the installed file at path matches what Install
-// would write ("missing", "stale" or "current").
-func ShapeDrift(harness, dir, binary string) string {
-	want, err := RenderShapeFile(harness, binary)
-	if err != nil {
-		return "stale"
+// Inspection is the state of an installed hooks.json.
+type Inspection struct {
+	// State is "missing", "stale" (differs from what Install would write for the
+	// current binary), "unsafe" (a link, another owner, or group/world-writable)
+	// or "current".
+	State string
+	// Binary is the command word the file runs ("" when it cannot be read).
+	Binary string
+	// BinaryMissing is set when Binary is not a regular file any more.
+	BinaryMissing bool
+}
+
+// InspectShape compares the installed file at harness/dir with what Install
+// would write for binary ("" = the running executable).
+func InspectShape(harness, dir, binary string) Inspection {
+	var in Inspection
+	path := ShapeTarget(harness, dir)
+	got, state := readSafeFile(path)
+	if state != "" {
+		in.State = state
+		return in
 	}
-	got, err := os.ReadFile(ShapeTarget(harness, dir)) //nolint:gosec
+	in.Binary = installedBinary(harness, got)
+	if in.Binary != "" {
+		if fi, err := os.Stat(in.Binary); err != nil || !fi.Mode().IsRegular() {
+			in.BinaryMissing = true
+		}
+	}
+	bin, err := ResolveBinary(binary)
 	if err != nil {
-		return "missing"
+		in.State = "stale"
+		return in
+	}
+	want, err := RenderShapeFile(harness, bin)
+	if err != nil {
+		in.State = "stale"
+		return in
 	}
 	if harness == HarnessAgy {
-		if m, merr := mergeAgy(got, want); merr == nil {
+		if m, _, merr := mergeAgy(got, want); merr == nil {
 			want = m
 		}
 	}
 	if bytes.Equal(got, want) {
-		return "current"
+		in.State = "current"
+	} else {
+		in.State = "stale"
 	}
-	return "stale"
+	return in
+}
+
+// ShapeDrift is InspectShape's state: "missing", "stale", "unsafe" or
+// "current".
+func ShapeDrift(harness, dir, binary string) string {
+	return InspectShape(harness, dir, binary).State
+}
+
+// CodexHooksTrusted reports whether the codex profile's hooks.json is exactly
+// what yakOS writes for the running binary, in a profile directory and file that
+// only this user can change. Dispatch passes --dangerously-bypass-hook-trust
+// only then: the flag turns the file into reviewless command execution, so a
+// planted or edited file must not get it.
+func CodexHooksTrusted(profile string) bool {
+	fi, err := os.Lstat(profile)
+	if err != nil || !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 || !ownedByCurrentUser(fi) || modeWritableByOthers(fi) {
+		return false
+	}
+	return InspectShape(HarnessCodex, profile, "").State == "current"
+}
+
+// readSafeFile reads path if it is a regular file owned by this user that no
+// one else can write. The state is "" on success, else "missing" or "unsafe".
+func readSafeFile(path string) ([]byte, string) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, "missing"
+		}
+		return nil, "unsafe"
+	}
+	if !fi.Mode().IsRegular() || !ownedByCurrentUser(fi) || modeWritableByOthers(fi) {
+		return nil, "unsafe"
+	}
+	f, err := os.Open(path) //nolint:gosec
+	if err != nil {
+		return nil, "unsafe"
+	}
+	defer func() { _ = f.Close() }()
+	if ofi, serr := f.Stat(); serr != nil || !os.SameFile(fi, ofi) {
+		return nil, "unsafe"
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxShapeFile+1))
+	if err != nil || len(data) > maxShapeFile {
+		return nil, "unsafe"
+	}
+	return data, ""
+}
+
+// installedBinary extracts the command word of the first PreToolUse hook.
+func installedBinary(harness string, data []byte) string {
+	var ev shapeEvents
+	switch harness {
+	case HarnessCodex:
+		var v struct {
+			Hooks shapeEvents `json:"hooks"`
+		}
+		if json.Unmarshal(data, &v) != nil {
+			return ""
+		}
+		ev = v.Hooks
+	default:
+		var v map[string]agyEntry
+		if json.Unmarshal(data, &v) != nil {
+			return ""
+		}
+		e := v[agyKey]
+		ev = shapeEvents{PreToolUse: e.PreToolUse, PostToolUse: e.PostToolUse}
+	}
+	if len(ev.PreToolUse) == 0 || len(ev.PreToolUse[0].Hooks) == 0 {
+		return ""
+	}
+	cmd := ev.PreToolUse[0].Hooks[0].Command
+	bin, _, _ := strings.Cut(cmd, " hook run ")
+	if checkBinaryText(bin) != nil {
+		return ""
+	}
+	return bin
 }

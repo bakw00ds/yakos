@@ -230,6 +230,9 @@ type finishedEvent struct {
 	PolicySHA        string  `json:"policy_sha,omitempty"`
 	Surface          string  `json:"surface,omitempty"`
 	NativeSessionID  string  `json:"native_session_id,omitempty"`
+	// HooksUntrusted marks a codex run whose yakOS profile hooks.json was not the
+	// file yakos installs, so the hook gate was off (K-145). Additive-optional.
+	HooksUntrusted bool `json:"hooks_untrusted,omitempty"`
 }
 
 // WriteBudgetViolation writes a budget_violation event when a dispatch exceeded

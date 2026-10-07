@@ -63,7 +63,7 @@ func runHooksInstall(args []string) {
 		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
 		{Name: "--harness", Kind: cliflag.String, Str: &harness, ValueDesc: "codex or agy"},
 		{Name: "--dir", Kind: cliflag.String, Str: &hdir, ValueDesc: "a path"},
-		{Name: "--binary", Kind: cliflag.String, Str: &hbin, ValueDesc: "a command"},
+		{Name: "--binary", Kind: cliflag.String, Str: &hbin, ValueDesc: "an absolute path (default: this yakos binary)"},
 		{Name: "--project", Kind: cliflag.String, Str: &project, ValueDesc: "a path"},
 		{Name: "--force", Kind: cliflag.Bool, Bool: &force},
 	}}

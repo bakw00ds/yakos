@@ -85,21 +85,50 @@ func (r *runner) codexHooksLines() []func() {
 		return nil
 	}
 	profile := codexhome.ProfileDir(r.home)
+	file := "~/.yakos-state/" + codexhome.ProfileDirName + "/" + codexhome.HooksFileName // no absolute home path in the output
 	if _, isolated := codexhome.Effective(r.home, r.env); !isolated {
 		return []func(){func() {
 			r.warn(SectionRuntimeIsolation,
 				"codex hooks in %s are not loaded and codex will skip them silently: dispatch does not use that profile. Run 'yakos auth login codex' (or export OPENAI_API_KEY for the dispatching process), or re-run 'yakos hooks install --harness codex'",
-				filepath.Join(profile, codexhome.HooksFileName))
+				file)
 		}}
 	}
-	if hooksinstall.ShapeDrift(hooksinstall.HarnessCodex, profile, "") == "stale" {
-		return []func(){func() {
+	in := hooksinstall.InspectShape(hooksinstall.HarnessCodex, profile, "")
+	var lines []func()
+	if in.BinaryMissing {
+		lines = append(lines, func() {
 			r.warn(SectionRuntimeIsolation,
-				"codex hook file drift: %s differs from what yakos writes, so codex will report its hooks as modified; re-run 'yakos hooks install --harness codex'",
-				filepath.Join(profile, codexhome.HooksFileName))
-		}}
+				"codex hooks in %s run a yakos binary that no longer exists (%s): codex fails open when a hook cannot start, so the yakOS gate is OFF; re-run 'yakos hooks install --harness codex'",
+				file, r.tilde(in.Binary))
+		})
+	}
+	switch in.State {
+	case "unsafe":
+		lines = append(lines, func() {
+			r.warn(SectionRuntimeIsolation,
+				"codex hooks file %s (or its directory) is a link, belongs to another user, or is group/world-writable: dispatch will NOT trust it (no --dangerously-bypass-hook-trust, codex skips it, the yakOS gate is OFF). Fix the permissions or re-run 'yakos hooks install --harness codex'",
+				file)
+		})
+	case "stale":
+		lines = append(lines, func() {
+			r.warn(SectionRuntimeIsolation,
+				"codex hooks file %s differs from what this yakos installs: dispatch will NOT trust it (no --dangerously-bypass-hook-trust, so codex skips it and the yakOS gate is OFF). If it was edited by anything but yakos, treat it as tampering; re-run 'yakos hooks install --harness codex'",
+				file)
+		})
+	}
+	if len(lines) > 0 {
+		return lines
 	}
 	return []func(){func() {
-		r.ok(SectionRuntimeIsolation, "codex hooks installed in the yakOS profile; dispatch passes --dangerously-bypass-hook-trust so the per-hook trust step is not needed")
+		r.ok(SectionRuntimeIsolation, "codex hooks installed in the yakOS profile and match this yakos; dispatch passes --dangerously-bypass-hook-trust only for exactly this file")
 	}}
+}
+
+// tilde shortens a path under the home directory so output carries no absolute
+// home path.
+func (r *runner) tilde(p string) string {
+	if r.home != "" && strings.HasPrefix(p, r.home+string(filepath.Separator)) {
+		return "~" + p[len(r.home):]
+	}
+	return p
 }

@@ -18,7 +18,11 @@ package consoleui
 //   - X-Yakos-Hook-Nonce must equal the per-daemon nonce (401). The nonce is
 //     random per daemon start and written 0600 to the trusted state dir.
 //   - Body capped at 64 KiB (413); only registered hook names (404); the shape
-//     must be codex or agy (400).
+//     must be codex or agy (400). A caller MUST treat 413 (and any non-200
+//     answer) as DENY: a tool call too large to inspect is not allowed by
+//     default, and fail-open on an endpoint error would bypass the gate.
+//   - ?agent=<id> names the dispatched agent for path-allowlist. Without a valid
+//     id, path-allowlist refuses file-path calls when a policy file exists.
 //
 // Idempotency-Key: not declared. Hooks are pure gates plus append-only
 // telemetry (budget-guard counts calls), so a retry can double-count one tool
@@ -180,7 +184,11 @@ func (h *hooksHandler) serve(w http.ResponseWriter, r *http.Request) {
 		hooksJSONError(w, http.StatusBadRequest, "cannot read body")
 		return
 	}
-	resp := h.ep.Run(r.Context(), shape, name, body)
+	ctx := r.Context()
+	if a := r.URL.Query().Get("agent"); hookio.ValidAgent(a) {
+		ctx = hookio.WithAgent(ctx, a)
+	}
+	resp := h.ep.Run(ctx, shape, name, body)
 	slog.Info("hooks endpoint", "hook", name, "shape", shape, "exit", resp.ExitCode)
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")

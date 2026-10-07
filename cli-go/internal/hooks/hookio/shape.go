@@ -1,6 +1,7 @@
 package hookio
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -195,7 +196,7 @@ func decodeAgy(data []byte) ([]hooktype.HookInput, error) {
 
 	cwd := ""
 	if ws, ok := obj["workspacePaths"].([]any); ok && len(ws) > 0 {
-		if s, ok := ws[0].(string); ok && filepath.IsAbs(s) {
+		if s, ok := ws[0].(string); ok && (filepath.IsAbs(s) || strings.HasPrefix(s, "/")) {
 			cwd = s
 		}
 	}
@@ -253,4 +254,37 @@ func Respond(shape, event string, blocked bool, reason string) Response {
 	}
 	b, _ := json.Marshal(d)
 	return Response{Stdout: append(b, '\n')}
+}
+
+type agentCtxKey struct{}
+
+// WithAgent returns ctx carrying the id of the agent yakOS dispatched, for a
+// caller (the loopback hooks endpoint) that cannot pass it through the
+// environment.
+func WithAgent(ctx context.Context, agent string) context.Context {
+	return context.WithValue(ctx, agentCtxKey{}, agent)
+}
+
+// AgentFrom returns the agent id WithAgent stored, or "".
+func AgentFrom(ctx context.Context) string {
+	s, _ := ctx.Value(agentCtxKey{}).(string)
+	return s
+}
+
+// ValidAgent reports whether s is a plain agent identifier (the same shape
+// runtime.withAgentType accepts).
+func ValidAgent(s string) bool {
+	if s == "" || len(s) > 64 {
+		return false
+	}
+	for i, r := range s {
+		ok := r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+		if i > 0 && (r == '.' || r == '_' || r == '-') {
+			ok = true
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
