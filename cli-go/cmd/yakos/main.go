@@ -8,7 +8,9 @@
 //	(unset)         — auto: shadow-mode when bash yakos is present at
 //	                  <repo-root>/cli/yakos; Go-native when it is absent.
 //	                  This lets Go-only installs (binary only, no bash tree)
-//	                  work without any env-var configuration.
+//	                  work without any env-var configuration. `dispatch` and
+//	                  `doctor` are Go-native when unset (K-143: only an
+//	                  explicit YAKOS_IMPL=bash sends them to bash).
 //
 // Always-available built-ins (--version, --help, go-port-status) are answered
 // natively regardless of YAKOS_IMPL and regardless of whether the bash tree
@@ -63,6 +65,17 @@ func isHelpArg(arg string) bool {
 // --preflight), mirroring selectImpl's explicit-impl precedence.
 func isDoctorForceGo(impl string, args []string) bool {
 	return impl != "bash" && len(args) > 0 && args[0] == "doctor"
+}
+
+// isDispatchDefaultGo reports whether this invocation is `yakos dispatch ...`
+// and should run the Go-native implementation without YAKOS_IMPL being set
+// (K-143). The bash dispatch has no router, no budget, no --explain and no
+// per-runtime model mapping; the parity case in internal/paritytest holds the
+// two to the same resolution for a roster with no policy file, and the Go path
+// is now the default. An explicit YAKOS_IMPL=bash is honored as-is (bash stays
+// the oracle and the escape hatch), mirroring isDoctorForceGo.
+func isDispatchDefaultGo(impl string, args []string) bool {
+	return impl != "bash" && len(args) > 0 && args[0] == "dispatch"
 }
 
 // isHookForceGo reports whether this invocation is `yakos hook ...` and must
@@ -189,9 +202,9 @@ func main() {
 	//
 	// selectImpl encodes this decision; it is separately unit-tested.
 	//
-	// `doctor` is a deliberate exception to this gate (unless YAKOS_IMPL=bash
-	// is explicit): see isDoctorForceGo's doc comment.
-	if !isDoctorForceGo(os.Getenv("YAKOS_IMPL"), args) && !isHookForceGo(args) && !isDecideForceGo(args) && !isBudgetForceGo(args) && !isModelsForceGo(args) && !isRouterForceGo(args) {
+	// `doctor` and `dispatch` are deliberate exceptions to this gate (unless
+	// YAKOS_IMPL=bash is explicit): see isDoctorForceGo and isDispatchDefaultGo.
+	if !isDoctorForceGo(os.Getenv("YAKOS_IMPL"), args) && !isDispatchDefaultGo(os.Getenv("YAKOS_IMPL"), args) && !isHookForceGo(args) && !isDecideForceGo(args) && !isBudgetForceGo(args) && !isModelsForceGo(args) && !isRouterForceGo(args) {
 		switch selectImpl(os.Getenv("YAKOS_IMPL"), passthrough.BashYakosExists(yakosRoot)) {
 		case implPassthrough:
 			// The bash dispatch has no dollar budget; enforce it here (K-119).

@@ -223,14 +223,14 @@ func TestDoctor_GoNative_PolicySeesTheBashTreeAndHarnessesOnPath(t *testing.T) {
 	home := t.TempDir()
 	env := policyEnv(home)
 	env["PATH"] = fakeBin(t, "codex", "agy")
-	env["YAKOS_IMPL"] = "" // unset
+	env["YAKOS_IMPL"] = "" // unset: since K-143 dispatch is Go-native, nothing to report
 
 	out, code := runGoDoctor(t, goBin, []string{"doctor", "--policy"}, env)
 	if code != 0 {
 		t.Fatalf("exit %d:\n%s", code, out)
 	}
-	if !strings.Contains(out, "yakos dispatch runs through the bash CLI") || !strings.Contains(out, "codex, agy WITHOUT their sandbox flags") {
-		t.Errorf("YAKOS_IMPL unset with the bash tree and codex and agy installed must be reported:\n%s", out)
+	if strings.Contains(out, "runs through the bash CLI") {
+		t.Errorf("YAKOS_IMPL unset sends dispatch to the Go dispatcher; nothing to report:\n%s", out)
 	}
 
 	env["YAKOS_IMPL"] = "go"

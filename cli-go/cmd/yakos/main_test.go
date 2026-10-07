@@ -501,6 +501,29 @@ func TestIsDoctorForceGo(t *testing.T) {
 	}
 }
 
+// TestIsDispatchDefaultGo verifies that `dispatch` skips the shadow-mode
+// passthrough unless bash is explicit (K-143). Mutation proof: returning false,
+// dropping the impl check or the args[0] check each flips a case below.
+func TestIsDispatchDefaultGo(t *testing.T) {
+	tests := []struct {
+		impl string
+		args []string
+		want bool
+	}{
+		{"", []string{"dispatch", "backend", "task"}, true},
+		{"go", []string{"dispatch", "--explain", "backend"}, true},
+		{"bash", []string{"dispatch", "backend", "task"}, false},
+		{"", []string{"status"}, false},
+		{"", []string{"start", "dispatch"}, false},
+		{"", []string{}, false},
+	}
+	for _, tc := range tests {
+		if got := isDispatchDefaultGo(tc.impl, tc.args); got != tc.want {
+			t.Errorf("isDispatchDefaultGo(%q, %v) = %v, want %v", tc.impl, tc.args, got, tc.want)
+		}
+	}
+}
+
 // TestHelpRoutingIsAlwaysGoNative verifies that the help/--help/-h subcommands
 // are handled by the always-available built-in block (Go-native) regardless of
 // the YAKOS_IMPL environment variable value.  This locks in the deliberate
