@@ -56,30 +56,46 @@ type Skip struct {
 	Cooling bool
 }
 
-// Classifier assigns a route class to a dispatch. K-140 adds the sensitive class
-// by replacing it; v1 has one class.
+// Classifier assigns a route class to a dispatch: "default", or "sensitive"
+// (sensitive.go) when the request holds a secret-shaped string or a never-path.
 type Classifier func(Input) string
 
-// DefaultClassifier is the v1 classifier: everything is "default".
+// DefaultClassifier classifies everything "default".
 func DefaultClassifier(Input) string { return ClassDefault }
 
 // ActiveClassifier is the classifier Classify uses. It is a seam, not a setting:
 // only code in this module can replace it.
-var ActiveClassifier Classifier = DefaultClassifier
+var ActiveClassifier Classifier = SensitiveClassifier
 
 // Classify returns the route class for in. A class the caller already set (the
-// `--class` flag of `yakos router explain`) is kept when it is a valid identifier.
+// `--class` flag of `yakos router explain`) is kept when it is a valid
+// identifier, except that it never hides a sensitive request: when there is
+// material to scan and it is sensitive, the class is sensitive whatever was set.
 func Classify(in Input) string {
-	if in.Class != "" {
-		if identRe.MatchString(in.Class) {
-			return in.Class
+	if in.Class != "" && identRe.MatchString(in.Class) {
+		if in.Class != ClassSensitive && len(in.Material)+len(in.SecretOnly) > 0 && SensitiveReason(in) != "" {
+			return ClassSensitive
 		}
-		return ClassDefault
+		return in.Class
 	}
 	if c := ActiveClassifier(in); identRe.MatchString(c) {
 		return c
 	}
 	return ClassDefault
+}
+
+// ClassifyReason is Classify plus why a sensitive class was assigned (one of the
+// Reason constants), "" for any other class. It scans a second time to find the
+// reason, and only for a sensitive request.
+func ClassifyReason(in Input) (class, reason string) {
+	class = Classify(in)
+	if class != ClassSensitive {
+		return class, ""
+	}
+	if reason = SensitiveReason(in); reason == "" {
+		reason = ReasonDeclared
+	}
+	return class, reason
 }
 
 // Pin is what a conversation was routed to on its first turn, under which
