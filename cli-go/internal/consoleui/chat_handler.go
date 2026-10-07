@@ -491,6 +491,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		Project:   ch.workspaceRoot,
 		Agent:     req.Agent,
 		Override:  requestedRuntime,
+		Task:      req.Task, // the sensitive class (K-140) reads it, as RunStream will
 	})
 	if prefErr != nil {
 		http.Error(w, "invalid runtime", http.StatusBadRequest)

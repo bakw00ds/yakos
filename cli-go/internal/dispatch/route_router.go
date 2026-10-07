@@ -150,6 +150,12 @@ func applyRouter(ci *chainInput, agent *agentscompose.ComposedAgent, agentName s
 	input := router.Input{Class: class, Agent: agentName, Domain: domain, TaskBytes: taskBytes}
 	st.class = router.Classify(input)
 	input.Class = st.class
+	if st.class == router.ClassSensitive {
+		ci.sensitive = true
+		if ci.sensitiveWhy == "" {
+			ci.sensitiveWhy = router.ReasonDeclared
+		}
+	}
 	if st.policy.Active() {
 		if r, ok := st.policy.Select(input); ok {
 			st.rule = &policyAction{rule: r, runtime: r.Action.Runtime, model: r.Action.Model, fallbacks: r.Action.Fallbacks, overridePins: r.OverridePins}
@@ -225,6 +231,14 @@ func (st routerState) applyModel(rt, modelOverride string, mc modelChoice) (mode
 
 // decision builds the RouteDecision for a finished routing step.
 func (st routerState) decision(ci chainInput, choice RuntimeChoice, mc modelChoice, modelFromPolicy bool) router.RouteDecision {
+	d := st.decide(ci, choice, mc, modelFromPolicy)
+	if ci.sensitive {
+		d.Reason += fmt.Sprintf("; sensitive -> primary only (%s): %s or a local runtime", ci.sensitiveWhy, primaryRuntime)
+	}
+	return d
+}
+
+func (st routerState) decide(ci chainInput, choice RuntimeChoice, mc modelChoice, modelFromPolicy bool) router.RouteDecision {
 	chain, _ := buildChain(ci)
 	names := make([]string, len(chain))
 	for i, c := range chain {
@@ -337,6 +351,10 @@ type ExplainQuery struct {
 	Class                     string // route class, "" = classify
 	TaskBytes                 int64
 	ConversationID            string
+	// Task and Extra are the request text the classifier scans (K-140), as Run
+	// would: the task, then upstream outputs, a knowledge block, digests.
+	Task  string
+	Extra []string
 }
 
 // Explain runs the routing step Run and RunStream run, probes included, and
@@ -347,6 +365,7 @@ func Explain(ctx context.Context, q ExplainQuery) (router.RouteDecision, error) 
 		RuntimeOverride: q.Runtime, ModelOverride: q.Model,
 		RuntimeEnvDefault: q.RuntimeEnvDefault, RuntimeFallbackOptIn: q.RuntimeFallbackOptIn, EvalRunID: q.EvalRunID,
 		Class: q.Class, TaskBytes: q.TaskBytes, ConversationID: q.ConversationID,
+		Task: q.Task, Extra: q.Extra,
 	}, true)
 	if err != nil {
 		return router.RouteDecision{}, err
