@@ -177,6 +177,10 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 		EvalRunID:       req.EvalRunID,
 		RuntimeChosenBy: req.RuntimeChosenBy,
 		FallbackFrom:    req.FallbackFrom,
+		RouteRule:       req.RouteRule,
+		RouteReason:     req.RouteReason,
+		RouteClass:      req.RouteClass,
+		PolicySHA:       req.PolicySHA,
 	}
 
 	// --- 9b. Normalize the runtime's stdout (K-135) ---

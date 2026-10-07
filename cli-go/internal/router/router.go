@@ -42,6 +42,18 @@ type RouteDecision struct {
 	FallbackFrom string
 	RouteClass   string
 	PolicySHA    string
+	// Skipped lists the chain candidates passed over before Runtime, in chain
+	// order. Only explain output reads it; the ledger does not carry it.
+	Skipped []Skip
+}
+
+// Skip is one chain candidate that was passed over, and why. Cooling marks a
+// runtime skipped for the cooldown after repeated failures, which explain shows
+// without the seconds left (they change from one run to the next).
+type Skip struct {
+	Runtime string
+	Reason  string
+	Cooling bool
 }
 
 // Classifier assigns a route class to a dispatch: "default", or "sensitive"

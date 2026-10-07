@@ -187,6 +187,9 @@ func (st routerState) decide(ci chainInput, choice RuntimeChoice, mc modelChoice
 		RouteClass:   st.class,
 		PolicySHA:    st.policy.SHA,
 	}
+	for _, sk := range choice.Skipped {
+		d.Skipped = append(d.Skipped, router.Skip{Runtime: sk.Runtime, Reason: sk.Reason, Cooling: strings.HasPrefix(sk.Reason, coolingReasonPrefix)})
+	}
 	switch {
 	case st.pin != nil && choice.ChosenBy == RuntimeBySticky:
 		d.RuleID = st.pin.RuleID
@@ -274,7 +277,10 @@ func (st routerState) remember(conversation, agent, project string, d router.Rou
 type ExplainQuery struct {
 	YakosRoot, Project, Agent string
 	Runtime                   string // explicit runtime, "" or "auto" for none
+	RuntimeEnvDefault         string // $YAKOS_RUNTIME, read by the CLI one-shot path only
+	RuntimeFallbackOptIn      []string
 	Model                     string // explicit model
+	EvalRunID                 string
 	Class                     string // route class, "" = classify
 	TaskBytes                 int64
 	ConversationID            string
@@ -290,6 +296,7 @@ func Explain(ctx context.Context, q ExplainQuery) (router.RouteDecision, error) 
 	rr, err := routeDispatchAt(ctx, routeInput{
 		YakosRoot: q.YakosRoot, Project: q.Project, Agent: q.Agent,
 		RuntimeOverride: q.Runtime, ModelOverride: q.Model,
+		RuntimeEnvDefault: q.RuntimeEnvDefault, RuntimeFallbackOptIn: q.RuntimeFallbackOptIn, EvalRunID: q.EvalRunID,
 		Class: q.Class, TaskBytes: q.TaskBytes, ConversationID: q.ConversationID,
 		Task: q.Task, Extra: q.Extra,
 	}, true)

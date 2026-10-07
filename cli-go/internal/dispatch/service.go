@@ -139,6 +139,14 @@ type Params struct {
 	// runtimes.
 	ResumeSessionID string
 
+	// NativeSessions maps a runtime name to that runtime's own session id for
+	// this conversation (the shape of the transcript meta store). RunStream
+	// resumes the entry for the runtime the router resolved, so a caller that
+	// does not know the routed runtime can pass all of them. Names must be
+	// known runtimes and ids pass the identity-field alphabet. Takes precedence
+	// over ResumeSessionID for the runtime it names. Ignored by Run.
+	NativeSessions map[string]string
+
 	// Surface is the entry point that built this Params, one of the Surface*
 	// constants (rest, jsonrpc, grpc, mcp, flows, console-chat). The transport
 	// sets it as a constant of its own; it is recorded on the dispatch_finished

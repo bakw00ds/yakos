@@ -182,6 +182,13 @@ func (a *AgyAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *
 	// be reinterpreted as a flag by the agy process when passed this way.
 	workDir := adapterWorkDir(req.WorkDirOverride, req.Project)
 	args := agyCommonArgs(workDir, req.ModelOverride, req.Effort)
+	resumeID, bad := req.resumeFor("agy")
+	if bad {
+		return rejectedCmd(ctx, "agy", ErrInvalidResumeID)
+	}
+	if resumeID != "" {
+		args = append(args, "--conversation", resumeID)
+	}
 	args = append(args, "-p", prompt)
 
 	cmd := exec.CommandContext(ctx, "agy", args...) //nolint:gosec

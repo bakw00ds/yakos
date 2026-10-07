@@ -39,6 +39,7 @@ var runtimeIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 //	--timeout <secs>     Max time to wait (default 600)
 //	--eval-run-id <id>   Mark as model-routing eval dispatch
 //	--allow-root         Set IS_SANDBOX=1 for root-user container dispatch
+//	--explain            Print the routing decision and exit 0 without dispatching
 //	--help               Print help and exit 0
 //
 // Exits with the dispatch'd runtime's exit code.
@@ -52,6 +53,7 @@ func runDispatch(yakosRoot string, args []string) {
 	project := ""
 	timeoutSecs := 0
 	allowRoot := false
+	explain := false
 
 	// The pre-cliflag loop acted on each token inline, so the first bad
 	// token in argv order won. cliflag.Set.Parse separates recognized flags
@@ -71,6 +73,7 @@ func runDispatch(yakosRoot string, args []string) {
 		{Name: "--project", Kind: cliflag.String, Str: &project, ValueDesc: "a path"},
 		{Name: "--timeout", Kind: cliflag.StringSlice, Slice: &timeoutRaw, ValueDesc: "a number"},
 		{Name: "--allow-root", Kind: cliflag.Bool, Bool: &allowRoot},
+		{Name: "--explain", Kind: cliflag.Bool, Bool: &explain},
 	}}
 	rest, perr := fs.Parse(args)
 	if perr != nil {
@@ -114,7 +117,7 @@ func runDispatch(yakosRoot string, args []string) {
 		fmt.Fprintln(os.Stderr, "dispatch: missing <agent-name>")
 		os.Exit(1)
 	}
-	if task == "" {
+	if task == "" && !explain {
 		printDispatchHelp(os.Stderr)
 		fmt.Fprintln(os.Stderr, "dispatch: missing <task-prompt>")
 		os.Exit(1)
@@ -175,6 +178,24 @@ func runDispatch(yakosRoot string, args []string) {
 	// runtime the agent resolves to, which is not known until the agent's pin is
 	// read. dispatch.Run therefore expands aliases and validates the model
 	// against the resolved runtime; nothing is decided about it here.
+
+	if explain {
+		// A dry run of the routing step: nothing is started and nothing is
+		// written, and the header line below is not printed.
+		cliConv := os.Getenv("YAKOS_CONVERSATION_ID")
+		if cliConv != "" {
+			if err := dispatch.ValidateIdentityField("conversation_id", cliConv); err != nil {
+				fmt.Fprintf(os.Stderr, "dispatch: YAKOS_CONVERSATION_ID: %v\n", err)
+				os.Exit(1)
+			}
+		}
+		os.Exit(explainRun(os.Stdout, os.Stderr, defaultExplainEnv(), explainArgs{
+			YakosRoot: yakosRoot, Project: project, Agent: agentName,
+			TaskBytes: int64(len(task)), Runtime: runtimeOverride, Model: modelOverride,
+			EvalRunID: evalRunID, RuntimeEnvDefault: envRuntime, RuntimeFallbackOptIn: fallbackOptIn,
+			ConversationID: cliConv,
+		}, "dispatch --explain"))
+	}
 
 	// Resolve the runtime now so the log line below names the runtime that will
 	// actually run (and why), not "(from frontmatter)". dispatch.Run resolves
@@ -440,6 +461,11 @@ Flags:
                     the dispatch-log. Intended for use by the eval
                     harness (Phase 2); not for operator use.
   --allow-root      Set IS_SANDBOX=1 for root-user container dispatch.
+  --explain         Print what the router would decide (runtime/model, rule,
+                    chain, reason, route class, policy sha) and exit 0 without
+                    dispatching. The task is optional; every other flag applies.
+                    An explicit --runtime or --model shows as rule=override.
+                    Same output as `+"`"+`yakos router explain`+"`"+`.
 
 Audit trail at ~/.yakos-state/dispatch-log.ndjson.
 

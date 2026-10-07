@@ -1,0 +1,12 @@
+exit: 0
+codex/gpt-5.5 rule=R1 chain=[codex claude]
+agent: reviewer
+runtime: codex
+model: gpt-5.5
+provider: openai
+rule: R1
+chain: [codex claude]
+reason: rule R1 matched [domain=code-review]: runtime=codex model=gpt-5.5 fallbacks=[claude]
+fallback_from: -
+route_class: default
+policy_sha: 3f4135ea62d49d5ac61c14051d709ac1dc84442814bc2d268d3e4d3abcc09a72
