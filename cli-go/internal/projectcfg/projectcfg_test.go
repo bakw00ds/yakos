@@ -281,3 +281,24 @@ func TestParse_RouterBlockOnlyDisables(t *testing.T) {
 		t.Errorf("a non-mapping router key is ignored with one warning: %+v %v", cfg, warns)
 	}
 }
+
+// router.never_paths (K-140) adds credential globs; a malformed entry is dropped
+// without echoing it, and the key can only add (there is no way to name a
+// built-in to remove).
+func TestParse_RouterNeverPaths(t *testing.T) {
+	cfg, warns := Parse([]byte("router:\n  never_paths: [\"internal/billing/*\", \"bad path\", \"**/.vault*\", 7]\n"))
+	if got := strings.Join(cfg.NeverPaths, ","); got != "internal/billing/*,**/.vault*" {
+		t.Errorf("NeverPaths = %q", got)
+	}
+	if len(warns) != 2 {
+		t.Errorf("warns = %v", warns)
+	}
+	for _, w := range warns {
+		if strings.Contains(w, "bad path") || strings.Contains(w, "billing") {
+			t.Errorf("warning echoes an entry: %q", w)
+		}
+	}
+	if cfg, _ := Parse([]byte("router:\n  never_paths: nope\n")); len(cfg.NeverPaths) != 0 {
+		t.Errorf("non-list accepted: %v", cfg.NeverPaths)
+	}
+}

@@ -203,6 +203,12 @@ type RouteQuery struct {
 	// does not match.
 	Class     string
 	TaskBytes int64
+	// Task and Extra are the text the sensitive classifier scans (K-140): the
+	// request's task, and upstream outputs, a knowledge block or digests. A caller
+	// that leaves them empty gets no scan, so a pre-check that omits the task can
+	// disagree with Run; pass what Run will be given.
+	Task  string
+	Extra []string
 }
 
 // probeResult is the outcome of checking one chain candidate.
@@ -387,6 +393,11 @@ type chainInput struct {
 	// cooling reports a runtime being skipped after repeated failures; nil = no
 	// cooldown (also for a probe-less preferred-runtime query).
 	cooling func(string) (bool, time.Duration)
+
+	// sensitive restricts the chain to the primary runtime and local runtimes
+	// (route_sensitive.go); sensitiveWhy is the fixed-vocabulary reason.
+	sensitive    bool
+	sensitiveWhy string
 }
 
 type candidate struct{ name, by string }
@@ -490,6 +501,9 @@ func buildChain(in chainInput) ([]candidate, []string) {
 	for _, f := range in.optIn {
 		add(f)
 	}
+	if in.sensitive {
+		chain = restrictSensitive(chain)
+	}
 	return chain, notes
 }
 
@@ -529,7 +543,10 @@ func chooseRuntime(ctx context.Context, in chainInput, probe func(context.Contex
 	// A cooldown is a preference, not a ban: when every candidate that remains is
 	// cooling, walk again ignoring it rather than refuse to dispatch at all.
 	if cooled && choice.Runtime == "" && ctx.Err() == nil {
-		return walkChain(ctx, in, probe, false, &cooled)
+		choice, notes, err = walkChain(ctx, in, probe, false, &cooled)
+	}
+	if err != nil && in.sensitive && ctx.Err() == nil {
+		err = &RouteRefusedError{Class: router.ClassSensitive, Reason: in.sensitiveWhy, Cause: err}
 	}
 	return choice, notes, err
 }
@@ -715,7 +732,9 @@ func agentForQuery(q RouteQuery) *agentscompose.ComposedAgent {
 func ResolveRuntime(ctx context.Context, q RouteQuery) (RuntimeChoice, error) {
 	agent := agentForQuery(q)
 	in := loadChainInput(agent, q.Agent, q.Project, q.Override, q.EnvDefault, q.FallbackOptIn, false)
-	applyRouter(&in, agent, q.Agent, q.Class, q.TaskBytes, "", "", nil)
+	class, why := classifyRequest(q.Class, in, agent, q.Task, q.Extra, nil)
+	in.sensitiveWhy = why
+	applyRouter(&in, agent, q.Agent, class, q.TaskBytes, "", "", nil)
 	choice, _, err := chooseRuntime(ctx, in, runtimeProbe)
 	return choice, err
 }
@@ -728,7 +747,9 @@ func ResolveRuntime(ctx context.Context, q RouteQuery) (RuntimeChoice, error) {
 func PreferredRuntime(q RouteQuery) (RuntimeChoice, error) {
 	agent := agentForQuery(q)
 	in := loadChainInput(agent, q.Agent, q.Project, q.Override, q.EnvDefault, q.FallbackOptIn, false)
-	applyRouter(&in, agent, q.Agent, q.Class, q.TaskBytes, "", "", nil)
+	class, why := classifyRequest(q.Class, in, agent, q.Task, q.Extra, nil)
+	in.sensitiveWhy = why
+	applyRouter(&in, agent, q.Agent, class, q.TaskBytes, "", "", nil)
 	choice, _, err := chooseRuntime(context.Background(), in, nil)
 	return choice, err
 }
@@ -900,6 +921,9 @@ type routeInput struct {
 	Class          string
 	TaskBytes      int64
 	ConversationID string
+	// Task and Extra are the text the sensitive classifier scans (K-140).
+	Task  string
+	Extra []string
 }
 
 // routed is the result of routing one dispatch.
@@ -945,7 +969,9 @@ func routeDispatchAt(ctx context.Context, in routeInput, explain bool) (*routed,
 	if explain {
 		warnTo = io.Discard
 	}
-	st := applyRouter(&ci, agent, in.Agent, in.Class, in.TaskBytes, in.Project, in.ConversationID, warnTo)
+	class, why := classifyRequest(in.Class, ci, agent, in.Task, in.Extra, warnTo)
+	ci.sensitiveWhy = why
+	st := applyRouter(&ci, agent, in.Agent, class, in.TaskBytes, in.Project, in.ConversationID, warnTo)
 	choice, notes, err := chooseRuntime(ctx, ci, runtimeProbe)
 	for _, n := range notes {
 		fmt.Fprintf(warnTo, "yakos dispatch: %s\n", n)

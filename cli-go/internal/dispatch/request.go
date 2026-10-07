@@ -142,6 +142,12 @@ type Request struct {
 	// allowed and is simply left out of the event.
 	Surface string
 
+	// ScanExtra is extra text for the sensitive-class scan (K-140): upstream
+	// flow outputs, a knowledge block, transcript digests. Server-set, never a
+	// client field. It is scanned with the task and the agent's prompt and is
+	// not sent anywhere because of being here.
+	ScanExtra []string
+
 	// RouteRule, RouteReason, RouteClass and PolicySHA are the router's record of
 	// why this runtime and model were chosen. They stay empty until the router
 	// lands (plan phase P1); the fields exist now so the log schema is stable.

@@ -240,6 +240,13 @@ type Input struct {
 	// Tags are the task's tags. v1 has no source for them, so a rule that lists
 	// tags never matches until one exists.
 	Tags []string
+	// Material is the text that would reach the model: the task, the agent's
+	// prompt, a knowledge block, upstream flow outputs, transcript digests. Only
+	// the classifier reads it; no rule matches on it, and it is never logged.
+	Material []string
+	// NeverPaths are the project's additional never-paths (projectcfg). They add
+	// to the built-in set and cannot remove from it.
+	NeverPaths []string
 }
 
 // Matches reports whether every key the rule sets holds for in.

@@ -83,6 +83,11 @@ type Config struct {
 	// provider list, so a cloned repository cannot widen where a task is sent.
 	DisableRuntimes []string
 	DisableModels   []string
+	// NeverPaths come from router.never_paths (K-140): extra credential-file globs
+	// that make a request sensitive. They ADD to the built-in never-paths the
+	// router always applies and can never remove one; a project can only narrow
+	// where a request is routed.
+	NeverPaths []string
 }
 
 // RuntimeDisabled reports whether the project switches runtime name off.
@@ -99,6 +104,10 @@ func contains(list []string, s string) bool {
 	}
 	return false
 }
+
+// neverPathRe is the shape of a router.never_paths glob: path characters and
+// glob metacharacters, no control characters, no space.
+var neverPathRe = regexp.MustCompile(`^[A-Za-z0-9_.*?\[\]!^@~+/-]{1,256}$`)
 
 // maxDisables bounds each router disable list.
 const maxDisables = 64
@@ -234,7 +243,7 @@ func Parse(data []byte) (Config, []string) {
 	if v, ok := doc["router"]; ok && v != nil {
 		m, ok := stringMap(v)
 		if !ok {
-			warns = append(warns, "router: want a mapping with disable_runtimes and disable_models lists; ignored")
+			warns = append(warns, "router: want a mapping with disable_runtimes, disable_models and never_paths lists; ignored")
 		} else {
 			keys := make([]string, 0, len(m))
 			for k := range m {
@@ -251,8 +260,12 @@ func Parse(data []byte) (Config, []string) {
 					var w []string
 					cfg.DisableModels, w = disableList(k, m[k], modelIDRe)
 					warns = append(warns, w...)
+				case "never_paths":
+					var w []string
+					cfg.NeverPaths, w = disableList(k, m[k], neverPathRe)
+					warns = append(warns, w...)
 				default:
-					warns = append(warns, "router: a project can only disable runtimes and models; ignoring that key")
+					warns = append(warns, "router: a project can only disable runtimes and models or add never_paths; ignoring that key")
 				}
 			}
 		}
