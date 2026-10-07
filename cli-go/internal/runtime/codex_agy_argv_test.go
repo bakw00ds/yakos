@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -797,5 +798,86 @@ func TestCodexAliasesAreEmptyOnPurpose(t *testing.T) {
 	}
 	if drops.Len() != 0 {
 		t.Errorf("an empty alias is the harness default, not a mistake; got note %q", drops.String())
+	}
+}
+
+// ---- chat resume (K-147a) -------------------------------------------------------
+
+func TestCodexChatExecCmd_Resume(t *testing.T) {
+	skipOnWindows(t)
+	useEmptyHome(t)
+	cmd := (&CodexAdapter{}).ChatExecCmd(context.Background(), ChatDispatchRequest{
+		Project: t.TempDir(), UserText: "next", ResumeSessionID: "019a-thread", ResumeRuntime: "codex",
+	})
+	assertArgv(t, cmd.Args, []string{
+		"codex", "exec", "resume", "--json",
+		"-c", `sandbox_mode="workspace-write"`,
+		"-c", `approval_policy="never"`,
+		"--", "019a-thread", "next",
+	})
+}
+
+func TestAgyChatExecCmd_Conversation(t *testing.T) {
+	skipOnWindows(t)
+	useEmptyHome(t)
+	req := ChatDispatchRequest{Project: t.TempDir(), UserText: "next"}
+	fresh := (&AgyAdapter{}).ChatExecCmd(context.Background(), req).Args
+	if argvIndex(fresh, "--conversation") >= 0 {
+		t.Errorf("fresh turn must not pass --conversation: %q", fresh)
+	}
+	req.ResumeSessionID, req.ResumeRuntime = "conv-42", "agy"
+	args := (&AgyAdapter{}).ChatExecCmd(context.Background(), req).Args
+	i := argvIndex(args, "--conversation")
+	if i < 0 || args[i+1] != "conv-42" || args[len(args)-2] != "-p" || args[len(args)-1] != "next" {
+		t.Errorf("--conversation conv-42 before -p: %q", args)
+	}
+}
+
+func TestChatResume_OtherRuntimesIdIgnoredBadIdRefused(t *testing.T) {
+	skipOnWindows(t)
+	useEmptyHome(t)
+	p := t.TempDir()
+	// An id that belongs to another runtime (or the unlabelled claude default)
+	// never reaches codex or agy.
+	for _, rr := range []string{"", "claude", "agy"} {
+		args := (&CodexAdapter{}).ChatExecCmd(context.Background(), ChatDispatchRequest{
+			Project: p, UserText: "t", ResumeSessionID: "x1", ResumeRuntime: rr,
+		}).Args
+		if argvIndex(args, "resume") >= 0 || argvIndex(args, "x1") >= 0 {
+			t.Errorf("codex used a %q id: %q", rr, args)
+		}
+	}
+	args := (&AgyAdapter{}).ChatExecCmd(context.Background(), ChatDispatchRequest{
+		Project: p, UserText: "t", ResumeSessionID: "x1", ResumeRuntime: "codex",
+	}).Args
+	if argvIndex(args, "--conversation") >= 0 {
+		t.Errorf("agy used codex's id: %q", args)
+	}
+	// An invalid id for the right runtime is refused, not silently dropped.
+	for _, bad := range []string{"--flag", "../x", "a b", strings.Repeat("a", 129)} {
+		for _, cmd := range []*exec.Cmd{
+			(&CodexAdapter{}).ChatExecCmd(context.Background(), ChatDispatchRequest{Project: p, UserText: "t", ResumeSessionID: bad, ResumeRuntime: "codex"}),
+			(&AgyAdapter{}).ChatExecCmd(context.Background(), ChatDispatchRequest{Project: p, UserText: "t", ResumeSessionID: bad, ResumeRuntime: "agy"}),
+		} {
+			if !errors.Is(cmd.Err, ErrInvalidResumeID) || len(cmd.Args) != 1 {
+				t.Errorf("bad id %q: Err=%v Args=%q", bad, cmd.Err, cmd.Args)
+			}
+		}
+	}
+}
+
+// The claude argv is unchanged by the runtime label.
+func TestClaudeChatExecCmd_ResumeLabelNeutral(t *testing.T) {
+	const id = "3f1c2d4e-5a6b-4c7d-8e9f-0a1b2c3d4e5f"
+	base := (&ClaudeAdapter{}).ChatExecCmd(context.Background(), ChatDispatchRequest{Project: "/p", UserText: "x", ResumeSessionID: id}).Args
+	for _, rr := range []string{"", "claude"} {
+		got := (&ClaudeAdapter{}).ChatExecCmd(context.Background(), ChatDispatchRequest{Project: "/p", UserText: "x", ResumeSessionID: id, ResumeRuntime: rr}).Args
+		if strings.Join(got, "\x00") != strings.Join(base, "\x00") {
+			t.Errorf("label %q changed claude argv", rr)
+		}
+	}
+	other := (&ClaudeAdapter{}).ChatExecCmd(context.Background(), ChatDispatchRequest{Project: "/p", UserText: "x", ResumeSessionID: id, ResumeRuntime: "codex"}).Args
+	if argvIndex(other, "--resume") >= 0 {
+		t.Errorf("claude resumed a codex id: %q", other)
 	}
 }

@@ -255,8 +255,8 @@ func (a *ClaudeAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest
 	// claude's own output via the transcript store; it is re-checked here
 	// because it lands on argv, and an id that fails the check is dropped (the
 	// turn then simply starts a fresh session).
-	if req.ResumeSessionID != "" && ValidSessionID(req.ResumeSessionID) {
-		args = append(args, "--resume", req.ResumeSessionID)
+	if id, _ := req.resumeFor("claude"); id != "" {
+		args = append(args, "--resume", id)
 	}
 	// SECURITY (H1): claude's -p is a boolean flag — the prompt is a bare
 	// positional, not -p's value — so commander would otherwise parse a
@@ -852,6 +852,34 @@ type ChatDispatchRequest struct {
 	// ChatExecCmd passes it as --resume when it passes ValidSessionID. Empty
 	// means a fresh session. claude-only; other adapters ignore it.
 	ResumeSessionID string
+
+	// ResumeRuntime names the runtime ResumeSessionID belongs to. Empty means
+	// claude (the field's original meaning), so existing callers are unchanged.
+	// An adapter resumes only an id that belongs to it: claude skips an id
+	// naming another runtime, codex and agy need ResumeRuntime to equal their
+	// own name, and an id that fails ValidSessionID is refused, not dropped.
+	ResumeRuntime string
+}
+
+// resumeFor returns the id the named runtime should resume ("" for a fresh
+// session) and whether the id is unusable. An id for another runtime is
+// ignored; an id for this runtime that fails ValidSessionID is an error, since
+// silently starting a fresh session would drop the conversation's context.
+func (r ChatDispatchRequest) resumeFor(rt string) (id string, bad bool) {
+	if r.ResumeSessionID == "" {
+		return "", false
+	}
+	owner := r.ResumeRuntime
+	if owner == "" {
+		owner = "claude"
+	}
+	if owner != rt {
+		return "", false
+	}
+	if !ValidSessionID(r.ResumeSessionID) {
+		return "", true
+	}
+	return r.ResumeSessionID, false
 }
 
 // buildEnvChat constructs the subprocess environment for unframed chat
