@@ -461,6 +461,7 @@ func execWithStreaming(
 	if hasChatCmd {
 		// Use the unframed chat exec path (every harness streams its events).
 		cmd := cp.ChatExecCmd(ctx, chatReq)
+		runtime.ConfigureGroupKill(cmd) // ctx cancel kills the whole group; Wait is bounded
 
 		stdoutPipe, pipeErr := cmd.StdoutPipe()
 		if pipeErr != nil {
