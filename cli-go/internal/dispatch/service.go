@@ -151,7 +151,8 @@ type Params struct {
 	// codex or agy turn it replaces the agent body as the persona; a claude
 	// turn ignores it (claude loads the rules natively and its argv must not
 	// change). agy gets it on every turn that does not resume a native agy
-	// session, since the resumed conversation already holds it. Server-side
+	// session (NativeSessions["agy"] set: a ResumeEngine pane after its first
+	// turn), since the resumed conversation already holds it. Server-side
 	// only: never bound from a request body.
 	Knowledge string
 

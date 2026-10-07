@@ -9,8 +9,11 @@ package consoleui
 //
 // Auth: RoleRead at the middleware. Only the conversation's owner sees its
 // pack; anyone else (and a conversation without one) gets knowledge:null, so
-// the answer does not say whether a conversation exists. The soul text is sent
-// to the owner of a conversation whose agent is lead, and to nobody else.
+// the answer does not say whether a conversation exists. The soul text belongs
+// to the host's HOME, so it is sent only to the loopback host operator (the
+// identity in <stateDir>/loopback-operator-id, never a cert or session
+// identity) for a lead conversation they own, and only when it passes the
+// secret scanner; secret-shaped text is left out with a path-free note.
 // Names, byte counts and the hash only: never the rule or agent text.
 //
 // Cache stability: the pack is composed on a conversation's first non-claude
@@ -26,6 +29,7 @@ import (
 	"strings"
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/hooks/secretscan"
 	"github.com/bakw00ds/yakos/internal/knowledge"
 	"github.com/bakw00ds/yakos/internal/netid"
 )
@@ -98,6 +102,25 @@ type contextResponse struct {
 	ConversationID string            `json:"conversationId"`
 	Knowledge      *contextKnowledge `json:"knowledge"`
 	Soul           string            `json:"soul,omitempty"`
+	SoulNote       string            `json:"soulNote,omitempty"`
+}
+
+// soulFor returns the soul text for the requester, or "" and an optional note.
+// Only the loopback host operator gets it: the soul file is the daemon host's
+// own, and a networked identity (cert or session) must never read it.
+func (ch *chatHandlers) soulFor(id netid.Identity) (text, note string) {
+	if !ch.loopbackHost || ch.loopbackOwnerID == "" || id.Authenticated || id.OperatorID != ch.loopbackOwnerID {
+		return "", ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", ""
+	}
+	text = knowledge.ReadSoul(home)
+	if secretscan.Redact(text) != text {
+		return "", "soul omitted: it holds a secret-shaped value"
+	}
+	return text, ""
 }
 
 // handleChatContext serves GET /api/chat/context.
@@ -130,9 +153,7 @@ func (ch *chatHandlers) handleChatContext(w http.ResponseWriter, r *http.Request
 		resp.Knowledge = &contextKnowledge{SHA: sha, Bytes: size, Cap: knowledge.MaxBytes, Parts: parts}
 		for _, p := range parts {
 			if p.Kind == knowledge.KindAgent && p.Name == "lead" {
-				if home, err := os.UserHomeDir(); err == nil {
-					resp.Soul = knowledge.ReadSoul(home)
-				}
+				resp.Soul, resp.SoulNote = ch.soulFor(id)
 			}
 		}
 	}

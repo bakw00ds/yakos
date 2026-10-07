@@ -31,7 +31,9 @@
     var list = el('ul', 'context-drawer-parts');
     (k.parts || []).forEach(function (p) {
       var line = p.kind + ': ' + p.name + ' (' + p.bytes + ' bytes)';
-      if (!p.included) line += ' - left out (over the cap)';
+      if (!p.included && p.note) line += ' - left out (' + p.note + ')';
+      else if (!p.included) line += ' - left out (over the cap)';
+      else if (p.note) line += ' - ' + p.note;
       else if (p.truncated) line += ' - truncated';
       list.appendChild(el('li', p.included ? 'included' : 'dropped', line));
     });
@@ -39,6 +41,8 @@
     if (typeof data.soul === 'string' && data.soul) {
       body.appendChild(el('h4', 'context-drawer-soul-title', 'Soul'));
       body.appendChild(el('pre', 'context-drawer-soul', data.soul));
+    } else if (typeof data.soulNote === 'string' && data.soulNote) {
+      body.appendChild(el('p', 'context-drawer-empty', data.soulNote));
     }
     return body;
   }

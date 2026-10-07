@@ -252,3 +252,59 @@ func TestReadSoul(t *testing.T) {
 		t.Fatal("soul not read")
 	}
 }
+
+// F3: a key split by a control character is joined by clean, so the scan must
+// see the cleaned text too.
+func TestSecretSplitByControlCharRefused(t *testing.T) {
+	root, project := fixture(t)
+	split := "AKIA" + "\x01" + "ABCDEFGHIJKLMNOP"
+	joined := "AKIA" + "ABCDEFGHIJKLMNOP"
+	write(t, filepath.Join(project, ".claude/rules/split.md"), "token "+split+"\n")
+	write(t, filepath.Join(root, "lib/skills/leak/SKILL.md"), "use "+split+"\n")
+	p := Compose(Options{YakosRoot: root, Project: project, Agent: "a", AgentBody: "ok " + split + "\n"})
+	if strings.Contains(p.Text, joined) || strings.Contains(p.Text, "split") || strings.Contains(p.Text, "## agent") {
+		t.Fatalf("split secret reached the pack: %q", p.Text)
+	}
+	if _, err := SkillText(root, project, "leak"); err != ErrSecret {
+		t.Fatalf("skill with a split secret: %v", err)
+	}
+}
+
+// F4: a project rule that replaces a framework rule says so in the parts, and
+// the displaced rule is listed, not included.
+func TestReplacedFrameworkRuleListed(t *testing.T) {
+	root, project := fixture(t)
+	p := Compose(opts(root, project))
+	var repl, displaced *Part
+	for i := range p.Parts {
+		if p.Parts[i].Name == "a-first" && p.Parts[i].Kind == KindProjectRule {
+			repl = &p.Parts[i]
+		}
+		if p.Parts[i].Name == "a-first" && p.Parts[i].Kind == KindRule {
+			displaced = &p.Parts[i]
+		}
+	}
+	if repl == nil || repl.Note != "replaces: a-first" || !repl.Included {
+		t.Fatalf("project rule part: %+v", repl)
+	}
+	if displaced == nil || displaced.Included || displaced.Note == "" {
+		t.Fatalf("displaced framework rule part: %+v", displaced)
+	}
+	if strings.Contains(p.Text, "alpha") {
+		t.Fatal("displaced rule text is in the pack")
+	}
+}
+
+// S2: a body far over the cap reports the size the pack carries.
+func TestLongAgentBodyPartWithinCap(t *testing.T) {
+	root, _ := fixture(t)
+	p := Compose(Options{YakosRoot: root, Agent: "big", AgentBody: strings.Repeat("x", 100<<10)})
+	for _, part := range p.Parts {
+		if part.Kind == KindAgent && (part.Bytes > MaxBytes || !part.Truncated) {
+			t.Fatalf("agent part: %+v", part)
+		}
+	}
+	if len(p.Text) > MaxBytes {
+		t.Fatalf("pack %d over the cap", len(p.Text))
+	}
+}

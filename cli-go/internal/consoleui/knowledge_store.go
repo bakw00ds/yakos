@@ -26,6 +26,10 @@ var (
 
 const maxKnowledgeParts = 256
 
+// maxPartHeader is the room a part has over MaxFileBytes for its "## kind: name"
+// header line.
+const maxPartHeader = 256
+
 // validKnowledgeMeta reports whether the knowledge fields of m are well formed:
 // a damaged or hand-edited meta file must not reach the API or argv.
 func validKnowledgeMeta(m *conversationMeta) bool {
@@ -37,7 +41,7 @@ func validKnowledgeMeta(m *conversationMeta) bool {
 		return false
 	}
 	for _, p := range m.KnowledgeParts {
-		if !partNameRe.MatchString(p.Name) || p.Bytes < 0 || p.Bytes > knowledge.MaxFileBytes ||
+		if !partNameRe.MatchString(p.Name) || p.Bytes < 0 || p.Bytes > knowledge.MaxFileBytes+maxPartHeader ||
 			(p.Kind != knowledge.KindRule && p.Kind != knowledge.KindProjectRule && p.Kind != knowledge.KindAgent) {
 			return false
 		}

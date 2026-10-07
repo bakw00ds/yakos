@@ -797,6 +797,11 @@ func emitNativeEvent(ev runtime.NativeEvent, streamedText *bool, onChunk func(St
 // touched, so its --append-system-prompt bytes stay what they were; an agy turn
 // that resumes a native agy session sends none, because that conversation
 // already holds the block from its first turn.
+//
+// Which path skips: only a RunStream call whose Params.NativeSessions names an
+// agy id, i.e. a turn of an interactive agy pane (interactive.ResumeEngine,
+// K-147). The one-shot console path (chat_handler's direct RunStream) never
+// passes NativeSessions for agy, so it sends the stored block on every turn.
 func knowledgePersona(rt string, p Params, persona string, resumed bool) string {
 	if p.Knowledge == "" || (rt != "codex" && rt != "agy") {
 		return persona

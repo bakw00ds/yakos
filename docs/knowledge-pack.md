@@ -47,7 +47,12 @@ hash no longer matches is composed afresh.
 
 - codex: `-c developer_instructions=...` on every turn (same bytes).
 - agy: prefix of the user turn; not sent on a turn that resumes a native agy
-  session, which already holds it.
+  session, which already holds it. That skip fires only for a turn of an
+  interactive agy pane (the K-147 ResumeEngine, which passes the stored agy
+  conversation id after the first turn). The one-shot console path passes no
+  native sessions for agy, so it sends the block every turn.
+- Interactive codex and agy panes (the ResumeEngine) get the same stored block
+  and skill tail as one-shot panes, through `ResumeEngineParams.PrepareTurn`.
 - claude: untouched (its argv and `--append-system-prompt` are unchanged).
 
 ## Skills
@@ -62,5 +67,10 @@ used. Unknown slugs and files with a secret pattern are not appended.
 `/context` in a pane opens `dist/context-drawer.js`, which reads
 `GET /api/chat/context?conv=<id>` (RoleRead). Only the conversation's owner
 gets the names, byte counts and hash; others get `knowledge: null`. The soul
-text is returned only to the owner of a conversation whose agent is `lead`.
+text (the host's `~/.yakos-state/soul/global.md`) is returned only to the
+loopback host operator (the identity in `loopback-operator-id`), for a `lead`
+conversation they own, and only when it passes the secret scanner (otherwise a
+path-free `soulNote`). A cert or session identity never gets a soul field.
+A project rule that replaces a framework rule of the same name is listed as
+`replaces: <name>`; the displaced rule is listed not included.
 Rule and agent text is never returned.

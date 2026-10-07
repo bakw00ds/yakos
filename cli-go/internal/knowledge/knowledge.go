@@ -61,6 +61,10 @@ type Part struct {
 	Bytes     int    `json:"bytes"`
 	Included  bool   `json:"included"`
 	Truncated bool   `json:"truncated,omitempty"`
+	// Note explains an unusual part: a project rule that overrides a framework
+	// rule says "replaces: <name>"; the framework rule it displaced is listed
+	// not included with "replaced by the project rule".
+	Note string `json:"note,omitempty"`
 }
 
 // Pack is a composed knowledge block.
@@ -91,8 +95,20 @@ var (
 )
 
 type section struct {
-	part Part
-	text string
+	part     Part
+	text     string
+	replaced bool // a framework rule displaced by a project rule of the same name
+}
+
+// secretish reports whether text holds a secret pattern, either as written or
+// once clean has removed its control characters (a key split by a control
+// character is joined by clean, so it must be caught after cleaning too).
+func secretish(text string) bool {
+	if secretscan.Redact(text) != text {
+		return true
+	}
+	c := clean(text)
+	return secretscan.Redact(c) != c
 }
 
 // Compose builds the pack. It never fails: a source that cannot be read or is
@@ -107,18 +123,26 @@ func Compose(o Options) Pack {
 		pr, w2 = readRules(filepath.Join(o.Project, ".claude", "rules"), KindProjectRule, true, true)
 		warns = append(warns, w2...)
 	}
-	// A project rule replaces the framework rule of the same name.
+	// A project rule replaces the framework rule of the same name. The
+	// displaced rule stays in the parts list, not included, so the drawer shows
+	// the replacement.
 	over := map[string]bool{}
-	for _, s := range pr {
-		over[s.part.Name] = true
+	for i := range pr {
+		over[pr[i].part.Name] = true
 	}
-	kept := fw[:0:0]
-	for _, s := range fw {
-		if !over[s.part.Name] {
-			kept = append(kept, s)
+	for i := range fw {
+		if over[fw[i].part.Name] {
+			fw[i].replaced = true
+			fw[i].part.Note = "replaced by the project rule"
 		}
 	}
-	fw = kept
+	for i := range pr {
+		for _, f := range fw {
+			if f.replaced && f.part.Name == pr[i].part.Name {
+				pr[i].part.Note = "replaces: " + pr[i].part.Name
+			}
+		}
+	}
 
 	var agent *section
 	if strings.TrimSpace(o.AgentBody) != "" {
@@ -126,7 +150,7 @@ func Compose(o Options) Pack {
 		if !stemRe.MatchString(name) {
 			name = "agent"
 		}
-		if secretscan.Redact(o.AgentBody) != o.AgentBody {
+		if secretish(o.AgentBody) {
 			warns = append(warns, "agent "+name+": refused from the knowledge pack (secret pattern)")
 		} else {
 			body := clean(o.AgentBody)
@@ -146,10 +170,9 @@ func Compose(o Options) Pack {
 	}
 	for _, s := range all {
 		s.part.Bytes = len(s.text)
-		s.part.Included = true
+		s.part.Included = !s.replaced
 	}
 	if agent != nil {
-		agent.part.Bytes = len(agent.text)
 		agent.part.Included = true
 		all = append(all, agent)
 	}
@@ -167,7 +190,9 @@ func Compose(o Options) Pack {
 	// project rule. The agent (last in all) is never dropped.
 	order := make([]*section, 0, len(fw)+len(pr))
 	for i := len(fw) - 1; i >= 0; i-- {
-		order = append(order, &fw[i])
+		if !fw[i].replaced {
+			order = append(order, &fw[i])
+		}
 	}
 	for i := len(pr) - 1; i >= 0; i-- {
 		order = append(order, &pr[i])
@@ -189,6 +214,10 @@ func Compose(o Options) Pack {
 		}
 		agent.text = cut + TruncationMark
 		agent.part.Truncated = true
+	}
+	if agent != nil {
+		// The size the pack carries, so a long body stays within MaxBytes.
+		agent.part.Bytes = len(agent.text)
 	}
 
 	var b strings.Builder
@@ -247,7 +276,7 @@ func readRules(dir, kind string, enabled, project bool) ([]section, []string) {
 			continue
 		}
 		raw := string(data)
-		if secretscan.Redact(raw) != raw {
+		if secretish(raw) {
 			warns = append(warns, kind+" "+stem+": refused from the knowledge pack (secret pattern)")
 			continue
 		}
@@ -276,8 +305,12 @@ func isLink(p string) bool {
 	return err == nil && fi.Mode()&os.ModeSymlink != 0
 }
 
+// readRooted reads root/name, regular files only. The file is opened without
+// blocking, so a FIFO or a device swapped in for a file is refused at once
+// instead of holding the caller (and any lock it holds) until a writer shows up;
+// the opened file must also be the one the root names (no swap between).
 func readRooted(root *os.Root, name string, limit int64) ([]byte, error) {
-	f, err := root.Open(name)
+	f, err := root.OpenFile(name, os.O_RDONLY|openNonblock, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -288,6 +321,13 @@ func readRooted(root *os.Root, name string, limit int64) ([]byte, error) {
 	}
 	if !fi.Mode().IsRegular() {
 		return nil, errors.New("not a regular file")
+	}
+	li, err := root.Lstat(name)
+	if err != nil {
+		return nil, err
+	}
+	if !li.Mode().IsRegular() || !os.SameFile(fi, li) {
+		return nil, errors.New("file changed while opening")
 	}
 	data, err := io.ReadAll(io.LimitReader(f, limit+1))
 	if err != nil {
@@ -390,7 +430,7 @@ func SkillText(yakosRoot, project, slug string) (string, error) {
 			return "", fmt.Errorf("knowledge: skill %s: %w", slug, err)
 		}
 		raw := string(data)
-		if secretscan.Redact(raw) != raw {
+		if secretish(raw) {
 			return "", ErrSecret
 		}
 		body, _, ok := splitFront(raw)

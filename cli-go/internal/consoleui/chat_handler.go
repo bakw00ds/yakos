@@ -188,6 +188,12 @@ type chatHandlers struct {
 	// turns gives every turn of an interactive session its dispatch-log event
 	// pair (K-136); see chat_account.go.  Always non-nil.
 	turns *turnLedger
+
+	// loopbackHost is true when the console runs on the loopback trust path
+	// (not networked); loopbackOwnerID is the host operator's identity. Only
+	// that identity may read the host's soul text (K-149 F1).
+	loopbackHost    bool
+	loopbackOwnerID string
 }
 
 // interactiveSender is the minimal interface covering the Send method consumed

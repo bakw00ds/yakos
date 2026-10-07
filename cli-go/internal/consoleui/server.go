@@ -548,6 +548,8 @@ func New(cfg Config) (*Server, error) {
 	if stableLoopbackID == "" {
 		stableLoopbackID = loadOrCreateLoopbackOwnerID(cfg.StateDir)
 	}
+	chatH.loopbackHost = loopbackTrusted
+	chatH.loopbackOwnerID = stableLoopbackID
 	callerLabelFn := func(r *http.Request) string {
 		if loopbackTrusted {
 			// Stamp every loopback request with the stable server-derived ID.

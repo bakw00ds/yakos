@@ -195,3 +195,19 @@ func TestSkillSlug(t *testing.T) {
 		}
 	}
 }
+
+// S2: an agent body of 100 KiB composes to a pack whose parts round-trip through
+// the meta validator, so the drawer still shows it.
+func TestEnsureKnowledge_LongAgentBodyRoundTrips(t *testing.T) {
+	root := kroot(t)
+	kwrite(t, filepath.Join(root, "lib/agents/huge.md"), "---\nid: huge\n---\n\n"+strings.Repeat("persona line\n", 8000))
+	ch := newKH(t, root)
+	block, _ := ch.nonClaudeTurn("codex", "c-huge", "alice", "huge", "go")
+	if block == "" {
+		t.Fatal("no pack")
+	}
+	sha, size, parts, ok := ch.transcripts.KnowledgeInfo("c-huge", "alice")
+	if !ok || sha != knowledge.SHA(block) || size != len(block) || len(parts) == 0 {
+		t.Fatalf("drawer info lost for a long body: ok=%v size=%d parts=%v", ok, size, parts)
+	}
+}
