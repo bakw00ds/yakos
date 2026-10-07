@@ -552,6 +552,22 @@ transcript and user-turn text; none of it enters a system prompt,
   console shows the "context reset (cache)" banner: the new runtime starts without
   the earlier prompt cache. The router's own moves (sticky, fallback, auto) are
   not handoffs.
+- **Sensitive requests and the override.** The interactive first turn is
+  classified like a one-shot turn (the task is scanned; a refusal ends the turn
+  with the same `dispatch failed: ... route refused` error frame and a
+  `route_refused` ledger event). When the class (or an unavailable runtime) puts
+  a turn somewhere other than the `@runtime` the operator asked for, the route
+  chip names the refused override (`override_refused`, persisted on the route
+  turn) and `pinned` reads `router`. The handoff digest is scanned over the whole
+  turn before it is cut, with the secret-scan hook's patterns plus URL
+  credentials and credential-named `KEY=value` pairs.
+- **K-148b, left out on purpose.** Tool and thinking cards (K-144 events) are not
+  persisted in the transcript; a live pane's runtime cannot be switched (a
+  dispatch naming another runtime, codex to agy included, is refused with 409, so
+  the chip never names a runtime the engine is not on; start a new conversation);
+  the handoff banner is shown live but not persisted; and a follow-up sent to a
+  live interactive pane (`/api/chat/send`) emits no route event: the pane routes
+  once, at its first turn.
 
 ## Claude Code request-class aliases (K-141)
 
