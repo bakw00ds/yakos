@@ -29,6 +29,7 @@ package runtime
 // message is what a human wants and is what is reported.
 
 import (
+	"bytes"
 	"encoding/json"
 	"strconv"
 	"strings"
@@ -40,6 +41,7 @@ type codexLineParser struct {
 	plain      plainBuffer
 	structured bool
 	dropped    int // lines dropped for length
+	skipped    int // lines of a structured stream that were not a recognised event
 
 	threadID  string
 	usage     Usage
@@ -96,10 +98,11 @@ type codexUsage struct {
 // remainder. cache_write_input_tokens is treated the same way, as a subset of
 // the prompt. output_tokens already includes reasoning tokens.
 func (u codexUsage) normalize() Usage {
-	in := firstNonZero(u.InputTokens, u.PromptTokens)
-	cached := firstNonZero(u.CachedInputTokens, u.CacheReadInputTokens)
-	out := firstNonZero(u.OutputTokens, u.CompletionTokens)
-	fresh := in - cached - u.CacheWriteInputTokens
+	in := clampTokens(firstNonZero(u.InputTokens, u.PromptTokens))
+	cached := clampTokens(firstNonZero(u.CachedInputTokens, u.CacheReadInputTokens))
+	out := clampTokens(firstNonZero(u.OutputTokens, u.CompletionTokens))
+	write := clampTokens(u.CacheWriteInputTokens)
+	fresh := in - cached - write
 	if fresh < 0 {
 		fresh = 0
 	}
@@ -107,7 +110,7 @@ func (u codexUsage) normalize() Usage {
 		InputTokens:   fresh,
 		OutputTokens:  out,
 		CacheRead:     cached,
-		CacheCreation: u.CacheWriteInputTokens,
+		CacheCreation: write,
 	}
 }
 
@@ -222,8 +225,10 @@ func (p *codexLineParser) item(completed bool, it codexItem) []NativeEvent {
 			return nil
 		}
 		p.messages.beginMessage()
-		p.messages.add(it.Text)
-		evs = append(evs, NativeEvent{Kind: EventToken, Text: stripNUL(it.Text)})
+		// The kept text, separator included, so the tokens add up to Text.
+		if kept := p.messages.addKept(it.Text); kept != "" {
+			evs = append(evs, NativeEvent{Kind: EventToken, Text: kept})
+		}
 
 	case "reasoning":
 		if completed && it.Text != "" {
@@ -391,6 +396,9 @@ func marshalObject(v any) string {
 
 // plainLine handles a line that is not a codex event.
 func (p *codexLineParser) plainLine(line []byte) []NativeEvent {
+	if p.structured && len(bytes.TrimSpace(line)) > 0 { // a blank line is not a defect
+		p.skipped++
+	}
 	return plainFallbackLine(p.structured, &p.plain, line)
 }
 
@@ -404,6 +412,8 @@ func (p *codexLineParser) Finish() ParseResult {
 	pr.Text = chosen.text()
 	pr.TextAll = pr.Text
 	pr.noteTruncation(chosen.truncated, chosen.truncated, p.dropped)
+	pr.LinesSkipped = p.skipped
+	pr.PlainText = !p.structured
 	switch {
 	case p.failedMsg != "":
 		pr.Error = p.failedMsg

@@ -56,10 +56,11 @@ import (
 // shared stdout reader enforces the same cap before a line reaches a parser
 // (dispatch.maxStreamLineBytes is defined in terms of this constant so the two
 // can never drift); parsers re-check it so a caller that feeds a whole
-// captured buffer (ParseOutput) is bounded too. 2 MiB comfortably holds the
+// captured buffer (ParseOutput) is bounded too. 1 MiB comfortably holds the
 // largest legitimate event (a claude system/init line with a full skill
-// roster is about 50 KiB).
-const MaxStreamLineBytes = 2 * 1024 * 1024
+// roster is about 50 KiB); a longer line is dropped whole and counted in
+// ParseResult.LinesDropped (K-144).
+const MaxStreamLineBytes = 1024 * 1024
 
 // MaxParsedTextBytes caps the accumulated final text of one parse. Text past
 // the cap is dropped and ParseResult.Truncated is set. 1 MiB is far beyond
@@ -165,6 +166,12 @@ type NativeEvent struct {
 
 	// Raw is a bounded copy of the source line, for diagnostics.
 	Raw []byte
+
+	// Plain marks an EventToken that is a raw stdout line of the plain-text
+	// fallback, emitted before the stream proved structured. A live consumer
+	// holds these until ParseResult.PlainText says whether the whole stream was
+	// prose: a stray line ahead of a structured stream is not part of the answer.
+	Plain bool
 }
 
 // ParseResult is what a finished parse knows about the run.
@@ -235,6 +242,16 @@ type ParseResult struct {
 	// LinesDropped counts the lines skipped because they were longer than
 	// MaxStreamLineBytes. A dropped line contributes nothing to Text.
 	LinesDropped int
+
+	// LinesSkipped counts the lines of a structured stream that were not a
+	// recognised event: malformed or truncated JSON, an event type this parser
+	// does not know (a newer harness), or stray prose. They are skipped, never
+	// fatal; a consumer surfaces the count as a warning.
+	LinesSkipped int
+
+	// PlainText is true when the stream never produced a recognised event, so
+	// Text is the stdout lines themselves.
+	PlainText bool
 
 	// Error is the harness-reported failure message of a run that did not
 	// complete ("" for a run that did). It is diagnostic text, never part of
@@ -439,9 +456,16 @@ func (a *textAccumulator) beginMessage() { a.pendingBreak = true }
 
 // add appends a fragment of the current message. Once the cap is hit the rest
 // is dropped and truncated stays set.
-func (a *textAccumulator) add(s string) {
+func (a *textAccumulator) add(s string) { a.addKept(s) }
+
+// addKept is add that also returns the text actually kept: the fragment with
+// the message separator in front when one was due, cut at the cap. A live
+// consumer streams exactly this, so the concatenation of what it received is
+// the accumulator's text (before the trailing-newline trim) and is bounded by
+// the same cap.
+func (a *textAccumulator) addKept(s string) string {
 	if s == "" || a.truncated {
-		return
+		return ""
 	}
 	s = stripNUL(s)
 	if a.pendingBreak {
@@ -452,11 +476,13 @@ func (a *textAccumulator) add(s string) {
 	}
 	room := MaxParsedTextBytes - len(a.b)
 	if len(s) > room {
-		a.b = append(a.b, cutAtRune(s, room)...)
+		s = cutAtRune(s, room)
+		a.b = append(a.b, s...)
 		a.truncated = true
-		return
+		return s
 	}
 	a.b = append(a.b, s...)
+	return s
 }
 
 func (a *textAccumulator) empty() bool { return len(a.b) == 0 }
@@ -489,7 +515,24 @@ func plainFallbackLine(structured bool, buf *plainBuffer, line []byte) []NativeE
 		return nil
 	}
 	buf.addLine(line)
-	return []NativeEvent{{Kind: EventToken, Text: string(line) + "\n", Raw: rawExcerpt(line)}}
+	return []NativeEvent{{Kind: EventToken, Text: string(line) + "\n", Raw: rawExcerpt(line), Plain: true}}
+}
+
+// maxTokenCount bounds one token count a harness reports. A hostile or broken
+// stream can print any int64; unclamped, a negative count would be subtracted
+// from the ledger and a huge one would overflow the sums. 2^40 is far above any
+// real run.
+const maxTokenCount = int64(1) << 40
+
+// clampTokens bounds a reported token count to [0, maxTokenCount].
+func clampTokens(n int64) int64 {
+	switch {
+	case n < 0:
+		return 0
+	case n > maxTokenCount:
+		return maxTokenCount
+	}
+	return n
 }
 
 // capThinking bounds a thinking payload at the same 64 KiB the streaming
@@ -522,7 +565,7 @@ func (p *plainLineParser) Feed(line []byte) []NativeEvent {
 
 // Finish implements LineParser.
 func (p *plainLineParser) Finish() ParseResult {
-	pr := ParseResult{Text: p.buf.acc.text()}
+	pr := ParseResult{Text: p.buf.acc.text(), PlainText: true}
 	pr.TextAll = pr.Text
 	pr.noteTruncation(p.buf.acc.truncated, p.buf.acc.truncated, p.dropped)
 	return pr

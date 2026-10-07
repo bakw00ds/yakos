@@ -22,12 +22,14 @@ package dispatch
 //
 // Per-runtime streaming behaviour:
 //   - claude: true incremental streaming (multiple token chunks via ParseStreamLine).
-//   - codex, agy: buffered. Every stdout line goes through the runtime's
-//     LineParser (runtime.ParserFor); one token chunk with the agent's TEXT
-//     (not the raw JSONL) is emitted when the process exits, then a summary
-//     chunk carrying the token usage and the native session id. A failed turn
-//     adds an "error" chunk. Full incremental streaming is a later phase.
-//   - gemini and plugin runtimes: buffered plaintext (the plain-text parser).
+//   - codex, agy: streamed (K-144). Every stdout line goes through the runtime's
+//     LineParser (runtime.ParserFor) as it arrives, and each decoded event is
+//     emitted at once: token (the agent's TEXT, never the raw JSONL), thinking,
+//     tool_use and tool_result chunks. The summary chunk carries the token usage
+//     and the native session id; a failed turn adds an "error" chunk before it.
+//   - plugin runtimes (any other name): the plain-text parser, one token chunk
+//     token chunk with the whole text at exit (prose is not streamed, since a
+//     stray line ahead of a structured stream is not part of the answer).
 //
 // Test seam: streamRunFn (parallel to runFn) can be swapped in tests.
 
@@ -35,6 +37,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"time"
@@ -58,7 +61,7 @@ import (
 const maxStreamLineBytes = runtime.MaxStreamLineBytes
 
 // maxBufferedOutputBytes is the ceiling for the total stdout fed to the
-// LineParser on the buffered (codex/agy) path.  Lines past it are read and
+// LineParser on the non-claude path.  Lines past it are read and
 // discarded rather than parsed, so a runaway runtime costs neither memory nor
 // parser time.  The parser separately caps the TEXT it keeps
 // (runtime.MaxParsedTextBytes).  Either limit appends bufferedTruncationMarker
@@ -444,7 +447,7 @@ func execWithStreaming(
 	)
 
 	if hasChatCmd {
-		// Use the unframed chat exec path (claude: streaming; codex/agy: buffered).
+		// Use the unframed chat exec path (every harness streams its events).
 		cmd := cp.ChatExecCmd(ctx, chatReq)
 
 		stdoutPipe, pipeErr := cmd.StdoutPipe()
@@ -483,6 +486,7 @@ func execWithStreaming(
 		// K-135: every non-claude harness is normalized by its LineParser, so the
 		// console receives the agent's text and token usage, not raw JSONL.
 		var bufParser runtime.LineParser
+		streamedText := false // a structured token chunk went out
 		bufferedInputBytes := 0
 		inputCeilingHit := false
 		readerDropped := 0 // lines the reader dropped for length before the parser saw them
@@ -527,7 +531,9 @@ func execWithStreaming(
 					bufferedOutputTruncated = true
 				} else {
 					bufferedInputBytes += len(line) + 1
-					bufParser.Feed(line)
+					for _, ev := range bufParser.Feed(line) {
+						emitNativeEvent(ev, &streamedText, onChunk)
+					}
 				}
 			}
 		})
@@ -544,8 +550,9 @@ func execWithStreaming(
 			}
 		}
 
-		// For non-claude runtimes: emit the agent's text as one token chunk (the
-		// real incremental stream is a later phase), then, if the harness
+		// For non-claude runtimes the events were emitted as they arrived. What is
+		// left is the lines held as possible prose (now known), a marker when
+		// something was dropped, a warning for skipped lines, and, if the harness
 		// reported a failure, an error chunk the UI renders as "Error: ...".
 		if !isClaudeRuntime {
 			pr := bufParser.Finish()
@@ -556,13 +563,29 @@ func execWithStreaming(
 				usageCost = &u
 			}
 			text := pr.Text
+			marker := ""
 			if pr.Truncated || bufferedOutputTruncated {
 				parsed.Truncated = true
-				text += bufferedTruncationMarker
+				marker = bufferedTruncationMarker
+			}
+			text += marker
+			switch {
+			case pr.PlainText && text != "":
+				// A stream that never produced an event is prose (a plugin runtime):
+				// its text goes out whole, once it is known not to be a stray line.
+				onChunk(StreamChunk{Type: "token", Text: text})
+			case !streamedText && pr.Text != "":
+				// Structured, but the answer only came on the final frame (agy's
+				// single --output-format json envelope): deliver it now.
+				onChunk(StreamChunk{Type: "token", Text: text})
+			case marker != "":
+				onChunk(StreamChunk{Type: "token", Text: marker})
 			}
 			allText = []byte(text)
-			if len(allText) > 0 {
-				onChunk(StreamChunk{Type: "token", Text: text})
+			if n := pr.LinesSkipped + pr.LinesDropped; n > 0 {
+				// A count only: the skipped lines are never echoed (they may be anything).
+				slog.Warn("dispatch: stream: skipped unparseable output lines",
+					"runtime", adapter.Name(), "skipped", pr.LinesSkipped, "dropped_over_cap", pr.LinesDropped)
 			}
 			if pr.Error != "" {
 				onChunk(StreamChunk{Type: "error", Text: pr.Error})
@@ -729,4 +752,25 @@ func truncateAtRuneBoundary(s string, maxBytes int, marker string, alreadyTrunca
 		s = s[:end]
 	}
 	return s + marker
+}
+
+// emitNativeEvent turns one decoded runtime.NativeEvent into its stream chunk.
+// Session, result and error events carry nothing live: the summary chunk has
+// the session id and usage, and the error chunk is sent once, from the parse
+// outcome, so a retry notice does not look like a failed turn.
+func emitNativeEvent(ev runtime.NativeEvent, streamedText *bool, onChunk func(StreamChunk)) {
+	switch ev.Kind {
+	case runtime.EventToken:
+		if ev.Plain {
+			return // raw stdout of a stream not (yet) known to be structured; see Finish
+		}
+		onChunk(StreamChunk{Type: "token", Text: ev.Text})
+		*streamedText = true
+	case runtime.EventThinking:
+		onChunk(StreamChunk{Type: "thinking", Thinking: ev.Text})
+	case runtime.EventToolUse:
+		emitToolChunk(&runtime.ToolEvent{Kind: "tool_use", ToolName: ev.ToolName, Input: ev.ToolInput}, onChunk)
+	case runtime.EventToolResult:
+		emitToolChunk(&runtime.ToolEvent{Kind: "tool_result", ToolName: ev.ToolName, Output: ev.ToolOutput, IsError: ev.IsError}, onChunk)
+	}
 }
