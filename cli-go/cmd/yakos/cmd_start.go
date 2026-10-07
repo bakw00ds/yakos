@@ -204,6 +204,7 @@ func runStart(yakosRoot string, args []string) {
 	noAgents := false
 	dryRun := false
 	printAgents := false
+	printEnv := false
 	continueSession := false
 	resume := ""
 	fork := false
@@ -254,6 +255,7 @@ func runStart(yakosRoot string, args []string) {
 		{Name: "--no-agents", Kind: cliflag.Bool, Bool: &noAgents},
 		{Name: "--dry-run", Kind: cliflag.Bool, Bool: &dryRun},
 		{Name: "--print-agents", Kind: cliflag.Bool, Bool: &printAgents},
+		{Name: "--print-env", Kind: cliflag.Bool, Bool: &printEnv},
 		{Name: "--continue", Aliases: []string{"-c"}, Kind: cliflag.Bool, Bool: &continueSession},
 		{Name: "--fork-session", Kind: cliflag.Bool, Bool: &fork},
 		{Name: "--ide", Kind: cliflag.Bool, Bool: &ide},
@@ -337,7 +339,7 @@ func runStart(yakosRoot string, args []string) {
 	// read-only and must not create ~/.yakos-state/ or write a token file.
 	stateDir := filepath.Join(home, ".yakos-state")
 	var consoleTok string
-	if !dryRun && !printAgents {
+	if !dryRun && !printAgents && !printEnv {
 		consoleTok, _ = internalconsoleui.LoadOrCreateToken(stateDir)
 	}
 
@@ -377,7 +379,7 @@ func runStart(yakosRoot string, args []string) {
 	// --no-repl is handled separately below (runServe, not spawnDetachedDaemon).
 	// --dry-run / --print-agents skip the spawn (they don't run the pump).
 	// --direct skips the spawn (legacy exec path, no PTY manager needed).
-	spawnDaemon := !noREPL && !dryRun && !printAgents && !direct &&
+	spawnDaemon := !noREPL && !dryRun && !printAgents && !printEnv && !direct &&
 		(shouldSpawnDaemon(networked, consoleBindProvided, consoleExternalHostProvided, consoleAddrProvided) || shareTerminal)
 
 	// Resolve workspace root once; used for PID/socket path checks.
@@ -534,6 +536,7 @@ func runStart(yakosRoot string, args []string) {
 		NoAgents:            noAgents,
 		DryRun:              dryRun,
 		PrintAgents:         printAgents,
+		PrintEnv:            printEnv,
 		Continue:            continueSession,
 		Resume:              resume,
 		Fork:                fork,

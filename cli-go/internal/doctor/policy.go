@@ -227,8 +227,9 @@ func checkRouterPolicy(e PolicyEnv) []PolicyFinding {
 			Fix:      "make it a regular file you own with valid YAML and mode 600 (chmod 600 " + routerPolicyLabel + ")",
 		}}
 	}
+	classes := gatewayClassFindings(e, pol)
 	if len(pol.AllowUnsandboxedRuntimes) == 0 {
-		return nil
+		return classes
 	}
 	var harnesses []string
 	for _, name := range pol.AllowUnsandboxedRuntimes {
@@ -238,19 +239,61 @@ func checkRouterPolicy(e PolicyEnv) []PolicyFinding {
 		}
 	}
 	if len(harnesses) == 0 {
-		return []PolicyFinding{{
+		return append(classes, PolicyFinding{
 			ID:       "router-policy-no-effect",
 			Severity: PolicyLow,
 			Message:  "allow_unsandboxed_runtimes in " + routerPolicyLabel + " lists no runtime yakOS can run unsandboxed (only codex and agy), so it has no effect",
 			Fix:      "correct the runtime names or remove the entries",
-		}}
+		})
 	}
-	return []PolicyFinding{{
+	return append(classes, PolicyFinding{
 		ID:       "router-policy-unsandboxed",
 		Severity: PolicyHigh,
 		Message:  fmt.Sprintf("%s run WITHOUT their sandbox flags: allow_unsandboxed_runtimes in %s", strings.Join(harnesses, ", "), routerPolicyLabel),
 		Fix:      "remove the runtime from allow_unsandboxed_runtimes (or delete the file) to restore codex --sandbox workspace-write and agy --sandbox",
-	}}
+	})
+}
+
+// gatewayClassFindings lists the active gateway_classes aliases (K-141): class,
+// variable name and model id only. It says which entries the operator's own
+// environment overrides, because the operator's variable always wins. A refused
+// key is a finding of its own.
+func gatewayClassFindings(e PolicyEnv, pol routerpolicy.File) []PolicyFinding {
+	classes, warns := pol.Classes()
+	var out []PolicyFinding
+	for _, w := range warns {
+		out = append(out, PolicyFinding{
+			ID:       "router-policy-gateway-classes-refused",
+			Severity: PolicyMedium,
+			Message:  w,
+			Fix:      "use only these classes with Claude model ids: " + strings.Join(routerpolicy.ClassNames(), ", "),
+		})
+	}
+	if len(classes) == 0 {
+		return out
+	}
+	var active, overridden []string
+	for _, c := range classes {
+		entry := fmt.Sprintf("%s (%s=%s)", c.Class, c.EnvName, c.Model)
+		if e.Getenv != nil && e.Getenv(c.EnvName) != "" {
+			overridden = append(overridden, c.Class+" ("+c.EnvName+")")
+			continue
+		}
+		active = append(active, entry)
+	}
+	msg := "gateway_classes in " + routerPolicyLabel + " sets Claude Code model variables on claude runs: " + strings.Join(active, ", ")
+	if len(active) == 0 {
+		msg = "gateway_classes in " + routerPolicyLabel + " sets nothing: every class is overridden by your environment"
+	}
+	if len(overridden) > 0 {
+		msg += "; your own environment wins for: " + strings.Join(overridden, ", ")
+	}
+	return append(out, PolicyFinding{
+		ID:       "router-policy-gateway-classes",
+		Severity: PolicyLow,
+		Message:  msg,
+		Fix:      "informational; remove the class from gateway_classes to stop aliasing it (a daemon needs a restart to re-read the policy)",
+	})
 }
 
 // trustReason turns the loader's "router policy ignored: <path> is a symlink"
