@@ -70,7 +70,7 @@ type routerState struct {
 // applyRouter loads the policy, classifies the dispatch, selects a rule and
 // wires the router's inputs into ci. It is also what PreferredRuntime and
 // ResolveRuntime use, so the runtime they report is the one Run will pick.
-func applyRouter(ci *chainInput, agent *agentscompose.ComposedAgent, agentName string, class string, taskBytes int64, conversation string, warn io.Writer) routerState {
+func applyRouter(ci *chainInput, agent *agentscompose.ComposedAgent, agentName string, class string, taskBytes int64, project, conversation string, warn io.Writer) routerState {
 	st := routerState{policy: router.LoadPolicy(routerPolicyDir())}
 	if warn != nil {
 		for _, w := range st.policy.Warnings {
@@ -89,14 +89,24 @@ func applyRouter(ci *chainInput, agent *agentscompose.ComposedAgent, agentName s
 			st.rule = &policyAction{rule: r, runtime: r.Action.Runtime, model: r.Action.Model, fallbacks: r.Action.Fallbacks, overridePins: r.OverridePins}
 			ci.policy = st.rule
 		}
-		// Sticky: a conversation keeps the runtime and model its first turn was
-		// routed to. An explicit runtime on the request is the operator moving it:
-		// the chain ranks an override above the pin.
-		if p, ok := routerSticky.Get(conversation, agentName); ok {
-			st.pin = &p
-			ci.sticky = p.Runtime
-		}
 	}
+	if !st.policy.FilePresent() {
+		// No trusted policy file: the router changes nothing. No pins, no
+		// cooldown; the P0a chain runs as it always did, failures included.
+		return st
+	}
+	// Sticky: a conversation keeps the runtime and model its first turn was
+	// routed to, as long as the project root and the policy file are the ones
+	// it was routed under. An explicit runtime on the request is the operator
+	// moving it: the chain ranks an override above the pin, and the move
+	// re-pins (remember).
+	if p, ok := routerSticky.Get(conversation, agentName, project, st.policy.FileSHA); ok {
+		st.pin = &p
+		ci.sticky = p.Runtime
+	}
+	// The cooldown only skips runtimes the chain may choose among. A pinned
+	// conversation's runtime is an explicit candidate (RuntimeBySticky), which
+	// the walk never skips, so the cooldown cannot move it.
 	ci.cooling = routerCooldown.Cooling
 	return st
 }
@@ -227,14 +237,20 @@ func describeAction(p *policyAction, runtimeApplied, modelApplied bool) string {
 	return strings.Join(parts, " ")
 }
 
-// remember records the first routing of a conversation, so later turns stay put.
-// It does nothing without a rule in force (the router then changes nothing, and
-// a conversation keeps resolving by the P0a chain every turn, as before).
-func (st routerState) remember(conversation, agent string, d router.RouteDecision) {
-	if !st.policy.Active() || conversation == "" {
+// remember records the routing of a conversation, so later turns stay put. It
+// does nothing without a trusted policy file (the router then changes nothing,
+// and a conversation keeps resolving by the P0a chain every turn, as before).
+// A rule-derived or default decision never overwrites an in-scope pin; replace
+// is set for the operator's explicit runtime or model on the request, which
+// moves the conversation and re-pins it.
+func (st routerState) remember(conversation, agent, project string, d router.RouteDecision, replace bool) {
+	if !st.policy.FilePresent() || conversation == "" {
 		return
 	}
-	routerSticky.Put(conversation, agent, router.Pin{RuleID: d.RuleID, Runtime: d.Runtime, Model: d.ModelID})
+	routerSticky.Put(conversation, agent, router.Pin{
+		RuleID: d.RuleID, Runtime: d.Runtime, Model: d.ModelID,
+		Project: project, PolicySHA: st.policy.FileSHA,
+	}, replace)
 }
 
 // ExplainQuery asks what the router would decide for a dispatch, without making

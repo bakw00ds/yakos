@@ -8,16 +8,14 @@ package dispatch
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/bakw00ds/yakos/internal/agentscompose"
-	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/router"
 	"github.com/bakw00ds/yakos/internal/routerpolicy"
 	rt "github.com/bakw00ds/yakos/internal/runtime"
@@ -38,6 +36,11 @@ func setPolicy(t *testing.T, body string) string {
 	}
 	routerPolicyDir = func() string { return dir }
 	return dir
+}
+
+// pinOf reads the pin the current policy file and project would see.
+func pinOf(project, conversation, agent string) (router.Pin, bool) {
+	return routerSticky.Get(conversation, agent, project, routerpolicy.FileSHA(routerPolicyDir()))
 }
 
 type fakeClock struct{ t time.Time }
@@ -231,6 +234,9 @@ func TestRoute_RuleModelNeverCrossesVendors(t *testing.T) {
 
 // An untrusted policy file leaves routing exactly as it was and warns without a path.
 func TestRoute_UntrustedPolicyIsIgnored(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("the group/world-writable file-mode trust check has no Windows semantics")
+	}
 	logbuf := captureRouteLog(t)
 	dir := setPolicy(t, tablePolicy)
 	if err := os.Chmod(routerpolicy.Path(dir), 0o666); err != nil {
@@ -309,10 +315,11 @@ func TestRoute_StickyRuntimeDownIsAnErrorNotASwitch(t *testing.T) {
 func TestRoute_NoStickyWithoutPolicy(t *testing.T) {
 	captureRouteLog(t)
 	resetRouterState(t)
-	if _, err := route(t, routingRoot(t), projectWithYML(t, ""), "plain", func(in *routeInput) { in.ConversationID = "c" }); err != nil {
+	project := projectWithYML(t, "")
+	if _, err := route(t, routingRoot(t), project, "plain", func(in *routeInput) { in.ConversationID = "c" }); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := routerSticky.Get("c", "plain"); ok {
+	if _, ok := pinOf(project, "c", "plain"); ok {
 		t.Fatal("a conversation must not be pinned when no rule is in force")
 	}
 }
@@ -323,7 +330,7 @@ func TestRoute_CooldownSkipsAFailingRuntime(t *testing.T) {
 	captureRouteLog(t)
 	root := routingRoot(t)
 	project := projectWithYML(t, "")
-	resetRouterState(t)
+	setPolicy(t, "# a policy file with no rules still engages the cooldown\n")
 	clk := &fakeClock{t: time.Unix(5_000, 0)}
 	routerCooldown = router.NewCooldown(clk.now)
 
@@ -350,7 +357,7 @@ func TestRoute_CooldownSkipsAFailingRuntime(t *testing.T) {
 func TestRoute_CooldownIsAPreferenceNotABan(t *testing.T) {
 	captureRouteLog(t)
 	root := routingRoot(t)
-	resetRouterState(t)
+	setPolicy(t, "# cooldown needs a policy file\n")
 	for i := 0; i < 3; i++ {
 		noteRun(context.Background(), "claude", 1, nil)
 	}
@@ -439,99 +446,6 @@ func TestRoute_ProjectCanOnlyDisable(t *testing.T) {
 
 // ---- the no-policy differential (behavior neutrality) -----------------------
 
-// p0a is the P0a resolution with no router in it: the chain, the model and the
-// budget ceiling, exactly as routeDispatch did them before the router existed. It
-// returns the decision as a string, or the error text.
-func p0a(t *testing.T, root, project, agent string, in routeInput) (summary, errText string) {
-	t.Helper()
-	roster, err := agentscompose.Compose(root, project)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a, err := resolveAgent(roster, agent, root, project)
-	if err != nil {
-		return "", err.Error()
-	}
-	ci := loadChainInput(a, agent, project, in.RuntimeOverride, in.RuntimeEnvDefault, in.RuntimeFallbackOptIn, false)
-	choice, _, err := chooseRuntime(context.Background(), ci, runtimeProbe)
-	if err != nil {
-		return "", err.Error()
-	}
-	mc, err := resolveModel(choice.Runtime, choice.ChosenBy == RuntimeByFallback, in.ModelOverride, in.EvalRunID, a)
-	if err != nil {
-		return "", err.Error()
-	}
-	if choice.Runtime == "claude" {
-		if c, note := budget.ClampModel(agent, mc.model, budget.Options{}); note != "" {
-			mc.model, mc.explicit = c, true
-		}
-	}
-	return fmt.Sprintf("%s|%s|%s|%s|%s|%v", choice.Runtime, choice.ChosenBy, choice.FallbackFrom, mc.model, mc.chosenBy, mc.explicit), ""
-}
-
-// With no rules, every decision for the roster equals the P0a chain and model,
-// under both YAKOS_IMPL values, probe states, overrides and project files. It
-// stops at the first divergence.
-func TestRoute_NoPolicyEqualsP0a(t *testing.T) {
-	captureRouteLog(t)
-	root := routingRoot(t)
-	var agents []string
-	entries, _ := os.ReadDir(filepath.Join(root, "lib", "agents"))
-	for _, e := range entries {
-		agents = append(agents, strings.TrimSuffix(e.Name(), ".md"))
-	}
-	agents = append(agents, "claude", "codex", "agy", "no-such-agent")
-	projects := []string{"", "default-runtime: codex\n", "per-domain:\n  code-review: agy\n  platform: codex\ndefault-fallback: [claude]\n", "default-runtime: gemini\n"}
-	probes := map[string]func(string) probeResult{
-		"all up":    func(string) probeResult { return probeResult{OK: true} },
-		"agy down":  func(n string) probeResult { return probeResult{OK: n != "agy", Reason: "down"} },
-		"codex out": func(n string) probeResult { return probeResult{OK: n != "codex", Reason: "down"} },
-		"only agy":  func(n string) probeResult { return probeResult{OK: n == "agy", Reason: "down"} },
-	}
-	overrides := []routeInput{
-		{}, {RuntimeOverride: "codex"}, {RuntimeOverride: "auto"}, {RuntimeOverride: "agy", ModelOverride: "balanced"},
-		{ModelOverride: "haiku"}, {RuntimeEnvDefault: "agy"}, {RuntimeFallbackOptIn: []string{"claude"}, RuntimeOverride: "codex"},
-		{EvalRunID: "ev-1"}, {Class: "chat", TaskBytes: 5000, ConversationID: "conv"},
-	}
-	n := 0
-	for _, impl := range []string{"go", "bash"} {
-		t.Setenv("YAKOS_IMPL", impl)
-		for _, yml := range projects {
-			project := projectWithYML(t, yml)
-			for pname, pf := range probes {
-				withProbe(t, pf)
-				for _, agent := range agents {
-					for _, ov := range overrides {
-						want, wantErr := p0a(t, root, project, agent, ov)
-						in := ov
-						in.YakosRoot, in.Project, in.Agent = root, project, agent
-						rr, err := routeDispatch(context.Background(), in)
-						ctxt := fmt.Sprintf("[%q impl=%s probe=%s agent=%s ov=%+v]", yml, impl, pname, agent, ov)
-						switch {
-						case err != nil && err.Error() != wantErr:
-							t.Fatalf("%s diverged:\n want %q / %q\n got  error %q", ctxt, want, wantErr, err)
-						case err == nil && wantErr != "":
-							t.Fatalf("%s diverged: want error %q, got %s/%s", ctxt, wantErr, rr.Runtime, rr.Model)
-						case err == nil:
-							got := fmt.Sprintf("%s|%s|%s|%s|%s|%v", rr.Runtime, rr.RuntimeChosenBy, rr.FallbackFrom, rr.Model, rr.ModelChosenBy, rr.ModelExplicit)
-							if got != want {
-								t.Fatalf("%s diverged:\n want %s\n got  %s", ctxt, want, got)
-							}
-							if rr.Decision.RuleID != "R0" || rr.Decision.PolicySHA != "" {
-								t.Fatalf("%s no policy must mean R0 and no sha: %+v", ctxt, rr.Decision)
-							}
-						}
-						n++
-					}
-				}
-			}
-		}
-	}
-	if n < 1000 {
-		t.Fatalf("the differential ran only %d cases", n)
-	}
-}
-
 // ---- ledger -------------------------------------------------------------------
 
 var hex64 = regexp.MustCompile(`^[0-9a-f]{64}$`)
@@ -590,6 +504,9 @@ func TestRunStream_RequestCarriesTheRoute(t *testing.T) {
 // general-codex still runs codex with -m through the router, and a rule can move
 // an unpinned agent to codex with its own -m.
 func TestRun_PolicyRuleExecsCodexWithTheRuleModel(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("shell stubs")
+	}
 	root := routingRoot(t)
 	bin := t.TempDir()
 	rec := filepath.Join(t.TempDir(), "argv.txt")
@@ -625,11 +542,12 @@ func TestExplain_DecidesWithoutPinningOrLogging(t *testing.T) {
 	root := routingRoot(t)
 	logDir := isolatedLogDir(t)
 	setPolicy(t, "rules:\n  - match: {class: chat}\n    action: {runtime: codex}\n")
-	d, err := Explain(context.Background(), ExplainQuery{YakosRoot: root, Project: projectWithYML(t, ""), Agent: "plain", Class: "chat", ConversationID: "c"})
+	project := projectWithYML(t, "")
+	d, err := Explain(context.Background(), ExplainQuery{YakosRoot: root, Project: project, Agent: "plain", Class: "chat", ConversationID: "c"})
 	if err != nil || d.RuleID != "R1" || d.Runtime != "codex" || d.RouteClass != "chat" {
 		t.Fatalf("got %+v %v", d, err)
 	}
-	if _, ok := routerSticky.Get("c", "plain"); ok {
+	if _, ok := pinOf(project, "c", "plain"); ok {
 		t.Error("explaining must not pin a conversation")
 	}
 	if entries, _ := os.ReadDir(logDir); len(entries) != 0 {
@@ -659,7 +577,8 @@ func TestRun_TaskSizeAndConversationReachTheRouter(t *testing.T) {
 	logDir := isolatedLogDir(t)
 	setPolicy(t, "rules:\n  - match: {task_bytes_gt: 5}\n    action: {runtime: agy}\n")
 	captureRouteLog(t)
-	if _, _, err := Run(context.Background(), Request{AgentName: "bare", Task: "0123456789", Project: t.TempDir(), YakosRoot: root, ConversationID: "conv-run"}); err != nil {
+	project := t.TempDir()
+	if _, _, err := Run(context.Background(), Request{AgentName: "bare", Task: "0123456789", Project: project, YakosRoot: root, ConversationID: "conv-run"}); err != nil {
 		t.Fatal(err)
 	}
 	if got := invoked(t, rec); strings.Join(got, ",") != "agy" {
@@ -667,7 +586,7 @@ func TestRun_TaskSizeAndConversationReachTheRouter(t *testing.T) {
 	}
 	events := readDispatchLog(t, logDir)
 	assertField(t, events[len(events)-1], "route_rule", "R1")
-	if p, ok := routerSticky.Get("conv-run", "bare"); !ok || p.Runtime != "agy" || p.RuleID != "R1" {
+	if p, ok := pinOf(project, "conv-run", "bare"); !ok || p.Runtime != "agy" || p.RuleID != "R1" {
 		t.Errorf("pin = %+v %v", p, ok)
 	}
 }
@@ -675,6 +594,9 @@ func TestRun_TaskSizeAndConversationReachTheRouter(t *testing.T) {
 // Run feeds every finished run to the cooldown: three failing runs of a runtime
 // cool it, through the real Run.
 func TestRun_RunFeedsTheCooldown(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("shell stubs")
+	}
 	root := routingRoot(t)
 	bin := t.TempDir()
 	if err := os.WriteFile(filepath.Join(bin, "codex"), []byte("#!/bin/sh\necho boom >&2\nexit 3\n"), 0o755); err != nil {

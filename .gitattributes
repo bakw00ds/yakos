@@ -69,3 +69,6 @@ cli-go/internal/projectcfg/testdata/*.yml text eol=lf
 cli-go/cmd/yakos/testdata/fixtures/cost/*.golden text eol=lf
 cli-go/cmd/yakos/testdata/fixtures/cost/ledger-*.ndjson text eol=lf
 tests/fixtures/ledger-compat/* text eol=lf
+
+# Frozen routing golden (generated once at base 24f0a6ba); compared byte for byte.
+cli-go/internal/dispatch/testdata/route_p0a_golden.txt text eol=lf

@@ -1,0 +1,51 @@
+package dispatch
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"strings"
+	"testing"
+)
+
+// Generator, run once at base 24f0a6ba (no router in the tree):
+//   P0A_GOLDEN_OUT=/path/route_p0a_golden.txt go test ./internal/dispatch -run TestGenP0aGolden
+func TestGenP0aGolden(t *testing.T) {
+	out := os.Getenv("P0A_GOLDEN_OUT")
+	if out == "" {
+		t.Skip("generator")
+	}
+	captureRouteLog(t)
+	root := routingRoot(t)
+	var b strings.Builder
+	b.WriteString("# Frozen no-policy routing results, generated once at base 24f0a6ba (P0a chain, no router).\n")
+	b.WriteString("# Do not regenerate from the code under test. Inputs: route_matrix_test.go.\n")
+	b.WriteString("# key = p<project>|<probe>|<agent>|o<override>; value = runtime|chosen_by|fallback_from|model|model_chosen_by|model_explicit, or ERR <text>\n")
+	for pi, yml := range matrixProjects {
+		project := projectWithYML(t, yml)
+		for _, probe := range matrixProbeNames() {
+			withProbe(t, matrixProbes[probe])
+			for _, agent := range matrixAgents(t, root) {
+				for oi, ov := range matrixOverrides {
+					rr, err := routeDispatch(context.Background(), routeInput{
+						YakosRoot: root, Project: project, Agent: agent,
+						RuntimeOverride: ov.RuntimeOverride, RuntimeEnvDefault: ov.RuntimeEnvDefault,
+						RuntimeFallbackOptIn: ov.RuntimeFallbackOptIn, ModelOverride: ov.ModelOverride, EvalRunID: ov.EvalRunID,
+					})
+					res := "ERR " + fmt.Sprint(err)
+					if err == nil {
+						res = fmt.Sprintf("%s|%s|%s|%s|%s|%v", rr.Runtime, rr.RuntimeChosenBy, rr.FallbackFrom, rr.Model, rr.ModelChosenBy, rr.ModelExplicit)
+					}
+					res = matrixNorm(res, root, project)
+					if strings.Contains(res, root) || strings.Contains(res, project) || strings.Contains(res, os.TempDir()) {
+						t.Fatalf("path in row: %s", res)
+					}
+					fmt.Fprintf(&b, "%s\t%s\n", matrixKey(pi, probe, agent, oi), res)
+				}
+			}
+		}
+	}
+	if err := os.WriteFile(out, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}

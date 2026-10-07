@@ -715,7 +715,7 @@ func agentForQuery(q RouteQuery) *agentscompose.ComposedAgent {
 func ResolveRuntime(ctx context.Context, q RouteQuery) (RuntimeChoice, error) {
 	agent := agentForQuery(q)
 	in := loadChainInput(agent, q.Agent, q.Project, q.Override, q.EnvDefault, q.FallbackOptIn, false)
-	applyRouter(&in, agent, q.Agent, q.Class, q.TaskBytes, "", nil)
+	applyRouter(&in, agent, q.Agent, q.Class, q.TaskBytes, "", "", nil)
 	choice, _, err := chooseRuntime(ctx, in, runtimeProbe)
 	return choice, err
 }
@@ -728,7 +728,7 @@ func ResolveRuntime(ctx context.Context, q RouteQuery) (RuntimeChoice, error) {
 func PreferredRuntime(q RouteQuery) (RuntimeChoice, error) {
 	agent := agentForQuery(q)
 	in := loadChainInput(agent, q.Agent, q.Project, q.Override, q.EnvDefault, q.FallbackOptIn, false)
-	applyRouter(&in, agent, q.Agent, q.Class, q.TaskBytes, "", nil)
+	applyRouter(&in, agent, q.Agent, q.Class, q.TaskBytes, "", "", nil)
 	choice, _, err := chooseRuntime(context.Background(), in, nil)
 	return choice, err
 }
@@ -945,7 +945,7 @@ func routeDispatchAt(ctx context.Context, in routeInput, explain bool) (*routed,
 	if explain {
 		warnTo = io.Discard
 	}
-	st := applyRouter(&ci, agent, in.Agent, in.Class, in.TaskBytes, in.ConversationID, warnTo)
+	st := applyRouter(&ci, agent, in.Agent, in.Class, in.TaskBytes, in.Project, in.ConversationID, warnTo)
 	choice, notes, err := chooseRuntime(ctx, ci, runtimeProbe)
 	for _, n := range notes {
 		fmt.Fprintf(warnTo, "yakos dispatch: %s\n", n)
@@ -985,7 +985,8 @@ func routeDispatchAt(ctx context.Context, in routeInput, explain bool) (*routed,
 
 	decision := st.decision(ci, choice, mc, fromPolicy)
 	if !explain {
-		st.remember(in.ConversationID, in.Agent, decision)
+		explicit := in.ModelOverride != "" || choice.ChosenBy == RuntimeByOverride || choice.ChosenBy == RuntimeByAgentName
+		st.remember(in.ConversationID, in.Agent, in.Project, decision, explicit)
 	}
 
 	return &routed{

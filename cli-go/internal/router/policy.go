@@ -69,6 +69,10 @@ type Policy struct {
 	// SHA is the hex SHA-256 of the policy file, "" when no rule was read. It is
 	// what a decision cites as policy_sha.
 	SHA string
+	// FileSHA is the hex SHA-256 of the trusted policy file whatever it holds,
+	// "" when there is no trusted file (missing, untrusted, unreadable). A file
+	// that is present is what engages the cooldown and the sticky pins.
+	FileSHA string
 	// Warnings are the notices to show the operator: an ignored file, a dropped
 	// rule. They never contain a path.
 	Warnings []string
@@ -76,6 +80,11 @@ type Policy struct {
 
 // Active reports whether any rule is in force.
 func (p Policy) Active() bool { return len(p.Rules) > 0 }
+
+// FilePresent reports whether a trusted policy file was read, with or without
+// rules. The cooldown and the conversation pins only engage then; with no file
+// the router changes nothing.
+func (p Policy) FilePresent() bool { return p.FileSHA != "" }
 
 // ruleSpec is the YAML shape of one rule.
 type ruleSpec struct {
@@ -116,6 +125,7 @@ func loadPolicyWith(stateDir string, load func(string) (routerpolicy.File, error
 // BuildPolicy validates the rules of an already-loaded policy file.
 func BuildPolicy(f routerpolicy.File) Policy {
 	var p Policy
+	p.FileSHA = f.SHA
 	node := f.Rules
 	if node.Kind == 0 || (node.Kind == yaml.ScalarNode && node.Tag == "!!null") {
 		return p

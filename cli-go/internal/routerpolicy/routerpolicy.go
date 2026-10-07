@@ -157,6 +157,18 @@ func Load(stateDir string) (File, error) {
 	return p, nil
 }
 
+// FileSHA returns the SHA of the one trusted policy file in stateDir, "" when
+// it is missing, untrusted or unreadable. It is the single definition of
+// policy_sha: the router's decision gets it from Load (File.SHA) and the
+// env-alias stamp reads it through this helper, so the two never differ.
+func FileSHA(stateDir string) string {
+	f, err := Load(stateDir)
+	if err != nil {
+		return ""
+	}
+	return f.SHA
+}
+
 // AllowsUnsandboxed reports whether the trusted policy in stateDir lists
 // runtimeName in allow_unsandboxed_runtimes. Any error loading the policy is
 // returned alongside false so the caller can say why bypass is not active.

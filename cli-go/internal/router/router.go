@@ -10,7 +10,7 @@
 // to learn which policy rule applies, which runtimes are cooling down and what a
 // conversation is already pinned to. With no rules in the policy file the router
 // changes nothing: every decision is R0 and equals the P0a chain byte for byte
-// (TestRoute_NoPolicyEqualsP0a in internal/dispatch).
+// (TestRoute_NoPolicyMatchesFrozenP0aGolden in internal/dispatch, against a table frozen at the pre-router base).
 //
 // Rule ids: R0 is the default chain, R1..R6 are the policy file's rules in file
 // order (the first that matches wins).
@@ -70,11 +70,16 @@ func Classify(in Input) string {
 	return ClassDefault
 }
 
-// Pin is what a conversation was routed to on its first turn.
+// Pin is what a conversation was routed to on its first turn, under which
+// project and policy file. A pin made under another project root or another
+// policy_sha is not this request's pin (a conversation id is client-supplied
+// and not unique across projects, and a policy edit drops the old routing).
 type Pin struct {
-	RuleID  string // the rule the first turn was routed under, for the ledger
-	Runtime string
-	Model   string
+	RuleID    string // the rule the first turn was routed under, for the ledger
+	Runtime   string
+	Model     string
+	Project   string // project root the pin was made under
+	PolicySHA string // sha of the policy file the pin was made under
 }
 
 // maxSticky bounds the table; past it the oldest half is forgotten, which only
@@ -83,8 +88,8 @@ const maxSticky = 4096
 
 // Sticky remembers, per conversation and agent, the runtime and model the first
 // turn was routed to, so later turns never move on their own. A switch is the
-// operator's act (an explicit runtime or model on the request), never the
-// router's. In memory only.
+// operator's act (an explicit runtime or model on the request, which re-pins),
+// never the router's. In memory only.
 type Sticky struct {
 	mu    sync.Mutex
 	pins  map[string]Pin
@@ -96,28 +101,38 @@ func NewSticky() *Sticky { return &Sticky{pins: map[string]Pin{}} }
 
 func stickyKey(conversation, agent string) string { return conversation + "\x00" + agent }
 
-// Get returns the pin for the conversation and agent. An empty conversation id
-// has none.
-func (s *Sticky) Get(conversation, agent string) (Pin, bool) {
+// Get returns the pin for the conversation and agent made under this project
+// and policy sha. An empty conversation id has none, and a pin made under a
+// different project root or policy sha is ignored.
+func (s *Sticky) Get(conversation, agent, project, policySHA string) (Pin, bool) {
 	if conversation == "" {
 		return Pin{}, false
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	p, ok := s.pins[stickyKey(conversation, agent)]
-	return p, ok
+	if !ok || p.Project != project || p.PolicySHA != policySHA {
+		return Pin{}, false
+	}
+	return p, true
 }
 
-// Put records the first routing of a conversation. A later Put for the same
-// conversation and agent is ignored: the first decision stands.
-func (s *Sticky) Put(conversation, agent string, p Pin) {
+// Put records the routing of a conversation. An existing pin made under the
+// same project and policy sha stands (the first decision wins) unless replace
+// is set, which is the operator's explicit runtime or model on the request. A
+// pin made under another project or policy sha is always replaced.
+func (s *Sticky) Put(conversation, agent string, p Pin, replace bool) {
 	if conversation == "" {
 		return
 	}
 	k := stickyKey(conversation, agent)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, ok := s.pins[k]; ok {
+	if old, ok := s.pins[k]; ok {
+		if !replace && old.Project == p.Project && old.PolicySHA == p.PolicySHA {
+			return
+		}
+		s.pins[k] = p
 		return
 	}
 	if len(s.pins) >= maxSticky {
