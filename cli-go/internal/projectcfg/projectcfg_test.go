@@ -332,3 +332,19 @@ func TestParse_NeverPathsAreBounded(t *testing.T) {
 		}
 	}
 }
+
+// N1: a long bracket expression is a CPU sink even in a short glob, and the
+// total length is bounded.
+func TestNeverPathSimpleEnough_BracketAndLengthBounds(t *testing.T) {
+	if NeverPathSimpleEnough("*[!" + strings.Repeat("c", 30) + "]x") {
+		t.Error("30-char bracket accepted")
+	}
+	if NeverPathSimpleEnough("**/" + strings.Repeat("a", 130)) {
+		t.Error("130-byte glob accepted")
+	}
+	for _, ok := range []string{"**/.env*", "*[!b]x", "secrets/[a-z]*.json", "*[abc"} {
+		if !NeverPathSimpleEnough(ok) {
+			t.Errorf("%q rejected", ok)
+		}
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/hooks/secretscan"
+	"github.com/bakw00ds/yakos/internal/projectcfg"
 )
 
 func TestSensitive_NameForms(t *testing.T) {
@@ -149,40 +150,108 @@ func TestSensitive_ResultIsMemoisedByContent(t *testing.T) {
 	}
 }
 
-// 1 MiB of clean, token-dense text with the maximum 32 project globs finishes
-// well inside the 2 s timeout and is not classified sensitive.
-func TestSensitive_BenchmarkCleanMiBWith32Globs(t *testing.T) {
+// benchGlobs is the largest legal project list: 32 globs, half of them shaped
+// so the matcher (not the literal prefilter) runs on most tokens.
+func benchGlobs() []string {
 	var globs []string
 	for i := 0; i < 16; i++ {
 		globs = append(globs, fmt.Sprintf("*[!b][!b][!b]x%d*[!c]?[!d]b", i))
-		// No literal to reject on (names are lower-cased, so no token ends in a plus): the matcher runs on most tokens.
+		// No literal to reject on (names are lower-cased, so no token ends in a plus).
 		globs = append(globs, "*a*[!b]*?[!d]*[+]")
 	}
+	return globs
+}
+
+// 1 MiB of clean, token-dense text with the maximum 32 project globs is not
+// classified sensitive. The outcome is asserted, not wall time: the race
+// detector and shared runners make a clock assertion against the production
+// timeout flaky (it failed CI at 2.0 s). The number lives in BenchmarkSensitive*.
+func TestSensitive_CleanMiBWith32GlobsIsDefault(t *testing.T) {
+	old := scanTimeout
+	scanTimeout = time.Minute
+	t.Cleanup(func() { scanTimeout = old; reasonCache.reset() })
 	text := uniqueWords(1<<20, "internal/service/handler_%d_test.go refactor parser %d and wire config;")
 	reasonCache.reset()
-	start := time.Now()
-	reason := SensitiveReason(Input{Material: []string{text}, NeverPaths: globs})
-	d := time.Since(start)
-	t.Logf("1 MiB clean text, 32 globs: %v reason=%q", d, reason)
-	if reason != "" {
+	if reason := SensitiveReason(Input{Material: []string{text}, NeverPaths: benchGlobs()}); reason != "" {
 		t.Fatalf("reason = %q", reason)
 	}
-	if d > 2*time.Second {
-		t.Errorf("took %v", d)
+}
+
+func BenchmarkSensitiveCleanMiBWith32Globs(b *testing.B) {
+	text := uniqueWords(1<<20, "internal/service/handler_%d_test.go refactor parser %d and wire config;")
+	in := Input{Material: []string{text}, NeverPaths: benchGlobs()}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		reasonCache.reset()
+		if r := SensitiveReason(in); r != "" {
+			b.Fatalf("reason = %q", r)
+		}
 	}
-	// The crafted worst case from the security review: 64 globs of chained
-	// classes are dropped, so the scan is the defaults' cost.
-	var evil []string
+}
+
+// The crafted shapes from the security reviews. Round 1: 64 globs of 60 chained
+// classes. Round 2 (N1): 32 globs `*[!` + 240 x c + `]?[+]`, four metacharacters
+// and 248 bytes, which passed the old count bound and cost ~170 ms per decorated
+// token. Both are now dropped by the bounds, so the scan costs the defaults only
+// and the planted credential file is still found.
+func TestSensitive_CraftedGlobsAreDroppedAndFast(t *testing.T) {
+	var evil1, evil2 []string
 	for i := 0; i < 64; i++ {
-		evil = append(evil, "*"+strings.Repeat("[!b]", 60)+"b")
+		evil1 = append(evil1, "*"+strings.Repeat("[!b]", 60)+"b")
 	}
-	dense := uniqueWords(1<<20, strings.Repeat("a", 900)+"%d%d ")
+	for i := 0; i < 32; i++ {
+		evil2 = append(evil2, "*[!"+strings.Repeat("c", 240)+"]?[+]")
+	}
+	for name, evil := range map[string][]string{"chained": evil1, "long-bracket": evil2} {
+		for _, g := range evil {
+			if projectcfg.NeverPathSimpleEnough(g) {
+				t.Fatalf("%s glob accepted: %.30q", name, g)
+			}
+		}
+		dense := uniqueWords(1<<20, strings.Repeat("a", 900)+"%d%d ")
+		reasonCache.reset()
+		start := time.Now()
+		r := SensitiveReason(Input{Material: []string{dense}, NeverPaths: evil})
+		d := time.Since(start)
+		t.Logf("%s: %v reason=%q", name, d, r)
+		// Outcome is exact; the clock bound is 10x the local cost (a hang, not a tuning).
+		if r != "" && r != ReasonTimeout {
+			t.Errorf("%s: reason %q", name, r)
+		}
+		if r == "" && d > 2*time.Second {
+			t.Errorf("%s took %v", name, d)
+		}
+		reasonCache.reset()
+		if got := SensitiveReason(Input{Material: []string{dense + " cat ~/.netrc"}, NeverPaths: evil}); got != ReasonNeverPath && got != ReasonTimeout {
+			t.Errorf("%s: planted netrc gave %q", name, got)
+		}
+	}
+}
+
+// The deadline is checked on every token, not every few.
+func TestSensitive_DeadlineIsCheckedPerToken(t *testing.T) {
+	old := scanTimeout
+	scanTimeout = -time.Second
+	t.Cleanup(func() { scanTimeout = old; reasonCache.reset() })
 	reasonCache.reset()
-	start = time.Now()
-	r2 := SensitiveReason(Input{Material: []string{dense}, NeverPaths: evil})
-	t.Logf("1 MiB dense tokens, 64 crafted globs: %v reason=%q", time.Since(start), r2)
-	if time.Since(start) > 2500*time.Millisecond {
-		t.Errorf("crafted globs took %v", time.Since(start))
+	if got := chunkNamesNeverPath("one two", compileNever(nil), time.Now().Add(-time.Second)); got != ReasonTimeout {
+		t.Errorf("2 tokens past the deadline = %q", got)
+	}
+}
+
+// N2: a PEM header with a non-breaking (or other Unicode) space is still a key.
+func TestSensitive_PEMHeaderWithUnicodeSpace(t *testing.T) {
+	for _, sp := range []string{"\u00a0", "\u2003", "\u3000"} {
+		for _, where := range []string{"Material", "SecretOnly"} {
+			text := "-----BEGIN RSA" + sp + "PRIVATE KEY-----"
+			in := Input{Material: []string{text}}
+			if where == "SecretOnly" {
+				in = Input{SecretOnly: []string{text}}
+			}
+			if r := SensitiveReason(in); r != ReasonSecret {
+				t.Errorf("%U in %s: %q", []rune(sp)[0], where, r)
+			}
+		}
 	}
 }
 

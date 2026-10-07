@@ -445,7 +445,7 @@ A project adds its own paths in `.yakos.yml`:
 `router: {never_paths: ["internal/billing/*"]}`. It can only add: the built-in
 patterns and paths are merged in on every scan, and no project key removes one.
 At most 32 entries are read, and a glob with more than 8 wildcard characters or
-more than two `**` is dropped with a warning (a scan-cost bound). One request
+more than two `**`, a bracket expression over 16 characters, or a length over 128 bytes is dropped with a warning (a scan-cost bound). One request
 is scanned once: the result is remembered by content hash for 30 seconds, so a
 chat pre-check and the dispatch after it share it.
 Looser, higher-false-positive patterns (entropy, generic `password=`) are not

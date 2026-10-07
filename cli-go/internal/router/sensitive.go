@@ -256,21 +256,34 @@ func mergedNeverPaths(extra []string) []string {
 // not from a model reading it.
 const invisible = "\u200b\u200c\u200d\u2060\ufeff\u00ad"
 
+// stripInvisible drops the invisible format characters and maps every non-ASCII
+// space (NBSP, ideographic, line separator) to a plain space, so a PEM header
+// or a token split by one is seen as the model reads it.
 func stripInvisible(s string) string {
-	if !strings.ContainsAny(s, invisible) {
+	plain := true
+	for _, r := range s {
+		if r >= 0x80 && (unicode.IsSpace(r) || strings.ContainsRune(invisible, r)) {
+			plain = false
+			break
+		}
+	}
+	if plain {
 		return s
 	}
 	return strings.Map(func(r rune) rune {
-		if strings.ContainsRune(invisible, r) {
+		if r >= 0x80 && strings.ContainsRune(invisible, r) {
 			return -1
+		}
+		if r >= 0x80 && unicode.IsSpace(r) {
+			return ' '
 		}
 		return r
 	}, s)
 }
 
 // scanText checks one text. names is false for the agent's own prompt: secret
-// patterns only. The deadline is checked before every chunk and every few
-// tokens inside one, so a text cannot run past it by a whole chunk.
+// patterns only. The deadline is checked before every chunk and every
+// token inside one, so a text cannot run past it by a whole chunk.
 func scanText(s string, never *neverSet, deadline time.Time, names bool) string {
 	s = stripInvisible(s)
 	for start := 0; start < len(s); start += scanChunk {
@@ -320,17 +333,13 @@ const (
 	decorRight = ".!?*_~&+-^%$#@"
 )
 
-// checkEvery is how many tokens pass between deadline checks.
-const checkEvery = 64
-
 // chunkNamesNeverPath reports ReasonNeverPath when any token of text is a path
 // under a never-path pattern, ReasonTimeout when the deadline passes first, ""
 // otherwise. Every token is tried, so a prose mention of ".env" counts:
 // over-triggering only narrows the chain to the primary runtime.
 func chunkNamesNeverPath(text string, never *neverSet, deadline time.Time) string {
-	n := 0
 	for _, tok := range strings.FieldsFunc(text, isTokenSep) {
-		if n++; n%checkEvery == 0 && !time.Now().Before(deadline) {
+		if !time.Now().Before(deadline) {
 			return ReasonTimeout
 		}
 		if tokenNamesNeverPath(tok, never) {

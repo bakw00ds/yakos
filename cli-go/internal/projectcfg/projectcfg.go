@@ -117,19 +117,36 @@ const maxDisables = 64
 const MaxNeverPaths = 32
 
 // maxGlobMeta and maxGlobStars bound the work one never_paths glob can cost a
-// match: at most 6 of `*?[` (plus the stars of a `**`) and two `**` runs. A glob of 64 chained `[!b]`
-// classes is a CPU sink, not a credential name.
+// match: at most 8 of `*?[` in total (maxGlobMeta, plus maxGlobStars for the
+// stars of `**` runs), at most two `**` runs, a glob of at most maxGlobLen bytes
+// and no bracket expression longer than maxBracketLen. A glob of 64 chained
+// `[!b]` classes, or one long class, is a CPU sink, not a credential name.
 const (
-	maxGlobMeta  = 6
-	maxGlobStars = 2
+	maxGlobMeta   = 6
+	maxGlobStars  = 2
+	maxGlobLen    = 128
+	maxBracketLen = 16
 )
 
 // NeverPathSimpleEnough reports whether a never_paths glob is cheap enough to
 // match against every token of a request. The router applies the same bound to
 // any project glob it is handed.
 func NeverPathSimpleEnough(glob string) bool {
-	if len(glob) > 256 {
+	if len(glob) > maxGlobLen {
 		return false
+	}
+	for i := 0; i < len(glob); i++ {
+		if glob[i] != '[' {
+			continue
+		}
+		j := i + 1
+		for j < len(glob) && glob[j] != ']' {
+			j++
+		}
+		if j-i > maxBracketLen {
+			return false
+		}
+		i = j
 	}
 	return strings.Count(glob, "**") <= maxGlobStars && strings.Count(glob, "*")+strings.Count(glob, "?")+strings.Count(glob, "[") <= maxGlobMeta+maxGlobStars
 }
