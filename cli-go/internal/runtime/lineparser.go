@@ -52,7 +52,10 @@ import (
 	"github.com/bakw00ds/yakos/internal/cost"
 )
 
-// MaxStreamLineBytes is the hard per-line byte cap. The dispatch layer's
+// MaxStreamLineBytes is the hard per-line byte cap. It applies to every
+// runtime's lines, claude's included (K-144 lowered it from 2 MiB to 1 MiB for
+// all of them): a claude line over the cap is dropped whole and counted, like
+// a codex or agy one. The dispatch layer's
 // shared stdout reader enforces the same cap before a line reaches a parser
 // (dispatch.maxStreamLineBytes is defined in terms of this constant so the two
 // can never drift); parsers re-check it so a caller that feeds a whole
@@ -246,7 +249,8 @@ type ParseResult struct {
 	// LinesSkipped counts the lines of a structured stream that were not a
 	// recognised event: malformed or truncated JSON, an event type this parser
 	// does not know (a newer harness), or stray prose. They are skipped, never
-	// fatal; a consumer surfaces the count as a warning.
+	// fatal; a consumer surfaces the count as a warning. A session id dropped
+	// for failing the identity alphabet is counted here too.
 	LinesSkipped int
 
 	// PlainText is true when the stream never produced a recognised event, so
@@ -533,6 +537,53 @@ func clampTokens(n int64) int64 {
 		return maxTokenCount
 	}
 	return n
+}
+
+// maxTokenTotal bounds a running total of token counts. Each addend is at most
+// maxTokenCount (2^40), so a saturating add of two bounded values cannot wrap.
+const maxTokenTotal = int64(1) << 60
+
+// addTokens adds a clamped per-event count to a running total and saturates at
+// maxTokenTotal, so no sum of any number of lines can wrap negative.
+func addTokens(total, n int64) int64 {
+	n = clampTokens(n)
+	if total < 0 {
+		total = 0
+	}
+	if total >= maxTokenTotal-n {
+		return maxTokenTotal
+	}
+	return total + n
+}
+
+// maxDurationMs bounds a harness-reported duration (one day) so the value that
+// reaches the ledger is always finite and cannot overflow a latency sum.
+const maxDurationMs = int64(24 * 60 * 60 * 1000)
+
+// clampDurationMs converts a reported duration in seconds to milliseconds,
+// mapping NaN, negative and non-finite values to 0 and capping the rest.
+func clampDurationMs(sec float64) int64 {
+	if !(sec > 0) { // also false for NaN
+		return 0
+	}
+	if sec >= float64(maxDurationMs)/1000 { // also true for +Inf
+		return maxDurationMs
+	}
+	return int64(sec * 1000)
+}
+
+// cleanHarnessID returns id when it is a safe identity token (the alphabet
+// ValidSessionID enforces), else "" and false. An id from a harness is data
+// from outside: it can later reach an argv or a JSON-RPC result.
+func cleanHarnessID(id string) (string, bool) {
+	id = stripNUL(id)
+	if id == "" {
+		return "", true
+	}
+	if !ValidSessionID(id) {
+		return "", false
+	}
+	return id, true
 }
 
 // capThinking bounds a thinking payload at the same 64 KiB the streaming

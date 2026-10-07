@@ -41,6 +41,7 @@ type codexLineParser struct {
 	plain      plainBuffer
 	structured bool
 	dropped    int // lines dropped for length
+	badIDs     int // harness ids dropped for failing the identity alphabet
 	skipped    int // lines of a structured stream that were not a recognised event
 
 	threadID  string
@@ -174,7 +175,10 @@ func (p *codexLineParser) Feed(line []byte) []NativeEvent {
 
 	switch ev.Type {
 	case "thread.started":
-		if id := stripNUL(ev.ThreadID); id != "" {
+		id, ok := cleanHarnessID(ev.ThreadID)
+		if !ok {
+			p.badIDs++
+		} else if id != "" {
 			p.threadID = id
 			add(NativeEvent{Kind: EventSession, SessionID: id})
 		}
@@ -192,10 +196,10 @@ func (p *codexLineParser) Feed(line []byte) []NativeEvent {
 		var cu codexUsage
 		_ = json.Unmarshal(ev.Usage, &cu)
 		turn := cu.normalize()
-		p.usage.InputTokens += turn.InputTokens
-		p.usage.OutputTokens += turn.OutputTokens
-		p.usage.CacheRead += turn.CacheRead
-		p.usage.CacheCreation += turn.CacheCreation
+		p.usage.InputTokens = addTokens(p.usage.InputTokens, turn.InputTokens)
+		p.usage.OutputTokens = addTokens(p.usage.OutputTokens, turn.OutputTokens)
+		p.usage.CacheRead = addTokens(p.usage.CacheRead, turn.CacheRead)
+		p.usage.CacheCreation = addTokens(p.usage.CacheCreation, turn.CacheCreation)
 		p.completed = true
 		add(NativeEvent{Kind: EventResult, Usage: turn, SessionID: p.threadID})
 
@@ -412,7 +416,7 @@ func (p *codexLineParser) Finish() ParseResult {
 	pr.Text = chosen.text()
 	pr.TextAll = pr.Text
 	pr.noteTruncation(chosen.truncated, chosen.truncated, p.dropped)
-	pr.LinesSkipped = p.skipped
+	pr.LinesSkipped = p.skipped + p.badIDs
 	pr.PlainText = !p.structured
 	switch {
 	case p.failedMsg != "":

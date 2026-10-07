@@ -650,6 +650,10 @@ func execWithStreaming(
 		ModelResolved:   req.ModelResolved,
 		RuntimeChosenBy: req.RuntimeChosenBy,
 		FallbackFrom:    req.FallbackFrom,
+		RouteRule:       req.RouteRule,
+		RouteReason:     req.RouteReason,
+		RouteClass:      req.RouteClass,
+		PolicySHA:       req.PolicySHA,
 	}
 	// K-135 typed output. A buffered runtime's parse is authoritative; for claude
 	// the streamed text is what the deltas delivered.

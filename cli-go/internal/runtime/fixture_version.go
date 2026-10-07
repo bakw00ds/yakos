@@ -15,10 +15,16 @@ var RecordedVersions = map[string]string{
 	"agy":   "1.3.1",
 }
 
-var reVersion = regexp.MustCompile(`\b\d+\.\d+\.\d+(?:\.\d+)?\b`)
+// reVersion finds a version with an optional leading "v" and an optional
+// prerelease suffix ("v1.4.0", "0.154.0-beta.1"). The version itself is group 1
+// (the "v" is dropped); the lead-in group stands in for a word boundary, which
+// would not fall between "v" and the first digit.
+var reVersion = regexp.MustCompile(`(?:^|[^0-9A-Za-z.])v?(\d+\.\d+\.\d+(?:\.\d+)?(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?)`)
 
 // ParseVersion extracts the version number from a `--version` output
-// ("codex-cli 0.154.0", "1.3.1"). It returns "" when none is present. Only the
+// ("codex-cli 0.154.0", "1.3.1", "v1.4.0"). A leading "v" is dropped and a
+// prerelease suffix is kept, so VersionSkew reports "0.154.0-beta.1" as a
+// difference from "0.154.0". It returns "" when none is present. Only the
 // first line is read and it is bounded, since the output is untrusted.
 func ParseVersion(out string) string {
 	if len(out) > 512 {
@@ -30,7 +36,10 @@ func ParseVersion(out string) string {
 			break
 		}
 	}
-	return reVersion.FindString(out)
+	if m := reVersion.FindStringSubmatch(out); m != nil {
+		return m[1]
+	}
+	return ""
 }
 
 // VersionSkew reports the version a harness was recorded with and whether the
