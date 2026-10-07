@@ -1162,9 +1162,14 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			resumeID = ch.transcripts.NativeSession(conversationID, "claude", capturedOperatorID)
 		}
 
+		// Knowledge pack and skill tail (K-149): non-claude runtimes only; claude
+		// loads the rules natively and its argv stays as it was.
+		knowledgeBlock, dispatchTask := ch.nonClaudeTurn(runtimeName, conversationID, capturedOperatorID, dispReq.Agent, dispReq.Task)
+
 		params := dispatch.Params{
-			Agent: dispReq.Agent,
-			Task:  dispReq.Task,
+			Agent:     dispReq.Agent,
+			Task:      dispatchTask,
+			Knowledge: knowledgeBlock,
 			// The request's own runtime ("" for auto) and model, not the values
 			// resolved above for validation: the dispatcher resolves both again
 			// against the runtime it actually picks, so an alias follows a
