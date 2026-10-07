@@ -76,6 +76,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/bakw00ds/yakos/internal/agentscompose"
 )
 
 // ErrDispatchUnavailable is returned by realDispatch/realJudge when
@@ -592,16 +594,26 @@ func findAgent(yakosRoot, id, project string) (string, error) {
 	return "", fmt.Errorf("agent %q not found (searched: %v)", id, dirs)
 }
 
+// agentReader reads agent files for the router. Every read goes through
+// agentscompose's hardened reader (symlinks only into lib/agents or the
+// project's .claude/agents, regular files, 4 MiB cap), the one reader Compose
+// uses, so a cloned repository's link cannot make a lint or a promote read or
+// rewrite a file outside the agent directories. The zero value reads with no
+// roots: it follows no link out of its own directory.
+type agentReader struct{ yakosRoot, project string }
+
+func (ar agentReader) read(path string) ([]byte, error) {
+	return agentscompose.ReadAgentFile(ar.yakosRoot, ar.project, path)
+}
+
 // readFrontmatterField reads a specific key from a YAML frontmatter block.
 // Returns the trimmed value, or "" if not found.
-func readFrontmatterField(path, field string) (string, error) {
-	f, err := os.Open(path)
+func readFrontmatterField(ar agentReader, path, field string) (string, error) {
+	data, err := ar.read(path)
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = f.Close() }()
-
-	scanner := bufio.NewScanner(f)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
 	lineNo := 0
 	inFM := false
 	prefix := field + ":"
@@ -634,15 +646,15 @@ func readFrontmatterField(path, field string) (string, error) {
 // → model → "sonnet" default. Mirrors bash:
 //
 //	current_model="$(_mr_agent_model_policy ...)" || "$(_mr_agent_model ...)" || "sonnet"
-func agentCurrentModel(agentFile string) (string, error) {
-	policy, err := readFrontmatterField(agentFile, "model-policy")
+func agentCurrentModel(ar agentReader, agentFile string) (string, error) {
+	policy, err := readFrontmatterField(ar, agentFile, "model-policy")
 	if err != nil {
 		return "", err
 	}
 	if policy != "" {
 		return policy, nil
 	}
-	model, err := readFrontmatterField(agentFile, "model")
+	model, err := readFrontmatterField(ar, agentFile, "model")
 	if err != nil {
 		return "", err
 	}
@@ -653,8 +665,8 @@ func agentCurrentModel(agentFile string) (string, error) {
 }
 
 // agentDomain returns the domain: frontmatter field, or "" if not set.
-func agentDomain(agentFile string) string {
-	v, _ := readFrontmatterField(agentFile, "domain")
+func agentDomain(ar agentReader, agentFile string) string {
+	v, _ := readFrontmatterField(ar, agentFile, "domain")
 	return v
 }
 
@@ -1361,11 +1373,12 @@ func runEval(cfg Config) (Result, error) {
 		return Result{}, fmt.Errorf("model-routing eval: %w", err)
 	}
 
-	currentModel, err := agentCurrentModel(agentFile)
+	ar := agentReader{cfg.YakosRoot, cfg.Project}
+	currentModel, err := agentCurrentModel(ar, agentFile)
 	if err != nil {
 		return Result{}, fmt.Errorf("model-routing eval: read model from %s: %w", agentFile, err)
 	}
-	domain := agentDomain(agentFile)
+	domain := agentDomain(ar, agentFile)
 
 	// Resolve judge.
 	judge, judgeNote := resolveJudge(cfg.Judge, domain, cfg.AgentID)
@@ -2349,12 +2362,17 @@ func runPromote(cfg Config) (Result, error) {
 	}
 	tsSafe := cfg.Now.UTC().Format("20060102T150405Z")
 	backupFile := filepath.Join(cfg.BackupsDir, cfg.AgentID+"-"+tsSafe+".md")
-	if err := copyFile(agentFile, backupFile); err != nil {
+	ar := agentReader{cfg.YakosRoot, cfg.Project}
+	original, err := ar.read(agentFile)
+	if err != nil {
+		return Result{}, fmt.Errorf("model-routing promote: read agent: %w", err)
+	}
+	if err := os.WriteFile(backupFile, original, 0644); err != nil { //nolint:gosec
 		return Result{}, fmt.Errorf("model-routing promote: backup: %w", err)
 	}
 
 	// 5. Atomic frontmatter rewrite.
-	if err := rewriteModelFrontmatter(agentFile, suggestedModel); err != nil {
+	if err := ar.rewriteModelFrontmatter(agentFile, suggestedModel); err != nil {
 		return Result{}, fmt.Errorf("model-routing promote: rewrite frontmatter: %w", err)
 	}
 
@@ -2372,7 +2390,7 @@ func runPromote(cfg Config) (Result, error) {
 		}
 		if err := cfg.ValidateFn(validateTarget); err != nil {
 			// Restore from backup.
-			_ = copyFile(backupFile, agentFile)
+			_ = os.WriteFile(agentFile, original, 0644) //nolint:gosec
 			return Result{}, fmt.Errorf(
 				"model-routing promote: validation failed after rewrite; original restored from %s",
 				backupFile,
@@ -2459,8 +2477,8 @@ func latestCandidateFor(path, agentID string) (*candidateRecord, error) {
 }
 
 // rewriteModelFrontmatter atomically rewrites the model: field in YAML frontmatter.
-func rewriteModelFrontmatter(path, newModel string) error {
-	data, err := os.ReadFile(path)
+func (ar agentReader) rewriteModelFrontmatter(path, newModel string) error {
+	data, err := ar.read(path)
 	if err != nil {
 		return err
 	}
@@ -2516,15 +2534,6 @@ func stripCandidate(path, agentID string) error {
 		return err
 	}
 	return os.Rename(tmp, path)
-}
-
-// copyFile copies src to dst.
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0644) //nolint:gosec
 }
 
 // currentUser returns the operating system username (or "unknown").

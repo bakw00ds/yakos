@@ -18,6 +18,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"time"
 )
 
@@ -280,7 +282,7 @@ func TestReadFrontmatterField(t *testing.T) {
 		{"missing", ""},
 	}
 	for _, tc := range cases {
-		got, err := readFrontmatterField(path, tc.field)
+		got, err := readFrontmatterField(agentReader{}, path, tc.field)
 		if err != nil {
 			t.Errorf("readFrontmatterField(%q): %v", tc.field, err)
 		}
@@ -294,7 +296,7 @@ func TestReadFrontmatterField_NoFrontmatter(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "agent.md")
 	_ = os.WriteFile(path, []byte("# No frontmatter\n\nBody text."), 0644)
-	got, err := readFrontmatterField(path, "model")
+	got, err := readFrontmatterField(agentReader{}, path, "model")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -309,7 +311,7 @@ func TestReadFrontmatterField_ModelPolicy(t *testing.T) {
 	content := "---\nmodel: sonnet\nmodel-policy: haiku\n---\n\n# Agent\n"
 	_ = os.WriteFile(path, []byte(content), 0644)
 
-	policy, _ := readFrontmatterField(path, "model-policy")
+	policy, _ := readFrontmatterField(agentReader{}, path, "model-policy")
 	if policy != "haiku" {
 		t.Errorf("model-policy = %q; want haiku", policy)
 	}
@@ -322,7 +324,7 @@ func TestAgentCurrentModel_PolicyPreference(t *testing.T) {
 	content := "---\nmodel: opus\nmodel-policy: haiku\n---\n# Agent\n"
 	_ = os.WriteFile(path, []byte(content), 0644)
 
-	got, err := agentCurrentModel(path)
+	got, err := agentCurrentModel(agentReader{}, path)
 	if err != nil {
 		t.Fatalf("agentCurrentModel: %v", err)
 	}
@@ -337,7 +339,7 @@ func TestAgentCurrentModel_DefaultSonnet(t *testing.T) {
 	content := "---\ndomain: backend\n---\n# Agent\n"
 	_ = os.WriteFile(path, []byte(content), 0644)
 
-	got, err := agentCurrentModel(path)
+	got, err := agentCurrentModel(agentReader{}, path)
 	if err != nil {
 		t.Fatalf("agentCurrentModel: %v", err)
 	}
@@ -1351,7 +1353,7 @@ func TestRewriteModelFrontmatter(t *testing.T) {
 	content := "---\nmodel: opus\ndomain: backend\n---\n\n# Agent\n\nBody.\n"
 	_ = os.WriteFile(path, []byte(content), 0644)
 
-	if err := rewriteModelFrontmatter(path, "haiku"); err != nil {
+	if err := (agentReader{}).rewriteModelFrontmatter(path, "haiku"); err != nil {
 		t.Fatalf("rewriteModelFrontmatter: %v", err)
 	}
 
@@ -1431,5 +1433,53 @@ func TestGenRunID_Unique(t *testing.T) {
 	id2 := genRunID(t2)
 	if id1 == id2 {
 		t.Errorf("expected unique run IDs; got %q == %q", id1, id2)
+	}
+}
+
+// ---- the router reads agents through the roster reader ------------------------
+
+// A project agent that is a link out of the agent directories, or over the size
+// cap, is refused by promote and eval; the link's target is not edited.
+func TestPromote_RefusesWhatTheRosterReaderRefuses(t *testing.T) {
+	for _, kind := range []string{"symlink", "oversize"} {
+		t.Run(kind, func(t *testing.T) {
+			cfg := newCfg(t)
+			cfg.Subcommand, cfg.AgentID = "promote", "backend"
+			cfg.Project = t.TempDir()
+			dir := filepath.Join(cfg.Project, ".claude", "agents")
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			const secret = "---\nmodel: opus\n---\nTOPSECRET\n"
+			outside := filepath.Join(t.TempDir(), "creds.md")
+			if kind == "symlink" {
+				if err := os.WriteFile(outside, []byte(secret), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(outside, filepath.Join(dir, "backend.md")); err != nil {
+					t.Skipf("no symlinks here: %v", err)
+				}
+			} else if err := os.WriteFile(filepath.Join(dir, "backend.md"), make([]byte, agentscompose.MaxAgentFileBytes+1), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			writeCandidateRecord(t, cfg.CandidatesFile, "backend", "opus", "haiku", "2026-06-01T00:00:00Z")
+			_, err := Run(cfg)
+			if !errors.Is(err, agentscompose.ErrRefused) {
+				t.Fatalf("promote: err = %v, want ErrRefused", err)
+			}
+			if kind == "symlink" {
+				if b, _ := os.ReadFile(outside); string(b) != secret {
+					t.Errorf("the link target was rewritten: %q", b)
+				}
+			}
+			if ents, _ := os.ReadDir(cfg.BackupsDir); len(ents) != 0 {
+				t.Error("a refused agent was backed up")
+			}
+
+			cfg.Subcommand = "eval"
+			if _, err := Run(cfg); !errors.Is(err, agentscompose.ErrRefused) {
+				t.Errorf("eval: err = %v, want ErrRefused", err)
+			}
+		})
 	}
 }

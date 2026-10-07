@@ -194,8 +194,10 @@ entries stay `unknown`.
   of earlier ones before it makes its own, once the state directory is secured.
   The sweep goes by the owner in the name: a directory whose pid is alive (a probe
   in another yakOS process) stays, unless it is more than an hour old, since pids
-  are reused; a directory of a dead pid goes; a name with no pid (an earlier build)
-  goes only when it is more than an hour old. It touches real directories the
+  are reused; a directory of a dead pid goes (on Unix only: on Windows the liveness check
+  always answers "alive", so a directory with a pid in its name waits the hour
+  like any other leftover); a name with no pid (an earlier build) goes only when
+  it is more than an hour old. It touches real directories the
   current user owns and nothing else: a symlink with such a name is left alone and
   nothing behind it is touched, a regular file is not a work directory, and
   removing a directory does not follow a link inside it. At most 32 are removed
@@ -210,7 +212,13 @@ entries stay `unknown`.
   taken and lacks it, `unknown` otherwise. No entry is added unless the overlay
   says `discovery: {admit: [agy]}`; then listed ids the catalog lacks become
   entries (source `discovered`, provider `google`, `subscription`, enabled, effort
-  from the id suffix), after the catalog entries and sorted by id.
+  from the id suffix), after the catalog entries and sorted by id. A listed id
+  that is a tier alias word (`cheap`, `balanced`, ...) or a Claude tier name
+  (`sonnet`, ...) is skipped with a warning, not admitted: dispatch reads those
+  words as aliases or tiers, so an entry under that name could never be reached as
+  the model. The billing of an admitted entry is labelled `discovered` (the
+  `billing_by` field), meaning it was assumed to be `subscription`, not stated by
+  the catalog; set `billing: api` in the overlay to say otherwise.
 
 ### Commands
 
@@ -257,9 +265,27 @@ model has no class on that harness, it is within the ceiling already, or nothing
 or below the ceiling is mapped there; it never raises a model or leaves the
 harness. On claude it is the ordering `budget.ClampModel` has always applied to
 `max_model` (haiku < sonnet < opus < fable): a test runs both for every tier and
-ceiling and requires the same answer. Codex models have no class until you map
-aliases in the overlay. Making `budget.ClampModel` and dispatch use it is a later
-change.
+ceiling and requires the same answer; `budget.ClampModel` now calls `Clamp`.
+Codex models have no class until you map aliases in the overlay.
+
+`Registry.EnforceCeiling(harness, model, ceiling)` is `Clamp` for a caller that
+enforces the ceiling as a cost control, and dispatch uses it. It says which of
+four things happened: the model is within the ceiling, it was lowered, it has no
+class (unranked), or it is above the ceiling and the registry maps nothing at or
+below it. Dispatch applies an agent's `max_model` ceiling on every runtime, not
+only claude:
+
+| Case | Result |
+|---|---|
+| Within the ceiling | Kept. |
+| Above it, a lower class is mapped on the same harness | Replaced by the model of the highest class at or below the ceiling on that harness, with a notice. claude: the ceiling's own tier (`sonnet`). agy: that class's agy model (`balanced` is `gemini-3.8-flash-high`; `cheap` is `gemini-3.8-flash-low`). codex: none until the overlay maps its aliases. |
+| Unranked: an id no alias names, or the harness default (no model flag) | **Refused**, naming the model, the ceiling and `yakos models show <id>`. Never passed through: 13 of agy's 18 listed ids have no class. |
+| Above it, nothing at or below it is mapped on that harness | Refused, the same way. |
+
+A replacement is always a model of the harness that runs the dispatch, never
+another harness's. An agent a project names as its supervisor (`supervisor:
+agent: watchdog`) takes the supervisor's ceiling, and the lower of that and its
+own.
 
 A replacement is judged by its own class too: an id that an overlay maps under a
 dearer alias as well counts as the dearer one and is skipped, and the walk goes on
@@ -319,7 +345,8 @@ rules:
   `override_pins: true`. An explicit `--runtime`, `--model`, a bare runtime name
   as the agent, and a conversation's earlier routing always outrank a rule.
 - A runtime that fails three times in a row (a non-zero exit counts, not only an
-  exec error) is skipped for 60 seconds (in memory). This is a preference: if
+  exec error) is skipped for 60 seconds (in memory), per project root: one project's failures
+  never cool a runtime for another project the same daemon serves. This is a preference: if
   nothing else can run, it is tried anyway. The cooldown, like the conversation
   pins below, only engages when a trusted `router-policy.yml` exists (any
   content, rules or not). With no policy file the resolve chain is exactly the
@@ -338,7 +365,15 @@ rules:
   reused across projects, or a policy edit, starts fresh.
 - A project `.yakos.yml` may only switch things off:
   `router: {disable_runtimes: [codex], disable_models: [gpt-5.5]}`. It cannot add
-  a rule, a runtime or a provider.
+  a rule, a runtime or a provider. A `disable_models` entry is a concrete id, a
+  tier alias or a Claude tier name, and matches the model that runs, judged on the
+  runtime that runs it, when the two are the same word or resolve through the model
+  registry to the same id: `balanced` blocks `sonnet` on claude (and `sonnet`
+  blocks what `balanced` names), `gemini-3.8-flash-high` on agy, and on codex,
+  where the shipped alias column is empty, the harness default (no model flag),
+  and `best` or `reasoning` blocks `opus`. An entry
+  never reaches across runtimes: `balanced` does not block a pinned codex id. An
+  overlay that remaps an alias moves what the word names.
 
 The ledger row of a dispatch carries `route_rule`, `route_reason`, `route_class`
 and (when rules are in force) `policy_sha`. None of it goes into a prompt.

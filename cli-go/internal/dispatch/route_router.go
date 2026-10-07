@@ -14,8 +14,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/router"
@@ -28,9 +31,49 @@ var routerPolicyDir = routerpolicy.StateDir
 // routerCooldown and routerSticky are the process-wide, in-memory router state.
 // Tests replace them.
 var (
-	routerCooldown = router.NewCooldown(nil)
+	routerCooldown = newCooldownSet(nil)
 	routerSticky   = router.NewSticky()
 )
+
+// maxCooldownScopes bounds how many project roots the cooldown keeps a table for.
+// A project root comes from the request, so an unbounded map would let a stream of
+// distinct roots grow the daemon without limit. Past the bound the tables are
+// dropped and start again, which forgets failures: the safe direction (the
+// cooldown only ever reorders a chain).
+const maxCooldownScopes = 256
+
+// cooldownSet is the cooldown, scoped per project root (sec-335 L2). One table for
+// the whole process let a hostile project fail a runtime three times and cool it
+// for every other project the daemon serves. A project's failures now cool only
+// its own dispatches.
+type cooldownSet struct {
+	mu  sync.Mutex
+	now func() time.Time
+	m   map[string]*router.Cooldown
+}
+
+func newCooldownSet(now func() time.Time) *cooldownSet {
+	return &cooldownSet{now: now, m: map[string]*router.Cooldown{}}
+}
+
+// of returns the cooldown table of project. The root is cleaned so two spellings
+// of one path share a table; "" (no project) has a table of its own.
+func (s *cooldownSet) of(project string) *router.Cooldown {
+	if project != "" {
+		project = filepath.Clean(project)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	c := s.m[project]
+	if c == nil {
+		if len(s.m) >= maxCooldownScopes {
+			s.m = map[string]*router.Cooldown{}
+		}
+		c = router.NewCooldown(s.now)
+		s.m[project] = c
+	}
+	return c
+}
 
 // policyAction is a selected policy rule as the chain sees it.
 type policyAction struct {
@@ -107,22 +150,23 @@ func applyRouter(ci *chainInput, agent *agentscompose.ComposedAgent, agentName s
 	// The cooldown only skips runtimes the chain may choose among. A pinned
 	// conversation's runtime is an explicit candidate (RuntimeBySticky), which
 	// the walk never skips, so the cooldown cannot move it.
-	ci.cooling = routerCooldown.Cooling
+	ci.cooling = routerCooldown.of(project).Cooling
 	return st
 }
 
-// noteRun feeds a finished run to the cooldown: a run that failed to execute or
-// exited non-zero counts against its runtime, a clean one clears the count. A run
-// cut short by its context says nothing about the runtime.
-func noteRun(ctx context.Context, rt string, exitCode int, err error) {
+// noteRun feeds a finished run to the cooldown of the project it ran for: a run
+// that failed to execute or exited non-zero counts against its runtime, a clean
+// one clears the count. A run cut short by its context says nothing about the
+// runtime.
+func noteRun(ctx context.Context, project, rt string, exitCode int, err error) {
 	if ctx.Err() != nil {
 		return
 	}
 	if err != nil || exitCode != 0 {
-		routerCooldown.Failure(rt)
+		routerCooldown.of(project).Failure(rt)
 		return
 	}
-	routerCooldown.Success(rt)
+	routerCooldown.of(project).Success(rt)
 }
 
 // applyModel lets the router adjust the model resolveModel chose for rt:

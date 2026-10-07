@@ -25,6 +25,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/auth"
 	"github.com/bakw00ds/yakos/internal/budget"
+	"github.com/bakw00ds/yakos/internal/modelreg"
 	"github.com/bakw00ds/yakos/internal/projectcfg"
 	"github.com/bakw00ds/yakos/internal/router"
 	"github.com/bakw00ds/yakos/internal/runtime"
@@ -969,18 +970,48 @@ func routeDispatchAt(ctx context.Context, in routeInput, explain bool) (*routed,
 
 	mc, fromPolicy := st.applyModel(choice.Runtime, in.ModelOverride, mc)
 
-	// A user-level max_model ceiling (K-119) lowers a dearer model, whether it
-	// came from a project's supervisor.model or the agent's frontmatter. The
-	// ceiling is expressed in Claude tiers, so it applies to claude only.
-	if choice.Runtime == "claude" {
-		if clamped, note := budget.ClampModel(in.Agent, mc.model, budget.Options{}); note != "" {
+	// A user-level max_model ceiling (K-119) lowers a dearer model, whether it came
+	// from a project's supervisor.model or the agent's frontmatter, on any runtime;
+	// a model the registry cannot rank under a ceiling is refused (enforceCeiling).
+	// The project is passed so an agent it names as its supervisor keeps the
+	// supervisor's ceiling.
+	var reg *modelreg.Registry
+	registry := func() (*modelreg.Registry, error) {
+		if reg == nil {
+			r, err := modelRegistryFor()
+			if err != nil {
+				return nil, fmt.Errorf("dispatch: model registry: %w", err)
+			}
+			reg = r
+		}
+		return reg, nil
+	}
+	if ceiling := budget.MaxModel(in.Agent, budget.Options{Project: in.Project}); ceiling != "" {
+		r, err := registry()
+		if err != nil {
+			return nil, err
+		}
+		clamped, note, err := enforceCeiling(r, choice.Runtime, in.Agent, ceiling, mc.model)
+		if err != nil {
+			return nil, err
+		}
+		if note != "" {
 			mc.model, mc.explicit = clamped, true
 			fmt.Fprintf(os.Stderr, "yakos budget: %s\n", note)
 		}
 	}
 
-	if ci.project.ModelDisabled(mc.model) {
-		return nil, fmt.Errorf("dispatch: model %q is disabled by this project's .yakos.yml (router.disable_models)", mc.model)
+	if len(ci.project.DisableModels) > 0 {
+		r, err := registry()
+		if err != nil {
+			return nil, err
+		}
+		if listed, hit := projectDisablesModel(r, ci.project, choice.Runtime, mc.model); hit {
+			if listed == mc.model {
+				return nil, fmt.Errorf("dispatch: model %q is disabled by this project's .yakos.yml (router.disable_models)", mc.model)
+			}
+			return nil, fmt.Errorf("dispatch: model %s is disabled by this project's .yakos.yml (router.disable_models lists %q)", modelLabel(mc.model), listed)
+		}
 	}
 
 	decision := st.decision(ci, choice, mc, fromPolicy)

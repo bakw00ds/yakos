@@ -1,0 +1,54 @@
+package agentscompose
+
+// readagent.go: the one exported way to read an agent file for anything that is
+// not Compose. `yakos agent`, `yakos teach` and the model router each used to open
+// a project agent with os.ReadFile, which follows a symlink anywhere, opens a FIFO
+// and reads a file of any size, the three things readAgentFile exists to refuse. A
+// cloned repository controls .claude/agents, so a link there to ~/.aws/credentials
+// became the agent's text in a lint, a lesson backup or a promote. They call this
+// instead, so there is no second reader to drift from the first.
+
+import (
+	"errors"
+	"fmt"
+	"path/filepath"
+)
+
+// ErrRefused marks a file the roster reader's rules do not allow to be read: a
+// symlink out of the agent directories, a file that is not regular or is over
+// MaxAgentFileBytes, a linked project directory, or an extends value that is not a
+// bare agent id. The wrapped message says which, and never carries a path.
+var ErrRefused = errors.New("agent file refused")
+
+// ReadAgentFile reads the agent file at path under the rules Compose reads under
+// (see agentfile.go). A file that may not be read returns an error wrapping
+// ErrRefused; a failure to read one that may be (including a missing file, which
+// satisfies errors.Is(err, fs.ErrNotExist)) is returned as it is.
+func ReadAgentFile(yakosRoot, project, path string) ([]byte, error) {
+	if project != "" {
+		dir := filepath.Join(project, ".claude", "agents")
+		if filepath.Dir(filepath.Clean(path)) == filepath.Clean(dir) {
+			if p := InspectProjectDir(project, dir); p != DirOK {
+				return nil, fmt.Errorf("%w: %s", ErrRefused, p.Reason())
+			}
+		}
+	}
+	data, skip, err := readAgentFile(path, agentRules(yakosRoot, project))
+	if err != nil {
+		return nil, err
+	}
+	if skip != "" {
+		return nil, fmt.Errorf("%w: %s", ErrRefused, skip)
+	}
+	return data, nil
+}
+
+// ReadExtendsTemplate reads the template an `extends:` value names: lib/agents/<id>.md
+// under yakosRoot, where id must be a bare agent id, and nowhere else (not the
+// project's own agents, which Compose does not extend from either).
+func ReadExtendsTemplate(yakosRoot, project, id string) ([]byte, error) {
+	if !BareAgentID(id) {
+		return nil, fmt.Errorf("%w: extends value %s is not a bare agent id (%s)", ErrRefused, DisplayValue(id), BareIDRule)
+	}
+	return ReadAgentFile(yakosRoot, project, filepath.Join(yakosRoot, "lib", "agents", id+".md"))
+}

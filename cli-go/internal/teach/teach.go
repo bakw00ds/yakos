@@ -44,6 +44,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/timestamp"
 )
 
@@ -51,6 +52,11 @@ import (
 
 // Config carries everything Run needs.
 type Config struct {
+	// YakosRoot is the framework root (lib/agents lives here). The agent file is
+	// read through agentscompose's reader, which follows a symlink only into
+	// lib/agents or the project's .claude/agents.
+	YakosRoot string
+
 	// AgentName is the agent id (the stem of the .md filename). Required.
 	AgentName string
 
@@ -151,6 +157,14 @@ func Run(cfg Config) (*Result, error) {
 		)
 	}
 
+	// Read the agent file through the hardened roster reader before anything is
+	// written: a link out of the agent directories, a special file or one over the
+	// size cap is refused, not backed up and not edited.
+	current, err := agentscompose.ReadAgentFile(cfg.YakosRoot, projectDir, agentFile)
+	if err != nil {
+		return nil, fmt.Errorf("teach: reading agent file: %w", err)
+	}
+
 	// Read lesson body.
 	lessonData, err := os.ReadFile(cfg.LessonFile) //nolint:gosec
 	if err != nil {
@@ -177,19 +191,14 @@ func Run(cfg Config) (*Result, error) {
 		return res, nil
 	}
 
-	// Backup the agent file before editing.
+	// Backup the agent file before editing: the bytes just read, so the backup is
+	// exactly what the lesson is spliced into.
 	backupSuffix := timestamp.WinSafe(cfg.Now)
 	backupFile := agentFile + ".yakos-bak-" + backupSuffix
-	if err := copyFile(agentFile, backupFile); err != nil {
+	if err := os.WriteFile(backupFile, current, 0o644); err != nil { //nolint:gosec
 		return nil, fmt.Errorf("teach: backup %s: %w", agentFile, err)
 	}
 	res.BackupFile = backupFile
-
-	// Read current agent content.
-	current, err := os.ReadFile(agentFile) //nolint:gosec
-	if err != nil {
-		return nil, fmt.Errorf("teach: reading agent file: %w", err)
-	}
 
 	// Splice the lesson into (or append to) the section.
 	sectionHeading := "## " + cfg.Section
@@ -380,26 +389,6 @@ func inferProject(home string) string {
 		}
 	}
 	return ""
-}
-
-// copyFile copies src to dst, creating dst if necessary.
-func copyFile(src, dst string) error {
-	in, err := os.Open(src) //nolint:gosec
-	if err != nil {
-		return err
-	}
-	defer func() { _ = in.Close() }()
-
-	out, err := os.Create(dst) //nolint:gosec
-	if err != nil {
-		return err
-	}
-	defer func() { _ = out.Close() }()
-
-	if _, err := io.Copy(out, in); err != nil {
-		return err
-	}
-	return out.Close()
 }
 
 // atomicWrite writes content to path using a temp-file + rename (Q8 / Decision A).

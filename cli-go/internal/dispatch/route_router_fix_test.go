@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -16,9 +17,9 @@ func allProbesOK(t *testing.T) {
 	withProbe(t, func(string) probeResult { return probeResult{OK: true} })
 }
 
-func failThrice(rt string) {
+func failThrice(project, rt string) {
 	for i := 0; i < 3; i++ {
-		noteRun(context.Background(), rt, 1, nil)
+		noteRun(context.Background(), project, rt, 1, nil)
 	}
 }
 
@@ -36,7 +37,7 @@ func TestRoute_NoPolicyThreeFailuresStayOnClaude(t *testing.T) {
 		if err != nil || got.Runtime != "claude" {
 			t.Fatalf("turn %d: %+v %v", i, got, err)
 		}
-		noteRun(context.Background(), "claude", 1, nil)
+		noteRun(context.Background(), project, "claude", 1, nil)
 	}
 	got, err := route(t, root, project, "plain", func(in *routeInput) { in.ConversationID = "c" })
 	if err != nil || got.Runtime != "claude" || got.RuntimeChosenBy == RuntimeByFallback {
@@ -60,7 +61,7 @@ func TestRoute_PinnedConversationStaysPinnedThroughCooldown(t *testing.T) {
 	if err != nil || first.Runtime != "claude" {
 		t.Fatalf("first: %+v %v", first, err)
 	}
-	failThrice("claude")
+	failThrice(project, "claude")
 	next, err := route(t, root, project, "plain", func(in *routeInput) { in.ConversationID = "c" })
 	if err != nil || next.Runtime != "claude" || next.RuntimeChosenBy != RuntimeBySticky {
 		t.Fatalf("a pinned conversation must stay on claude: %+v %v", next, err)
@@ -74,7 +75,7 @@ func TestRoute_UnpinnedConversationSkipsCoolingRuntime(t *testing.T) {
 	allProbesOK(t)
 	setPolicy(t, "# no rules\n")
 	root, project := routingRoot(t), projectWithYML(t, fallbackToCodex)
-	failThrice("claude")
+	failThrice(project, "claude")
 	for _, conv := range []string{"fresh", ""} {
 		got, err := route(t, root, project, "plain", func(in *routeInput) { in.ConversationID = conv })
 		if err != nil || got.Runtime != "codex" || got.FallbackFrom != "claude" {
@@ -191,5 +192,47 @@ func rewritePolicy(t *testing.T, dir, body string) {
 	}
 	if err := os.Chmod(p, 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// ---- sec-335 L2: the cooldown is scoped per project root ----------------------
+
+// Project A failing a runtime three times cools it for A and for nobody else.
+func TestRoute_CooldownDoesNotCrossProjects(t *testing.T) {
+	captureRouteLog(t)
+	allProbesOK(t)
+	setPolicy(t, "# no rules\n")
+	root := routingRoot(t)
+	a, b := projectWithYML(t, fallbackToCodex), projectWithYML(t, fallbackToCodex)
+	failThrice(a, "claude")
+
+	got, err := route(t, root, a, "plain", nil)
+	if err != nil || got.Runtime != "codex" || got.FallbackFrom != "claude" {
+		t.Fatalf("project A's own failures cool claude for A: %+v %v", got, err)
+	}
+	got, err = route(t, root, b, "plain", nil)
+	if err != nil || got.Runtime != "claude" || got.RuntimeChosenBy == RuntimeByFallback {
+		t.Fatalf("project A's failures must not cool claude for project B: %+v %v", got, err)
+	}
+	// A success in B does not clear A's cooldown either.
+	noteRun(context.Background(), b, "claude", 0, nil)
+	if cool, _ := routerCooldown.of(a).Cooling("claude"); !cool {
+		t.Error("a success in project B cleared project A's cooldown")
+	}
+}
+
+func TestCooldownSet_ScopeKeyAndBound(t *testing.T) {
+	s := newCooldownSet(nil)
+	if s.of("/p/x") != s.of("/p/./x/") {
+		t.Error("two spellings of one project root must share a table")
+	}
+	if s.of("/p/x") == s.of("/p/y") || s.of("") == s.of("/p/x") {
+		t.Error("distinct roots, and no project, must have their own tables")
+	}
+	for i := 0; i < 3*maxCooldownScopes; i++ {
+		s.of(fmt.Sprintf("/p/%d", i))
+	}
+	if n := len(s.m); n > maxCooldownScopes {
+		t.Errorf("%d scopes kept, the bound is %d", n, maxCooldownScopes)
 	}
 }

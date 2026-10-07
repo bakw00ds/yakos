@@ -301,9 +301,8 @@ counting spend against the supervisor role instead of the name). `status`, `rese
 and `doctor` take `--project <dir>`, else the working directory, and list or reset
 it for that project; `doctor` uses the project for its Agent budgets section only,
 and its project checks (hook drift, hook binaries, the pre-push gate, project rules)
-still run only for a positional project path. The model ceiling below is keyed on the
-agent name alone, so a renamed supervisor does not get the supervisor's `sonnet`
-ceiling (K-139 passes the project to the ceiling).
+still run only for a positional project path. The model ceiling below takes the project too, so a
+renamed supervisor keeps the supervisor's `sonnet` ceiling.
 
 ## Model ceiling
 
@@ -323,9 +322,15 @@ The supervisor has a built-in ceiling of `sonnet`, so a project's
 user-level policy changes it (`yakos budget set supervisor <usd> --max-model
 fable` lifts it).
 
-`dispatch.Run` lowers any dearer tier to the ceiling and prints a notice; an
-explicit `--model` on the bash passthrough is lowered the same way. A model
-that is not one of the four tiers is left alone. Unset means no ceiling.
+`dispatch.Run` lowers any dearer model to the ceiling and prints a notice; an
+explicit `--model` on the bash passthrough is lowered the same way. The ceiling is
+a cost class, so it governs every runtime, using the model registry's ranking
+(`docs/routing.md`, "Tier classes and Clamp"): on agy a dearer model is replaced by the agy
+model of the ceiling's class, and a model the registry cannot rank (an id no alias
+names, the harness default, any codex model until you map codex aliases) is
+refused with an error that names the model, the ceiling and `yakos models show
+<id>`, never run unchecked. Unset means no ceiling. An agent a project names as its
+supervisor gets the lower of its own ceiling and the supervisor's.
 
 ## Operator-only controls
 

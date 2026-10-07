@@ -332,10 +332,10 @@ func TestRoute_CooldownSkipsAFailingRuntime(t *testing.T) {
 	project := projectWithYML(t, "")
 	setPolicy(t, "# a policy file with no rules still engages the cooldown\n")
 	clk := &fakeClock{t: time.Unix(5_000, 0)}
-	routerCooldown = router.NewCooldown(clk.now)
+	routerCooldown = newCooldownSet(clk.now)
 
 	for i := 0; i < 3; i++ {
-		noteRun(context.Background(), "agy", 1, nil)
+		noteRun(context.Background(), project, "agy", 1, nil)
 	}
 	got, err := route(t, root, project, "pinned-fb", nil) // agy, then codex, claude
 	if err != nil {
@@ -358,20 +358,21 @@ func TestRoute_CooldownIsAPreferenceNotABan(t *testing.T) {
 	captureRouteLog(t)
 	root := routingRoot(t)
 	setPolicy(t, "# cooldown needs a policy file\n")
+	project := projectWithYML(t, "")
 	for i := 0; i < 3; i++ {
-		noteRun(context.Background(), "claude", 1, nil)
+		noteRun(context.Background(), project, "claude", 1, nil)
 	}
 	// "plain" has nowhere else to go: it still runs on claude.
-	got, err := route(t, root, projectWithYML(t, ""), "plain", nil)
+	got, err := route(t, root, project, "plain", nil)
 	if err != nil || got.Runtime != "claude" {
 		t.Fatalf("the only candidate must still run: %+v %v", got, err)
 	}
 	// An explicit choice never goes through the cooldown, even with somewhere to go.
-	routerCooldown.Success("claude")
+	routerCooldown.of(project).Success("claude")
 	for i := 0; i < 3; i++ {
-		noteRun(context.Background(), "agy", 1, nil)
+		noteRun(context.Background(), project, "agy", 1, nil)
 	}
-	got, err = route(t, root, projectWithYML(t, ""), "pinned-fb", func(in *routeInput) { in.RuntimeOverride, in.RuntimeFallbackOptIn = "agy", []string{"claude"} })
+	got, err = route(t, root, project, "pinned-fb", func(in *routeInput) { in.RuntimeOverride, in.RuntimeFallbackOptIn = "agy", []string{"claude"} })
 	if err != nil || got.Runtime != "agy" || got.RuntimeChosenBy != RuntimeByOverride {
 		t.Fatalf("an explicit runtime ignores the cooldown: %+v %v", got, err)
 	}
@@ -382,21 +383,21 @@ func TestNoteRun_CountsFailuresNotCancelsAndSuccessResets(t *testing.T) {
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	for i := 0; i < 5; i++ {
-		noteRun(cancelled, "codex", 1, errors.New("killed"))
+		noteRun(cancelled, "/p", "codex", 1, errors.New("killed"))
 	}
-	if cool, _ := routerCooldown.Cooling("codex"); cool {
+	if cool, _ := routerCooldown.of("/p").Cooling("codex"); cool {
 		t.Fatal("a run cut short by its context says nothing about the runtime")
 	}
-	noteRun(context.Background(), "codex", 0, errors.New("exec: not found"))
-	noteRun(context.Background(), "codex", 2, nil)
-	noteRun(context.Background(), "codex", 0, nil) // success
-	noteRun(context.Background(), "codex", 1, nil)
-	if cool, _ := routerCooldown.Cooling("codex"); cool {
+	noteRun(context.Background(), "/p", "codex", 0, errors.New("exec: not found"))
+	noteRun(context.Background(), "/p", "codex", 2, nil)
+	noteRun(context.Background(), "/p", "codex", 0, nil) // success
+	noteRun(context.Background(), "/p", "codex", 1, nil)
+	if cool, _ := routerCooldown.of("/p").Cooling("codex"); cool {
 		t.Fatal("a success must reset the count")
 	}
-	noteRun(context.Background(), "codex", 1, nil)
-	noteRun(context.Background(), "codex", 1, nil)
-	if cool, _ := routerCooldown.Cooling("codex"); !cool {
+	noteRun(context.Background(), "/p", "codex", 1, nil)
+	noteRun(context.Background(), "/p", "codex", 1, nil)
+	if cool, _ := routerCooldown.of("/p").Cooling("codex"); !cool {
 		t.Fatal("three failures in a row must cool")
 	}
 }
@@ -606,16 +607,17 @@ func TestRun_RunFeedsTheCooldown(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	isolatedLogDir(t)
 	captureRouteLog(t)
+	project := t.TempDir()
 	for i := 0; i < 3; i++ {
-		if cool, _ := routerCooldown.Cooling("codex"); cool {
+		if cool, _ := routerCooldown.of(project).Cooling("codex"); cool {
 			t.Fatalf("cooling after only %d failures", i)
 		}
-		_, res, err := Run(context.Background(), Request{AgentName: "codex-bare", Task: "hi", Project: t.TempDir(), YakosRoot: root})
+		_, res, err := Run(context.Background(), Request{AgentName: "codex-bare", Task: "hi", Project: project, YakosRoot: root})
 		if err != nil || res.ExitCode != 3 {
 			t.Fatalf("run %d: exit %d err %v", i, res.ExitCode, err)
 		}
 	}
-	if cool, _ := routerCooldown.Cooling("codex"); !cool {
+	if cool, _ := routerCooldown.of(project).Cooling("codex"); !cool {
 		t.Fatal("three failed runs must cool codex")
 	}
 }

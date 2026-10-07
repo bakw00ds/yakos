@@ -681,7 +681,7 @@ func runPlugin(args []string) {
 // <project>/.claude/agents/<name>.md under the target section,
 // creating the section when absent. Backs up the original file before
 // every edit. Uses atomic temp-rename writes (Q8 / Decision A).
-func runTeach(args []string) {
+func runTeach(yakosRoot string, args []string) {
 	agentName := ""
 	lessonFile := ""
 	project := ""
@@ -737,8 +737,15 @@ func runTeach(args []string) {
 	if home == "" {
 		home = "/tmp"
 	}
+	if r := os.Getenv("YAKOS_ROOT"); r != "" {
+		yakosRoot = r
+	}
+	// The agent file is read by the roster reader, which follows a link only
+	// into lib/agents or the project's agents: it needs the same lib root.
+	yakosRoot = resolveLibRoot(yakosRoot, home, os.Stderr)
 
 	cfg := teach.Config{
+		YakosRoot:  yakosRoot,
 		AgentName:  agentName,
 		LessonFile: lessonFile,
 		ProjectDir: project,
