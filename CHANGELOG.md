@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **docs(rules): `sprint-cost-discipline` rule.** Always-loaded; bounds PR size
+  (≤3k added lines), review fan-out, and agent lifetime per round, from the
+  P0 sprint retrospective.
+
 ## [0.62.0.0] — 2026-10-06
 
 Minor release: the multi-harness routing wave. Go dispatch honors agent

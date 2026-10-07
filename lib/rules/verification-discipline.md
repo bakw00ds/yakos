@@ -77,3 +77,4 @@ opened is cheaper than a second review round.
 
 - `rule:lead-dispatch-discipline` §Loop cadence — push/report/exit.
 - `rule:git-hygiene` §Worktree — the `t.TempDir()` / no-`YAKOS_ROOT` rule.
+- `rule:sprint-cost-discipline` — bounds PR size, review fan-out, and agent lifetime per round.
