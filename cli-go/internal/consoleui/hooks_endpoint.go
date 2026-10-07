@@ -1,0 +1,188 @@
+package consoleui
+
+// hooks_endpoint.go — POST /api/hooks/run/{name}?shape=codex|agy (K-145).
+//
+// Lets a codex or agy process on the same host run a registered yakOS hook
+// without a yakos binary on its PATH. The body is the harness's tool-call
+// envelope; the answer is {"exit_code","stdout","stderr"}, which the caller
+// replays (codex: exit 2 + stderr to deny; agy: the stdout JSON).
+//
+// Gates, outermost first:
+//   - OFF unless hooks_endpoint: true in the owner-only router policy; the
+//     route is then not registered at all (404), so a project cannot enable it.
+//   - RoleDispatch (requireRoleFunc in registerRoutes; not re-checked here).
+//   - Host header via dashauth.RequireLocalHost and a loopback RemoteAddr:
+//     refused (403) on the networked path, so it is never exposed over mTLS.
+//   - A browser Origin must be a loopback origin on the console port (403),
+//     the DNS-rebinding defence (same rule as mcpserver's streamable HTTP).
+//   - X-Yakos-Hook-Nonce must equal the per-daemon nonce (401). The nonce is
+//     random per daemon start and written 0600 to the trusted state dir.
+//   - Body capped at 64 KiB (413); only registered hook names (404); the shape
+//     must be codex or agy (400).
+//
+// Idempotency-Key: not declared. Hooks are pure gates plus append-only
+// telemetry (budget-guard counts calls), so a retry can double-count one tool
+// call; callers must not retry a hook call that reached the daemon.
+// Rate limiting: inherits the console default class. Audit: hooks write their
+// own NDJSON records; this handler logs name, shape and verdict only (no body,
+// no path).
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+
+	"github.com/bakw00ds/yakos/internal/dashauth"
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+)
+
+const (
+	hooksEndpointMaxBody = 64 << 10
+	hooksNonceHeader     = "X-Yakos-Hook-Nonce"
+	hooksRoutePrefix     = "/api/hooks/run/"
+)
+
+// HooksEndpoint wires the endpoint. A nil Config.HooksEndpoint leaves it off.
+type HooksEndpoint struct {
+	// Run executes hook name on one envelope (shaperun.Run bound to the
+	// daemon's dependencies).
+	Run func(ctx context.Context, shape, name string, body []byte) hookio.Response
+	// Known reports whether name is a registered hook.
+	Known func(name string) bool
+	// NonceFile is where the per-daemon nonce is written (0600). Required.
+	NonceFile string
+}
+
+type hooksResponseDTO struct {
+	ExitCode int    `json:"exit_code"`
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+}
+
+type hooksHandler struct {
+	ep    HooksEndpoint
+	nonce string
+	port  string
+}
+
+// newHooksHandler generates the nonce, writes it, and returns the handler
+// (without the role gate). A failure to persist the nonce leaves the endpoint
+// off rather than usable by nobody-knows-whom.
+func newHooksHandler(ep *HooksEndpoint, addr string) (http.Handler, error) {
+	if ep == nil || ep.Run == nil || ep.Known == nil || ep.NonceFile == "" {
+		return nil, errors.New("hooks endpoint: incomplete configuration")
+	}
+	var raw [32]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return nil, err
+	}
+	h := &hooksHandler{ep: *ep, nonce: hex.EncodeToString(raw[:])}
+	if _, p, err := net.SplitHostPort(addr); err == nil {
+		h.port = p
+	}
+	if err := writeNonceFile(ep.NonceFile, h.nonce); err != nil {
+		return nil, err
+	}
+	return dashauth.RequireLocalHost(addr, http.HandlerFunc(h.serve)), nil
+}
+
+func writeNonceFile(path, nonce string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	if fi, err := os.Lstat(path); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+		return errors.New("hooks endpoint: nonce file is a symlink")
+	}
+	f, err := os.CreateTemp(filepath.Dir(path), ".hooks-nonce-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	_, werr := f.WriteString(nonce + "\n")
+	cerr := f.Close()
+	if werr != nil || cerr != nil {
+		_ = os.Remove(tmp)
+		return errors.Join(werr, cerr)
+	}
+	if err := os.Chmod(tmp, 0o600); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+func hooksJSONError(w http.ResponseWriter, code int, msg string) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func (h *hooksHandler) originOK(origin string) bool {
+	u, err := url.Parse(origin)
+	if err != nil || u.Scheme != "http" || !isLoopbackHost(u.Hostname()) {
+		return false
+	}
+	return h.port == "" || u.Port() == h.port
+}
+
+func (h *hooksHandler) serve(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		hooksJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	host, _, err := splitHostAddr(r.RemoteAddr)
+	if err != nil || !isLoopbackHost(host) {
+		hooksJSONError(w, http.StatusForbidden, "hooks endpoint is loopback-only")
+		return
+	}
+	if o := r.Header.Get("Origin"); o != "" && !h.originOK(o) {
+		hooksJSONError(w, http.StatusForbidden, "unexpected Origin")
+		return
+	}
+	got := r.Header.Get(hooksNonceHeader)
+	if subtle.ConstantTimeCompare([]byte(got), []byte(h.nonce)) != 1 {
+		hooksJSONError(w, http.StatusUnauthorized, "missing or invalid hook nonce")
+		return
+	}
+	name := strings.TrimPrefix(r.URL.Path, hooksRoutePrefix)
+	if name == "" || strings.ContainsAny(name, "/\\") || !h.ep.Known(name) {
+		hooksJSONError(w, http.StatusNotFound, "unknown hook")
+		return
+	}
+	shape := r.URL.Query().Get("shape")
+	if !hookio.IsShape(shape) {
+		hooksJSONError(w, http.StatusBadRequest, "shape must be codex or agy")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, hooksEndpointMaxBody)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			hooksJSONError(w, http.StatusRequestEntityTooLarge, "body exceeds 64 KiB")
+			return
+		}
+		hooksJSONError(w, http.StatusBadRequest, "cannot read body")
+		return
+	}
+	resp := h.ep.Run(r.Context(), shape, name, body)
+	slog.Info("hooks endpoint", "hook", name, "shape", shape, "exit", resp.ExitCode)
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(hooksResponseDTO{ExitCode: resp.ExitCode, Stdout: string(resp.Stdout), Stderr: string(resp.Stderr)})
+}

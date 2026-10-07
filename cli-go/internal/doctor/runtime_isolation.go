@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/bakw00ds/yakos/internal/codexhome"
+	"github.com/bakw00ds/yakos/internal/hooksinstall"
 	"github.com/bakw00ds/yakos/internal/routerpolicy"
 )
 
@@ -41,6 +42,8 @@ func (r *runner) checkRuntimeIsolation() {
 		}
 	}
 
+	lines = append(lines, r.codexHooksLines()...)
+
 	pol, perr := routerpolicy.Load(filepath.Join(r.home, ".yakos-state"))
 	switch {
 	case perr != nil: // Load reports a missing file as an empty policy, so this is a real problem
@@ -71,4 +74,32 @@ func (r *runner) checkRuntimeIsolation() {
 		f()
 	}
 	writeln(r, "")
+}
+
+// codexHooksLines reports the K-145 codex hooks file in the yakOS profile. A
+// hooks.json that codex will not load is skipped silently, which looks like "no
+// gate" to the operator, so each way that can happen gets a line (texts from the
+// K-156 spike).
+func (r *runner) codexHooksLines() []func() {
+	if _, err := r.lookPath("codex"); err != nil || !codexhome.ProfileHasHooks(r.home) {
+		return nil
+	}
+	profile := codexhome.ProfileDir(r.home)
+	if _, isolated := codexhome.Effective(r.home, r.env); !isolated {
+		return []func(){func() {
+			r.warn(SectionRuntimeIsolation,
+				"codex hooks in %s are not loaded and codex will skip them silently: dispatch does not use that profile. Run 'yakos auth login codex' (or export OPENAI_API_KEY for the dispatching process), or re-run 'yakos hooks install --harness codex'",
+				filepath.Join(profile, codexhome.HooksFileName))
+		}}
+	}
+	if hooksinstall.ShapeDrift(hooksinstall.HarnessCodex, profile, "") == "stale" {
+		return []func(){func() {
+			r.warn(SectionRuntimeIsolation,
+				"codex hook file drift: %s differs from what yakos writes, so codex will report its hooks as modified; re-run 'yakos hooks install --harness codex'",
+				filepath.Join(profile, codexhome.HooksFileName))
+		}}
+	}
+	return []func(){func() {
+		r.ok(SectionRuntimeIsolation, "codex hooks installed in the yakOS profile; dispatch passes --dangerously-bypass-hook-trust so the per-hook trust step is not needed")
+	}}
 }

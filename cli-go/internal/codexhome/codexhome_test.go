@@ -82,3 +82,29 @@ func TestProfileDir_EmptyHome(t *testing.T) {
 		t.Fatal("empty home must yield no profile")
 	}
 }
+
+func TestEffectiveUsesProfileForHooksWithAPIKey(t *testing.T) {
+	home := t.TempDir()
+	dir := ProfileDir(home)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	key := func(k string) string {
+		if k == "OPENAI_API_KEY" {
+			return "k"
+		}
+		return ""
+	}
+	if _, iso := Effective(home, key); iso {
+		t.Fatal("profile without hooks or login must not be used")
+	}
+	if err := os.WriteFile(filepath.Join(dir, HooksFileName), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if d, iso := Effective(home, key); !iso || d != dir {
+		t.Fatalf("hooks + API key: got %q %v", d, iso)
+	}
+	if _, iso := Effective(home, func(string) string { return "" }); iso {
+		t.Fatal("hooks without a login or key must not isolate")
+	}
+}

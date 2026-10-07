@@ -17,7 +17,7 @@ was removed on 2026-09-01 in favor of agy).
 | Adapter shipping | v0.3 (always) | v0.4.0 | with the gemini shim's replacement (see CHANGELOG) |
 | `inline-agents` (CLI-flag JSON injection) | ✅ `--agents` | ❌ file-based only | ❌ file-based only |
 | `path-allowlist-hard` | ✅ `--add-dir` | ✅ the sandbox workspace is the working directory | ⚠ `--add-dir` sets the workspace, but reads and network are not restricted (K-158) |
-| `hooks` | ✅ 7 events | ⚠ manual install, 2 of 24 hooks ported | ⚠ manual install, 2 of 24 hooks ported |
+| `hooks` | ✅ 7 events | ⚠ PreToolUse/PostToolUse via `yakos hooks install --harness codex` (4 Go hooks, see below); no gate until installed | ⚠ PreToolUse/PostToolUse via `yakos hooks install --harness agy --dir <workspace>` (4 Go hooks); no gate until installed |
 | `mcp-flag` (CLI flag) | ✅ `--mcp-config` | ❌ via `config.toml` | ❌ via `.agents/mcp_config.json` |
 | `system-prompt-flag` | ✅ `--append-system-prompt` | ❌ no flag; `-c developer_instructions="..."` works (verified) | ❌ no flag; persona prepended to the prompt |
 | Model flag | ✅ `--model <tier>` | ✅ `-m <id>` | ✅ `--model <id>` |
@@ -99,10 +99,61 @@ stays (`init.permission_mode` is then `always-proceed`).
 
 Keep `--sandbox` on, because it still blocks the default write path, but count it
 as defence in depth. A scratch worktree does not help for reads or network, and
-yakOS hooks do not see agy's own tool calls. Contain agy with an external OS
+yakOS hooks see agy's tool calls only when the hooks service below is installed (they gate tool steps; they do not contain agy). Contain agy with an external OS
 sandbox around the whole process (K-159), or send it only non-sensitive work.
 Listing agy in `allow_unsandboxed_runtimes` removes the default write block and
 changes nothing else.
+
+### Hooks as a service for codex and agy (K-145)
+
+Without an installed hooks file neither harness has a PreToolUse gate, and both
+stay sandboxed as above. `yakos hooks install --harness codex|agy` writes one
+that runs yakOS's Go hooks (`budget-guard`, `path-allowlist`, `secret-scan` on
+PreToolUse; `supervisor-stream` on PostToolUse) through `yakos hook run --shape
+codex|agy <name>`. The command text is fixed (no run id, no temp path) and the
+file is rewritten only when its bytes differ, because codex hashes each hook.
+
+| | codex (0.154.0) | agy (1.3.0) |
+|---|---|---|
+| File | `<yakOS codex profile>/hooks.json` (`~/.yakos-state/codex-home`); never `~/.codex` | `<workspace>/.agents/hooks.json`; other hook names in an existing file are kept |
+| Trust mechanism installed | none to set up: dispatch adds `--dangerously-bypass-hook-trust` when the profile holds the file and is the CODEX_HOME in use. A user-level file needs no project trust | none: `agy -p` loads workspace hooks with no trust step. The interactive TUI asks "Do you trust the contents of this project?" once |
+| Deny shape | exit 2, reason on stderr | stdout `{"decision":"deny","reason":...}`, exit 0 |
+| Undecodable envelope | denied for the fail-closed hooks (`YAKOS_HOOKS_FAIL_OPEN=1` overrides) | same |
+
+Alternative not used for codex: a project `.codex/hooks.json` needs
+`[projects."<real path>"] trust_level = "trusted"` plus one
+`[hooks.state."<file>:pre_tool_use:<group>:<handler>"] trusted_hash = "sha256:..."`
+per hook in `config.toml` (hashes come from the app-server `hooks/list` call), all
+keyed by absolute path, so every worktree needs its own entries.
+
+Login: yakOS does not copy `~/.codex/auth.json`. The profile is used once
+`yakos auth login codex` has run, or, for an API-key setup, when `OPENAI_API_KEY`
+is set in the dispatching process and the profile holds the hooks file.
+`yakos doctor` warns when a hooks file sits in a profile dispatch is not using
+and when the file has drifted from what yakOS writes.
+
+What the gate does not cover (all unverified or by design):
+
+- Hooks run outside codex's sandbox; they are yakOS code, but they are not
+  contained by it.
+- Only the `Bash` shell tool is verified for codex and `run_command` for agy. The
+  codex `apply_patch` input layout and the agy file-tool argument names are
+  mapped best effort (`hookio/shape.go`); an unmapped tool name reaches the hooks
+  under its own name and is not gated by `path-allowlist` or `secret-scan`.
+- A shell command that writes a file (`echo K=... > .env`) is not inspected by
+  `secret-scan` or `path-allowlist`, which gate file-write tools.
+- Agy's behaviour when the hook binary is missing or crashes was not tested; a
+  `yakos` that is not on the harness's PATH may fail open.
+- Hooks do not make agy a containment boundary (K-158 above still applies).
+
+Optional endpoint: with `hooks_endpoint: true` in `~/.yakos-state/router-policy.yml`
+(owner-only, like the other keys), `yakos serve` mounts `POST
+/api/hooks/run/{name}?shape=codex|agy` for a harness on the same host that has no
+`yakos` on its PATH. It needs a RoleDispatch bearer token and the per-daemon nonce
+in the `X-Yakos-Hook-Nonce` header (read it from
+`~/.yakos-state/hooks-endpoint-nonce`, rewritten at each daemon start), accepts
+64 KiB, is loopback-only, and returns `{"exit_code","stdout","stderr"}` for the
+caller to replay. The installed files use the CLI.
 
 The bash adapters (`cli/lib/runtimes/{codex,agy}.sh`, used by `yakos dispatch`
 when the bash tree is present and `YAKOS_IMPL` is unset) still run with the
@@ -387,10 +438,9 @@ behave differently per runtime:
 
 - claude: hook stdin/stdout shape documented; yakOS's reference
   hooks under `lib/hooks/` are written against this contract.
-- codex: hook surface is similar; hooks need conversion to codex's
-  config.toml format. **Out of scope for v0.4.0** — operator can
-  install yakOS hooks manually per
-  [codex hooks docs](https://developers.openai.com/codex/hooks).
+- codex, agy: no PreToolUse gate until `yakos hooks install --harness
+  codex|agy` has written the hooks file (see "Hooks as a service" above);
+  both harnesses stay sandboxed either way.
 
 ## Auth model
 

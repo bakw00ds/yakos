@@ -171,7 +171,25 @@ func codexCommonArgs(model, effort string, resume bool) []string {
 	if e := codexEffort(effort); e != "" {
 		args = append(args, "-c", "model_reasoning_effort="+tomlString(e))
 	}
-	return append(args, codexPolicyArgs(resume)...)
+	args = append(args, codexPolicyArgs(resume)...)
+	return append(args, codexHooksArgs()...)
+}
+
+// codexHooksArgs returns --dangerously-bypass-hook-trust when the dispatch runs
+// under the yakOS profile and `yakos hooks install --harness codex` has written
+// its user-level hooks.json there. Without the flag codex skips an untrusted
+// hook silently (K-156). The file is yakOS-owned and its command text is fixed,
+// so the bypass vets nothing the operator did not install; ~/.codex is never
+// touched.
+func codexHooksArgs() []string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return nil
+	}
+	if _, isolated := codexhome.Effective(home, os.Getenv); isolated && codexhome.ProfileHasHooks(home) {
+		return []string{"--dangerously-bypass-hook-trust"}
+	}
+	return nil
 }
 
 // ExecCmd returns the exec.Cmd for dispatch, without running it.

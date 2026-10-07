@@ -1,0 +1,32 @@
+{
+  "envelope": {
+    "conversationId": "c1",
+    "modelName": "m",
+    "toolCall": {
+      "args": {
+        "CodeContent": "K=1",
+        "TargetFile": "/w/.env"
+      },
+      "name": "write_to_file"
+    },
+    "transcriptPath": "/t",
+    "workspacePaths": [
+      "/w"
+    ]
+  },
+  "want": {
+    "inputs": [
+      {
+        "event": "PreToolUse",
+        "tool": "Write",
+        "tool_input": {
+          "CodeContent": "K=1",
+          "TargetFile": "/w/.env",
+          "content": "K=1",
+          "file_path": "/w/.env"
+        },
+        "work_dir": "/w"
+      }
+    ]
+  }
+}

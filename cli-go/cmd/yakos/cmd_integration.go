@@ -57,9 +57,13 @@ func runHooksInstall(args []string) {
 	runtime := ""
 	project := ""
 	force := false
+	harness, hdir, hbin := "", "", ""
 
 	fs := &cliflag.Set{Cmd: "hooks install", Specs: []cliflag.Spec{
 		{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help},
+		{Name: "--harness", Kind: cliflag.String, Str: &harness, ValueDesc: "codex or agy"},
+		{Name: "--dir", Kind: cliflag.String, Str: &hdir, ValueDesc: "a path"},
+		{Name: "--binary", Kind: cliflag.String, Str: &hbin, ValueDesc: "a command"},
 		{Name: "--project", Kind: cliflag.String, Str: &project, ValueDesc: "a path"},
 		{Name: "--force", Kind: cliflag.Bool, Bool: &force},
 	}}
@@ -71,6 +75,13 @@ func runHooksInstall(args []string) {
 	if help {
 		hooksinstall.PrintHelp(os.Stdout)
 		os.Exit(0)
+	}
+	if harness != "" {
+		if len(rest) > 0 || project != "" || force {
+			fmt.Fprintln(os.Stderr, "hooks install: --harness takes only --dir and --binary")
+			os.Exit(1)
+		}
+		os.Exit(runHooksInstallHarness(harness, hdir, hbin, os.Stdout, os.Stderr))
 	}
 	// NOTE (disclosed incidental fix, s6-b2-review-2026-09-23.md finding 4):
 	// the pre-conversion loop here did `args[i][0] == '-'` with no length

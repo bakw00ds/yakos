@@ -1,0 +1,14 @@
+{
+  "envelope": {
+    "conversationId": "c1",
+    "modelName": "m",
+    "stepIdx": 1,
+    "transcriptPath": "/t",
+    "workspacePaths": [
+      "/w"
+    ]
+  },
+  "want": {
+    "error": "other"
+  }
+}

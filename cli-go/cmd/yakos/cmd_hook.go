@@ -69,6 +69,9 @@ beats the env var; refresh-generated commands always pass --impl go.
 Subcommands:
   run [--impl go|bash|hybrid] <name>
                 Read hook JSON on stdin, dispatch, exit with the hook's code.
+  run --shape codex|agy <name>
+                Read a codex or agy PreToolUse/PostToolUse envelope, run the Go
+                hook, answer in that harness's deny shape.
   list          Print every registered hook name and its readiness.
   mode          Print the effective YAKOS_HOOKS mode and why.
 
@@ -84,7 +87,13 @@ func runHookRun(yakosRoot string, args []string) {
 		os.Exit(1)
 	}
 	var override runner.HooksMode
+	shape := ""
 	for len(args) > 0 && strings.HasPrefix(args[0], "-") {
+		if args[0] == "--shape" && len(args) >= 2 && hookio.IsShape(args[1]) && shape == "" {
+			shape = args[1]
+			args = args[2:]
+			continue
+		}
 		if args[0] != "--impl" || len(args) < 2 {
 			fmt.Fprintf(os.Stderr, "hook run: unknown or incomplete flag %q (usage: yakos hook run [--impl go|bash|hybrid] <name>)\n", args[0])
 			os.Exit(2)
@@ -107,6 +116,15 @@ func runHookRun(yakosRoot string, args []string) {
 		os.Exit(1)
 	}
 	name := args[0]
+
+	if shape != "" {
+		if override != "" {
+			fmt.Fprintln(os.Stderr, "hook run: --shape and --impl cannot be combined")
+			os.Exit(2)
+		}
+		runHookShape(yakosRoot, shape, name)
+		return
+	}
 
 	entry, ok := lookupEntry(name)
 	if !ok && override != "" {
@@ -360,11 +378,22 @@ func snapshotEnv() map[string]string {
 // own small copy rather than sharing one package — consistent with the
 // existing pattern in this codebase).
 func resolveHookWorkDirs() (workCurrentDir, projectDir string) {
+	projectDir = os.Getenv("CLAUDE_PROJECT_DIR")
+	if projectDir == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			projectDir = cwd
+		}
+	}
+	return resolveHookWorkDirsFor(projectDir)
+}
+
+// resolveHookWorkDirsFor is resolveHookWorkDirs for a project directory the
+// caller already chose (the --shape path takes it from the harness envelope).
+func resolveHookWorkDirsFor(projectDir string) (string, string) {
 	home := os.Getenv("HOME")
 	if home == "" {
 		home = "/tmp"
 	}
-	projectDir = os.Getenv("CLAUDE_PROJECT_DIR")
 	if projectDir == "" {
 		if cwd, err := os.Getwd(); err == nil {
 			projectDir = cwd

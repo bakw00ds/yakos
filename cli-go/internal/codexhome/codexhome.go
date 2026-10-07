@@ -45,16 +45,36 @@ func ProfileHasAuth(home string) bool {
 	return err == nil && fi.Mode().IsRegular()
 }
 
+// HooksFileName is the user-level hooks file codex reads from its CODEX_HOME.
+const HooksFileName = "hooks.json"
+
+// ProfileHasHooks reports whether `yakos hooks install --harness codex` has
+// written the hooks file into the yakOS profile (a regular file, not a link).
+func ProfileHasHooks(home string) bool {
+	dir := ProfileDir(home)
+	if dir == "" {
+		return false
+	}
+	fi, err := os.Lstat(filepath.Join(dir, HooksFileName))
+	return err == nil && fi.Mode().IsRegular()
+}
+
 // Effective returns the CODEX_HOME dispatch should set and whether it is the
 // yakOS profile. Order:
 //
 //  1. The yakOS profile, once it holds a login (isolated is true). It wins
 //     over an ambient CODEX_HOME so a project-supplied environment cannot
 //     point codex at a directory of its own.
+//     The profile is also used, without a login of its own, when it holds the
+//     installed hooks file and OPENAI_API_KEY is set: codex then authenticates
+//     with the key and still loads the hooks (K-145).
 //  2. $CODEX_HOME when set (isolated is false).
 //  3. "" with isolated false: codex's own default, ~/.codex.
 func Effective(home string, getenv func(string) string) (dir string, isolated bool) {
 	if ProfileHasAuth(home) {
+		return ProfileDir(home), true
+	}
+	if getenv != nil && getenv("OPENAI_API_KEY") != "" && ProfileHasHooks(home) {
 		return ProfileDir(home), true
 	}
 	if getenv != nil {

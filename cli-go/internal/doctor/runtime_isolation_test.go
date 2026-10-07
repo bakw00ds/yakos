@@ -7,6 +7,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/bakw00ds/yakos/internal/hooksinstall"
 )
 
 func runIsolation(t *testing.T, home string, found map[string]string, env map[string]string) (string, *Report) {
@@ -102,5 +104,52 @@ func TestRuntimeIsolation_ExplainsAnIgnoredPolicy(t *testing.T) {
 	out, rep := runIsolation(t, home, nil, nil)
 	if !strings.Contains(out, "router policy ignored") || !strings.Contains(out, "writable") || rep.Warnings != 1 {
 		t.Errorf("a world-writable policy must be reported as ignored, got:\n%s", out)
+	}
+}
+
+func writeProfileFile(t *testing.T, home, name, body string) string {
+	t.Helper()
+	dir := filepath.Join(home, ".yakos-state", "codex-home")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestRuntimeIsolation_CodexHooksHints(t *testing.T) {
+	codex := map[string]string{"codex": "/usr/bin/codex"}
+	cur, err := hooksinstall.RenderShapeFile(hooksinstall.HarnessCodex, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Hooks installed but the profile is not what dispatch uses: skipped silently.
+	home := t.TempDir()
+	writeProfileFile(t, home, "hooks.json", string(cur))
+	// (no auth, no API key: Effective is not isolated)
+	out, rep := runIsolation(t, home, codex, nil)
+	if !strings.Contains(out, "skip them silently") || rep.Warnings != 1 {
+		t.Errorf("want the not-loaded warning, got %d warnings:\n%s", rep.Warnings, out)
+	}
+
+	// Loaded through an API key and current: ok, no warning.
+	out, rep = runIsolation(t, home, codex, map[string]string{"OPENAI_API_KEY": "k"})
+	if !strings.Contains(out, "bypass-hook-trust") || rep.Warnings != 0 {
+		t.Errorf("want an ok line, got %d warnings:\n%s", rep.Warnings, out)
+	}
+
+	// Drifted content: the hash would flip to modified.
+	writeProfileFile(t, home, "hooks.json", `{"hooks":{}}`)
+	out, rep = runIsolation(t, home, codex, map[string]string{"OPENAI_API_KEY": "k"})
+	if !strings.Contains(out, "file drift") || rep.Warnings != 1 {
+		t.Errorf("want the drift warning, got %d warnings:\n%s", rep.Warnings, out)
+	}
+
+	// No hooks file: nothing to say.
+	if out, _ := runIsolation(t, t.TempDir(), codex, map[string]string{"OPENAI_API_KEY": "k"}); out != "" {
+		t.Errorf("no hooks file should be silent, got %q", out)
 	}
 }
