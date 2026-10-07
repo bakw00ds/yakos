@@ -267,10 +267,13 @@ case " $* " in *" --resume "*) RESUMED=1 ;; esac
 if [ "$MODE" = "hang" ]; then exec sleep 120; fi
 # "linger": like hang, but a background child inherits stdout, so the pipe stays
 # open after claude itself is killed and the dispatch goroutine reading it cannot
-# finish until the test kills that child (its pid is in lingerFile).
+# finish until the test kills that child (its pid is in lingerFile). The child
+# leaves claude's process group (setsid via perl, which then records its own pid
+# and execs the sleep, so the pid is published only once it has escaped): the
+# dispatch path kills claude's whole group on cancel, so only a child that
+# escaped the group can still hold the pipe.
 if [ "$MODE" = "linger" ]; then
-  sleep 300 &
-  echo $! > '` + f.lingerFile + `'
+  perl -MPOSIX -e 'POSIX::setsid(); open(F, ">", $ARGV[0]); print F $$; close F; exec "sleep", "300"' '` + f.lingerFile + `' &
   exec sleep 120
 fi
 if [ "$MODE" = "stale" ] && [ -n "$RESUMED" ]; then
