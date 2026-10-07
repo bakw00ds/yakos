@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"00000000-0000-7000-8000-0000000000aa"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Running the tests."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"false","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"false","aggregated_output":"boom\n","exit_code":2,"status":"failed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"The command failed."}}
+{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":600,"cache_write_input_tokens":0,"output_tokens":40,"reasoning_output_tokens":0}}

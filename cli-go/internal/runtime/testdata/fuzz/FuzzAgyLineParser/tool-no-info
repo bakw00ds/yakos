@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"event\":\"step_update\",\"step_update\":{\"step_index\":1,\"state\":\"DONE\",\"step_type\":\"tool\"}}\n")

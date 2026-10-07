@@ -593,36 +593,51 @@ func readFixtureBytes(t *testing.T, name string) []byte {
 	return b
 }
 
-// The console gets the agent's TEXT, once, then a summary with usage and the
-// native session id: never raw JSONL.
+// joinTokens is the text the console received: every token chunk, in order.
+func joinTokens(chunks []StreamChunk) string {
+	var sb strings.Builder
+	for _, c := range chunks {
+		if c.Type == "token" {
+			sb.WriteString(c.Text)
+		}
+	}
+	return sb.String()
+}
+
+// The console gets the agent's TEXT as it happens (tokens and tool cards in
+// order), then a summary with usage and the native session id: never raw JSONL.
 func TestRunStream_CodexJSONLArrivesAsTextWithUsage(t *testing.T) {
 	chunks, res := runBuffered(t, "codex", readFixtureBytes(t, "codex-exec-json-0.154.0-command.ndjson"))
 
-	if got := chunkTypes(chunks); strings.Join(got, ",") != "token,summary" {
-		t.Fatalf("chunk types = %v, want [token summary]", got)
+	if got := chunkTypes(chunks); strings.Join(got, ",") != "token,tool_use,tool_result,token,summary" {
+		t.Fatalf("chunk types = %v, want [token tool_use tool_result token summary]", got)
 	}
-	if want := "I’ll run the command now.\ndone"; chunks[0].Text != want {
-		t.Errorf("token text = %q, want %q", chunks[0].Text, want)
+	if chunks[1].ToolName != "command_execution" || chunks[2].IsError {
+		t.Errorf("tool chunks = %+v / %+v", chunks[1], chunks[2])
 	}
-	if strings.Contains(chunks[0].Text, `"type"`) || strings.Contains(chunks[0].Text, "thread.started") {
-		t.Errorf("raw JSONL leaked into the token chunk: %q", chunks[0].Text)
+	text := joinTokens(chunks)
+	if want := "I’ll run the command now.\ndone"; text != want {
+		t.Errorf("token text = %q, want %q", text, want)
 	}
-	sum := chunks[1]
+	if strings.Contains(text, `"type"`) || strings.Contains(text, "thread.started") {
+		t.Errorf("raw JSONL leaked into the token chunks: %q", text)
+	}
+	sum := chunks[len(chunks)-1]
 	if sum.Usage == nil || sum.Usage.InputTokens != 3002 || sum.Usage.OutputTokens != 50 || sum.Usage.CacheRead != 27392 {
 		t.Errorf("summary usage = %+v", sum.Usage)
 	}
 	if sum.NativeSessionID != "01a10c3a-86a8-7ba3-ac6f-d3e51daa8d78" {
 		t.Errorf("summary NativeSessionID = %q", sum.NativeSessionID)
 	}
-	if res.Text != chunks[0].Text || !res.Parsed || res.Runtime != "codex" || res.Provider != "openai" || res.SessionID != sum.NativeSessionID {
+	if res.Text != text || !res.Parsed || res.Runtime != "codex" || res.Provider != "openai" || res.SessionID != sum.NativeSessionID {
 		t.Errorf("Result = %+v", res)
 	}
 	if res.Usage == nil || *res.Usage != *sum.Usage {
 		t.Errorf("Result.Usage %+v differs from the summary's %+v", res.Usage, sum.Usage)
 	}
 	// OutputBytes now measures the text the console received.
-	if res.OutputBytes != int64(len(chunks[0].Text)) {
-		t.Errorf("OutputBytes = %d, want %d", res.OutputBytes, len(chunks[0].Text))
+	if res.OutputBytes != int64(len(text)) {
+		t.Errorf("OutputBytes = %d, want %d", res.OutputBytes, len(text))
 	}
 }
 
@@ -641,14 +656,15 @@ func TestRunStream_CodexFailureSurfacesAsErrorChunk(t *testing.T) {
 
 func TestRunStream_AgyStreamJSONArrivesAsText(t *testing.T) {
 	chunks, res := runBuffered(t, "agy", readFixtureBytes(t, "agy-stream-json-1.2.17-tool.ndjson")) // a real recording
-	if strings.Join(chunkTypes(chunks), ",") != "token,summary" || chunks[0].Text != "done" {
-		t.Fatalf("chunks = %+v", chunks)
+	sum := chunks[len(chunks)-1]
+	if got := strings.Join(chunkTypes(chunks), ","); got != "tool_use,tool_result,token,token,summary" || strings.TrimRight(joinTokens(chunks), "\n") != "done" {
+		t.Fatalf("chunks = %v, text %q", got, joinTokens(chunks))
 	}
-	if chunks[1].NativeSessionID != "1f18ba00-a3ce-4a9e-8200-fdf181ecaeb6" || res.ModelID != "gemini-3.8-flash-low" {
-		t.Errorf("NativeSessionID/ModelID = %q/%q", chunks[1].NativeSessionID, res.ModelID)
+	if sum.NativeSessionID != "1f18ba00-a3ce-4a9e-8200-fdf181ecaeb6" || res.ModelID != "gemini-3.8-flash-low" {
+		t.Errorf("NativeSessionID/ModelID = %q/%q", sum.NativeSessionID, res.ModelID)
 	}
-	if chunks[1].Usage == nil || chunks[1].Usage.InputTokens != 25958 || chunks[1].Usage.OutputTokens != 128 {
-		t.Errorf("summary usage = %+v", chunks[1].Usage)
+	if sum.Usage == nil || sum.Usage.InputTokens != 25958 || sum.Usage.OutputTokens != 128 {
+		t.Errorf("summary usage = %+v", sum.Usage)
 	}
 }
 
@@ -707,8 +723,8 @@ func TestRunStream_DroppedLineMarksTheTextTruncated(t *testing.T) {
 	data = append(data, '\n')
 	data = append(data, []byte(`{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"after"}}`+"\n")...)
 	chunks, res := runBuffered(t, "codex", data)
-	if !strings.HasPrefix(chunks[0].Text, "after") || !strings.HasSuffix(chunks[0].Text, bufferedTruncationMarker) {
-		t.Errorf("token text = %q", chunks[0].Text)
+	if text := joinTokens(chunks); !strings.HasPrefix(text, "after") || !strings.HasSuffix(text, bufferedTruncationMarker) {
+		t.Errorf("token text = %q", text)
 	}
 	if !res.Truncated || res.LinesDropped != 1 || res.TextCapped {
 		t.Errorf("Truncated/LinesDropped/TextCapped = %v/%d/%v, want true/1/false", res.Truncated, res.LinesDropped, res.TextCapped)

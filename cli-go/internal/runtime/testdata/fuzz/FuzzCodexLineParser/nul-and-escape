@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"type\":\"item.completed\",\"item\":{\"id\":\"i\",\"type\":\"agent_message\",\"text\":\"a\\u0000b\"}}\n{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":-5,\"cached_input_tokens\":9}}\n")

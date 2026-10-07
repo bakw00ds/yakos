@@ -94,6 +94,11 @@ type PolicyEnv struct {
 	// context it is given, and where that read runs belongs to the caller, not to
 	// this package. Nil skips the sign-in check.
 	ProbeRuntime func(ctx context.Context, id string) RuntimeProbe
+
+	// RuntimeVersion returns the installed version of a harness CLI ("" when it is
+	// absent or prints none). The caller runs `<cli> --version`; nil skips the
+	// parser version-skew check (K-144).
+	RuntimeVersion func(ctx context.Context, id string) string
 }
 
 // RuntimeProbe is what a caller-supplied probe learned about one runtime CLI.
@@ -137,6 +142,7 @@ func CheckPolicy(env PolicyEnv) []PolicyFinding {
 	out = append(out, checkBashDispatch(e)...)
 	out = append(out, checkCodexProfile(e)...)
 	out = append(out, checkAgySignIn(e)...)
+	out = append(out, checkParserSkew(e)...)
 	out = append(out, checkStatePathOverrides(e)...)
 	sort.SliceStable(out, func(i, j int) bool {
 		if ri, rj := out[i].Severity.rank(), out[j].Severity.rank(); ri != rj {
@@ -379,6 +385,42 @@ func checkAgySignIn(e PolicyEnv) []PolicyFinding {
 	}}
 }
 
+// ---- parser version skew -----------------------------------------------------------
+
+// checkParserSkew reports a codex or agy whose installed version differs from
+// the one the stream parsers were recorded against (runtime.RecordedVersions).
+// A harness may change its output format between releases, and the parsers skip
+// what they do not recognise, so the symptom is a missing tool card or an empty
+// answer: this finding names the cause first. It is a hint, never an error.
+func checkParserSkew(e PolicyEnv) []PolicyFinding {
+	if e.RuntimeVersion == nil {
+		return nil
+	}
+	var out []PolicyFinding
+	for _, id := range []string{"agy", "codex"} {
+		ctx, cancel := context.WithTimeout(context.Background(), agyProbeTimeout)
+		done := make(chan string, 1)
+		go func() { done <- e.RuntimeVersion(ctx, id) }()
+		var installed string
+		select {
+		case installed = <-done:
+		case <-ctx.Done():
+		}
+		cancel()
+		recorded, skew := yakruntime.VersionSkew(id, yakruntime.ParseVersion(installed))
+		if !skew {
+			continue
+		}
+		out = append(out, PolicyFinding{
+			ID:       "parser-version-skew:" + id,
+			Severity: PolicyLow,
+			Message:  fmt.Sprintf("%s %s is installed but the stream parser was recorded against %s, so a changed output format could show as a missing tool card or answer", id, yakruntime.ParseVersion(installed), recorded),
+			Fix:      "if chat output from " + id + " looks incomplete, report it: the fixtures under internal/runtime/testdata/" + id + "/ need re-recording for this version",
+		})
+	}
+	return out
+}
+
 // ---- bash dispatch ----------------------------------------------------------------
 
 // checkBashDispatch reports `yakos dispatch` reaching the bash CLI while codex or
@@ -502,6 +544,7 @@ func (r *runner) runPolicy() {
 		BashTreePresent:      r.cfg.PolicyBashTreePresent,
 		SDKSidecarSelectable: r.cfg.PolicySDKSidecarSelectable,
 		ProbeRuntime:         r.cfg.PolicyProbeRuntime,
+		RuntimeVersion:       r.cfg.PolicyRuntimeVersion,
 	})
 	r.report.Policy = findings
 

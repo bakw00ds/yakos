@@ -596,6 +596,7 @@ func applyPolicyFacts(cfg *doctor.Config, yakosRoot, exeRoot string) {
 	_, sdkErr := interactive.NewSDKEngineFactory(yakosRoot)
 	cfg.PolicySDKSidecarSelectable = sdkErr == nil
 	cfg.PolicyProbeRuntime = policyProbeRuntime
+	cfg.PolicyRuntimeVersion = policyRuntimeVersion
 }
 
 // runRefresh implements `yakos refresh` natively in Go.
