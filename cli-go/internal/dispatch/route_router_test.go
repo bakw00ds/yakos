@@ -332,11 +332,7 @@ func TestRoute_CooldownSkipsAFailingRuntime(t *testing.T) {
 	project := projectWithYML(t, "")
 	setPolicy(t, "# a policy file with no rules still engages the cooldown\n")
 	clk := &fakeClock{t: time.Unix(5_000, 0)}
-	routerCooldown = newCooldownSet(clk.now)
-
-	for i := 0; i < 3; i++ {
-		noteRun(context.Background(), project, "agy", 1, nil)
-	}
+	seedCooldownForTest(t, project, "agy", clk.now)
 	got, err := route(t, root, project, "pinned-fb", nil) // agy, then codex, claude
 	if err != nil {
 		t.Fatal(err)
@@ -359,9 +355,7 @@ func TestRoute_CooldownIsAPreferenceNotABan(t *testing.T) {
 	root := routingRoot(t)
 	setPolicy(t, "# cooldown needs a policy file\n")
 	project := projectWithYML(t, "")
-	for i := 0; i < 3; i++ {
-		noteRun(context.Background(), project, "claude", 1, nil)
-	}
+	failThrice(project, "claude")
 	// "plain" has nowhere else to go: it still runs on claude.
 	got, err := route(t, root, project, "plain", nil)
 	if err != nil || got.Runtime != "claude" {
@@ -369,9 +363,7 @@ func TestRoute_CooldownIsAPreferenceNotABan(t *testing.T) {
 	}
 	// An explicit choice never goes through the cooldown, even with somewhere to go.
 	routerCooldown.of(project).Success("claude")
-	for i := 0; i < 3; i++ {
-		noteRun(context.Background(), project, "agy", 1, nil)
-	}
+	failThrice(project, "agy")
 	got, err = route(t, root, project, "pinned-fb", func(in *routeInput) { in.RuntimeOverride, in.RuntimeFallbackOptIn = "agy", []string{"claude"} })
 	if err != nil || got.Runtime != "agy" || got.RuntimeChosenBy != RuntimeByOverride {
 		t.Fatalf("an explicit runtime ignores the cooldown: %+v %v", got, err)
