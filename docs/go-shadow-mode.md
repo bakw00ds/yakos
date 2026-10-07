@@ -20,7 +20,7 @@ any shell aliases or PATH-ordering logic you set up.
 
 | Value | Effect |
 |---|---|
-| unset | **auto**: shadow-mode when `cli/yakos` is present; Go-native otherwise. Go-only installs (binary only, no bash tree) work without any configuration. |
+| unset | **auto**: shadow-mode when `cli/yakos` is present; Go-native otherwise. Go-only installs (binary only, no bash tree) work without any configuration. `dispatch` and `doctor` are the exception: they run Go-native when unset (K-143) and only `YAKOS_IMPL=bash` sends them to bash. |
 | `bash` | Proxy every invocation to bash yakos (errors with a clear message if the bash script is absent — use this only when you know bash is installed). |
 | `go` | Always use Go-native routing, regardless of whether bash is present. |
 
