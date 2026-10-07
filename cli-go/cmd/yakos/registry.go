@@ -491,7 +491,7 @@ var commandRegistry = []commandEntry{
 	},
 	{
 		Name:   "workflow",
-		Specs:  specSet("workflow", "--run-id", "--operator", "--prior-run-id", "--new-run-id"),
+		Specs:  specSet("workflow", "--run-id", "--operator", "--prior-run-id", "--new-run-id", "--dry-run"),
 		HelpFn: printWorkflowHelp,
 	},
 }

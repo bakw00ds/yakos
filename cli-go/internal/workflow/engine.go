@@ -738,7 +738,9 @@ func (e *Engine) runNode(
 	// dispatch (the agent's pin, the project config, fallbacks), so dispatch
 	// resolves it against the runtime that actually runs. Resolving it here to a
 	// Claude tier would hand "sonnet" to a codex node.
-	model := node.Model
+	// "auto" (K-142) is no pin at all: the Service's router decides, and the
+	// decision comes back on the result to be recorded below.
+	model := pinOf(node.Model)
 
 	// Build dispatch.Params with Project pinned to Engine.Project.
 	// ResolvedIdentity is forwarded from the triggering HTTP request so the
@@ -748,7 +750,7 @@ func (e *Engine) runNode(
 		Agent:            node.Agent,
 		Task:             prompt,
 		Project:          e.Project,
-		Runtime:          node.Runtime,
+		Runtime:          pinOf(node.Runtime),
 		Model:            model,
 		Timeout:          node.Timeout,
 		YakosRoot:        e.YakosRoot,
@@ -771,6 +773,11 @@ func (e *Engine) runNode(
 
 	// Dispatch through the governed Service (or injected test fake).
 	stdout, result, err := e.dispatchNode(ctx, params)
+
+	// K-142: record the router's decision for this node, success or failure.
+	if rt := newNodeRoute(node, result); rt != nil {
+		rs.setNodeRoute(node.ID, rt)
+	}
 
 	// Write dispatch_finished to the per-run node dispatch log, with the token
 	// usage the runtime reported (K-135).

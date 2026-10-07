@@ -114,6 +114,14 @@ type Result struct {
 	RuntimeChosenBy string
 	FallbackFrom    string
 
+	// RouteRule, RouteReason, RouteClass and PolicySHA are the router's record of
+	// the decision this dispatch ran under (K-142: Flows records them per node).
+	// Empty on results that never reached routing.
+	RouteRule   string
+	RouteReason string
+	RouteClass  string
+	PolicySHA   string
+
 	// Runtime is the runtime that ran the dispatch ("claude", "codex", "agy").
 	Runtime string
 

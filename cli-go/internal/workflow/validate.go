@@ -28,7 +28,8 @@ var varRefRe = regexp.MustCompile(`\$\{(inputs|nodes)\.([^}]+?)(?:\.(output))?\}
 //     alias on claude, an alias or a model id on codex and agy. A node with no
 //     runtime takes its runtime from the agent's pin at run time, so its model
 //     must be valid on at least one runtime.
-//  9. Runtime (when non-empty) is a known runtime name.
+//  9. Runtime (when non-empty) is a known runtime name, or "auto" (K-142: the
+//     router picks it, like an absent runtime). Model "auto" is likewise "no pin".
 //  10. scan_allow (when non-empty) lists only known, unique scan pattern IDs.
 //
 // Returns the first error found; does not accumulate all errors.
@@ -86,7 +87,7 @@ func Validate(wf *Workflow) error {
 		}
 
 		// --- 8. Model validation ---
-		if n.Model != "" {
+		if n.Model != "" && n.Model != Auto {
 			if err := validateNodeModel(n); err != nil {
 				return err
 			}
@@ -98,7 +99,7 @@ func Validate(wf *Workflow) error {
 		}
 
 		// --- 9. Runtime validation ---
-		if n.Runtime != "" {
+		if n.Runtime != "" && n.Runtime != Auto {
 			known := false
 			for _, r := range runtime.Known {
 				if r == n.Runtime {
@@ -270,7 +271,7 @@ func TopoOrder(wf *Workflow) []string {
 //     config or the operator's default resolves to, which is not known until
 //     dispatch. Its model must be valid on at least one runtime.
 func validateNodeModel(n Node) error {
-	if n.Runtime != "" {
+	if n.Runtime != "" && n.Runtime != Auto {
 		if !knownRuntime(n.Runtime) {
 			return nil
 		}
