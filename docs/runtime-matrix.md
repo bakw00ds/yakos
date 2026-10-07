@@ -545,18 +545,26 @@ real Go dispatch, and compares runtime, model (claude), and the shape of the
 claude argv. It runs under the project-config variants none, `default-runtime`,
 `per-domain`, `default-fallback`, `router.disable_runtimes` and an unavailable
 explicit `--runtime`. The first unlisted divergence fails it with a table of
-rows. The divergences are intended and the case checks that each is still
-observed:
+rows. The divergences are intended; the case checks that each row diverges in
+the documented kind (a different divergence on a listed row fails), and that
+the observed set is exactly D1 to D4:
 
 | id | Go behavior | bash behavior |
 |---|---|---|
 | D1 | `router.disable_runtimes` in `.yakos.yml` skips or refuses a runtime | key not read |
 | D2 | an explicit `--runtime` that cannot run fails unless `--runtime-fallback` | walks the fallback lists |
-| D3 | model of a non-claude runtime is that runtime's model id (registry) | the tier name |
+| D3 | model of a non-claude runtime is that runtime's own model (registry id, or the harness default when the registry has none, as for codex) | the tier name |
 | D4 | `model-policy:` frontmatter is not read | overrides `model:` |
 
 Go-only and so not exercised (no policy file): router rules, cooldown, sticky
 conversations, and `--explain`.
+
+**Known limit of the bash path (K-169).** On Linux with GNU coreutils `timeout`
+on PATH, `YAKOS_IMPL=bash yakos dispatch` fails in `dispatch.sh`: `ct_timeout`
+cannot run the shell function `yk_rt_dispatch` (exit 127). It predates K-143; the
+parity case strips `timeout` and `gtimeout` from the PATH it gives the oracle, so
+the oracle runs untimed. Until K-169 fixes it, the `YAKOS_IMPL=bash` way back does
+not work on such a host.
 
 ## Model tiers
 

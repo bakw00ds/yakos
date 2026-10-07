@@ -21,6 +21,9 @@ and the case that holds the two paths to the same resolution otherwise, is in
 To keep the old behavior for a shell or a project, set `YAKOS_IMPL=bash`
 (`yakos doctor` then warns, and `doctor --policy` flags it when codex or agy is
 installed). Nothing else needs doing: Go-only installs already ran the Go path.
+Known issue (K-169): on Linux with GNU coreutils `timeout` on PATH,
+`YAKOS_IMPL=bash yakos dispatch` fails in `dispatch.sh` (`ct_timeout` cannot run
+`yk_rt_dispatch`, exit 127), so the way back does not work there yet.
 
 ## Unreleased: model ceilings across runtimes, `--extends` (K-139c)
 

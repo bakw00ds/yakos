@@ -80,3 +80,28 @@ func TestDoctorImplementationSeverityAndNoValue(t *testing.T) {
 		t.Errorf("the value reached the output: %s", out)
 	}
 }
+
+// The severity comes from the structured answer, not from the note's wording:
+// exactly the value "bash" requests bash, with or without the bash tree; any
+// other value (a sentinel included) is the default.
+func TestDispatchImplNoteBashRequested(t *testing.T) {
+	with, without := bashTreeRoot(t), t.TempDir()
+	env := func(v string) func(string) string {
+		return func(k string) string { return map[string]string{"YAKOS_IMPL": v}[k] }
+	}
+	for _, c := range []struct {
+		root, impl string
+		want       bool
+	}{
+		{with, "bash", true}, {without, "bash", true},
+		{with, "", false}, {with, "go", false}, {with, "BASH", false}, {without, "SENTINELIMPL0123", false},
+	} {
+		if _, got := dispatchImplNote(c.root, env(c.impl)); got != c.want {
+			t.Errorf("YAKOS_IMPL=%q: bashRequested=%v, want %v", c.impl, got, c.want)
+		}
+	}
+	// A missing tree under bash still warns once.
+	if _, rep := implSection(t, without, "bash"); rep.Warnings != 1 {
+		t.Errorf("bash without a tree must warn once: %+v", rep)
+	}
+}
