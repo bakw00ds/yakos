@@ -74,7 +74,7 @@ func TestReportFeedFinding_ShapeAndRefusals(t *testing.T) {
 	}
 	data, _ := os.ReadFile(filepath.Join(wc, "supervisor-findings.ndjson"))
 	s := string(data)
-	for _, want := range []string{`"overall":"WARN"`, `"recommended_action":"surface_to_operator"`, `"source":"event-scan"`, `"runtime":"codex"`} {
+	for _, want := range []string{`"overall":"WARN"`, `"recommended_action":"review"`, `"source":"event-scan"`, `"runtime":"codex"`} {
 		if !strings.Contains(s, want) {
 			t.Errorf("finding %s missing %s", s, want)
 		}
@@ -90,7 +90,7 @@ func TestReportFeedFinding_ShapeAndRefusals(t *testing.T) {
 	f.Severity = "warn"
 	_ = supervisorstream.ReportFeedFinding(wc, f, now)
 	data, _ = os.ReadFile(filepath.Join(wc, "supervisor-findings.ndjson"))
-	if strings.Count(string(data), "surface_to_operator") != 1 {
+	if strings.Contains(string(data), "surface_to_operator") {
 		t.Errorf("warn finding was surfaced: %s", data)
 	}
 	// refusals: bad runtime, bad kind, missing dir, symlinked file
@@ -117,3 +117,92 @@ func TestReportFeedFinding_ShapeAndRefusals(t *testing.T) {
 		}
 	}
 }
+
+// K-146 F2: the pending write must not follow a link planted by a sandboxed
+// model: the target keeps its content and mode, a dangling link creates nothing.
+func TestReportFeedFinding_PendingSymlinkRefused(t *testing.T) {
+	if !runtimeIsUnix() {
+		t.Skip("symlink semantics")
+	}
+	now := time.Date(2026, 10, 7, 1, 2, 3, 0, time.UTC)
+	f := supervisorstream.FeedFinding{Runtime: "codex", Kind: "tool_result", Severity: "critical", Labels: []string{"disregard-system-prompt"}, Session: "s1"}
+
+	wc := t.TempDir()
+	target := filepath.Join(t.TempDir(), "supervisor-policy.yml")
+	if err := os.WriteFile(target, []byte("kill_on_critical: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(target, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(wc, ".supervisor-pending.s1")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisorstream.ReportFeedFinding(wc, f, now); err == nil {
+		t.Error("symlinked pending path accepted")
+	}
+	got, _ := os.ReadFile(target)
+	if string(got) != "kill_on_critical: true\n" {
+		t.Errorf("target content changed: %q", got)
+	}
+	if fi, _ := os.Stat(target); fi.Mode().Perm() != 0o644 {
+		t.Errorf("target mode changed to %v", fi.Mode().Perm())
+	}
+
+	// dangling link: nothing is created at the target
+	wc2 := t.TempDir()
+	ghost := filepath.Join(t.TempDir(), "ghost")
+	if err := os.Symlink(ghost, filepath.Join(wc2, ".supervisor-pending.s1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisorstream.ReportFeedFinding(wc2, f, now); err == nil {
+		t.Error("dangling pending link accepted")
+	}
+	if _, err := os.Lstat(ghost); err == nil {
+		t.Error("dangling link target was created")
+	}
+
+	// a FIFO / non-regular pending entry is refused too (no hang, no write)
+	wc3 := t.TempDir()
+	if err := os.Mkdir(filepath.Join(wc3, ".supervisor-pending.s1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisorstream.ReportFeedFinding(wc3, f, now); err == nil {
+		t.Error("non-regular pending entry accepted")
+	}
+}
+
+// The trim step's temp file is never written through a planted link either.
+func TestAppendPending_TrimTempLinkNotFollowed(t *testing.T) {
+	if !runtimeIsUnix() {
+		t.Skip("symlink semantics")
+	}
+	wc := t.TempDir()
+	pend := filepath.Join(wc, ".supervisor-pending.s1")
+	var lines []string
+	for i := 0; i < 160; i++ {
+		lines = append(lines, `{"i":1}`)
+	}
+	if err := os.WriteFile(pend, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, pend+".tmp."+itoa(os.Getpid())); err != nil {
+		t.Fatal(err)
+	}
+	f := supervisorstream.FeedFinding{Runtime: "codex", Kind: "text", Severity: "warn", Labels: []string{"x"}, Session: "s1"}
+	if err := supervisorstream.ReportFeedFinding(wc, f, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(victim); string(b) != "keep" {
+		t.Errorf("trim wrote through a planted temp link: %q", b)
+	}
+	if b, _ := os.ReadFile(pend); strings.Count(string(b), "\n") > 110 {
+		t.Errorf("pending file not trimmed: %d lines", strings.Count(string(b), "\n"))
+	}
+}
+

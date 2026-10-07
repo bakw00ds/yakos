@@ -33,17 +33,25 @@ func agyTextLine(text string) string {
 	return string(b)
 }
 
-// feedEnv points the scan at a scratch work/current and a scratch state dir.
+// feedProj is the request project path feedEnv laid the scratch work directory out for.
+var feedProj string
+
+// feedEnv points the scan at a scratch work/current (the canonical
+// $HOME/agent-control/<project>/work layout of the request's project, with no
+// process-environment overrides) and a scratch state dir.
 func feedEnv(t *testing.T) (work, state string) {
 	t.Helper()
 	state = isolatedLogDir(t)
-	root := t.TempDir()
-	work = filepath.Join(root, "current")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("YAKOS_WORK_DIR", "")
+	t.Setenv("YAKOS_PROJECT_NAME", "")
+	t.Setenv("YAKOS_INPLACE_WORK", "")
+	feedProj = filepath.Join(t.TempDir(), "proj")
+	work = filepath.Join(home, "agent-control", "proj", "work", "current")
 	if err := os.MkdirAll(work, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("YAKOS_WORK_DIR", root)
-	t.Setenv("YAKOS_INPLACE_WORK", "")
 	return work, state
 }
 
@@ -88,7 +96,7 @@ func findings(t *testing.T, work string) []map[string]any {
 func feedStream(t *testing.T, a *scriptAdapter, onChunk func(StreamChunk)) (Result, error) {
 	t.Helper()
 	return execWithStreaming(context.Background(),
-		Request{AgentName: "chat-agent", Task: "t", Project: t.TempDir(), Runtime: a.name, ModelResolved: "sonnet", ModelChosenBy: "frontmatter"},
+		Request{AgentName: "chat-agent", Task: "t", Project: feedProj, Runtime: a.name, ModelResolved: "sonnet", ModelChosenBy: "frontmatter"},
 		a, runtime.ChatDispatchRequest{UserText: "t"}, onChunk)
 }
 
@@ -117,7 +125,7 @@ func TestFeedScan_CodexToolResultAndAgyText_OneFindingEach(t *testing.T) {
 				t.Fatalf("findings = %d, want 1: %v", len(fs), fs)
 			}
 			f := fs[0]
-			if f["event_kind"] != c.kind || f["runtime"] != c.name || f["severity"] != "critical" || f["recommended_action"] != "surface_to_operator" || f["overall"] != "WARN" {
+			if f["event_kind"] != c.kind || f["runtime"] != c.name || f["severity"] != "critical" || f["recommended_action"] != "review" || f["overall"] != "WARN" {
 				t.Errorf("finding = %v", f)
 			}
 			raw, _ := json.Marshal(f)
@@ -185,7 +193,7 @@ func TestFeedScan_WarnNeverKills(t *testing.T) {
 		t.Fatalf("warn killed the run: %+v %v", res, err)
 	}
 	fs := findings(t, work)
-	if len(fs) != 1 || fs[0]["severity"] != "warn" || fs[0]["recommended_action"] != "continue" {
+	if len(fs) != 1 || fs[0]["severity"] != "warn" || fs[0]["recommended_action"] != "review" {
 		t.Errorf("findings = %v", fs)
 	}
 }
@@ -204,7 +212,7 @@ func TestFeedScan_ProjectConfigCannotEnableKill(t *testing.T) {
 }
 
 func TestFeedScan_ClaudeIsNotScanned(t *testing.T) {
-	if newFeedScanner("claude", "s", func() {}) != nil {
+	if newFeedScanner("claude", "s", "", func() {}) != nil {
 		t.Fatal("claude must not get a feed scanner (its hook scans in-session; stream path is pinned)")
 	}
 	needSh(t)
@@ -253,7 +261,7 @@ func TestFeedScan_SlowScannerNeverStallsStream(t *testing.T) {
 }
 
 func TestFeedScan_DeadlineIsPerRunNotPerEvent(t *testing.T) {
-	f := newFeedScanner("codex", "s", nil)
+	f := newFeedScanner("codex", "s", "", nil)
 	f.workCurrent = ""
 	f.deadline = 10 * time.Millisecond
 	release := make(chan struct{})
@@ -266,10 +274,10 @@ func TestFeedScan_DeadlineIsPerRunNotPerEvent(t *testing.T) {
 		f.observe(ev)
 	}
 	if d := time.Since(start); d > time.Second {
-		t.Errorf("50 events took %v: the deadline must disable the feed after the first overrun", d)
+		t.Errorf("50 events took %v: the deadline must disable the feed after the third overrun", d)
 	}
-	if calls.Load() != 1 || !f.off {
-		t.Errorf("calls = %d off = %v", calls.Load(), f.off)
+	if calls.Load() != feedScanMaxOverrun || !f.off || f.offReason != "deadline" {
+		t.Errorf("calls = %d off = %v reason = %q", calls.Load(), f.off, f.offReason)
 	}
 }
 
@@ -316,7 +324,7 @@ func TestFeedScan_OversizeEventBounded(t *testing.T) {
 }
 
 func TestFeedScan_TotalByteBudgetAndReportCap(t *testing.T) {
-	f := newFeedScanner("agy", "s", nil)
+	f := newFeedScanner("agy", "s", "", nil)
 	f.workCurrent = ""
 	f.scan = func(string) []string { return nil }
 	big := strings.Repeat("a", feedScanEventBytes)
@@ -326,7 +334,7 @@ func TestFeedScan_TotalByteBudgetAndReportCap(t *testing.T) {
 	if !f.off {
 		t.Error("total byte budget did not switch the feed off")
 	}
-	g := newFeedScanner("agy", "s", nil)
+	g := newFeedScanner("agy", "s", "", nil)
 	g.workCurrent = ""
 	n := 0
 	g.scan = func(string) []string {
@@ -336,13 +344,13 @@ func TestFeedScan_TotalByteBudgetAndReportCap(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		g.observe(runtime.NativeEvent{Kind: runtime.EventToken, Text: "hello"})
 	}
-	if g.findings != feedScanMaxReports {
-		t.Errorf("findings = %d, want cap %d", g.findings, feedScanMaxReports)
+	if g.findings != feedScanMaxCounted || g.written != feedScanMaxWritten {
+		t.Errorf("findings = %d written = %d, want caps %d and %d", g.findings, g.written, feedScanMaxCounted, feedScanMaxWritten)
 	}
 }
 
 func TestFeedScan_IgnoresPlainAndNonTextEvents(t *testing.T) {
-	f := newFeedScanner("codex", "s", nil)
+	f := newFeedScanner("codex", "s", "", nil)
 	f.workCurrent = ""
 	called := false
 	f.scan = func(string) []string { called = true; return nil }
@@ -360,13 +368,13 @@ func TestFeedScan_IgnoresPlainAndNonTextEvents(t *testing.T) {
 func TestFeedScan_OneShotCapturedOutput(t *testing.T) {
 	work, _ := feedEnv(t)
 	out := []byte(codexToolResultLine(injection) + "\n" + codexToolResultLine("fine") + "\n")
-	if n := scanCaptured("codex", "s", out); n != 1 {
+	if n, _ := scanCaptured("codex", "s", feedProj, out); n != 1 {
 		t.Fatalf("findings = %d", n)
 	}
 	if len(findings(t, work)) != 1 {
 		t.Error("one-shot finding not written")
 	}
-	if n := scanCaptured("claude", "s", out); n != 0 {
+	if n, _ := scanCaptured("claude", "s", feedProj, out); n != 0 {
 		t.Error("claude one-shot output scanned")
 	}
 }

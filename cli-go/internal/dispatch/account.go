@@ -312,6 +312,9 @@ func applyLedger(ev *finishedEvent, req Request, res Result) {
 		ev.ScanFindings = res.ScanFindings
 	}
 	ev.CancelReason = logText(res.CancelReason, 96)
+	if res.ScanOffReason == "budget" || res.ScanOffReason == "deadline" {
+		ev.ScanOffReason = res.ScanOffReason // fixed strings only
+	}
 }
 
 // nonNegative returns v, or 0 when v is negative.

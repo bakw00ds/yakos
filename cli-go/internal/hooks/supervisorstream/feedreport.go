@@ -73,11 +73,16 @@ func ReportFeedFinding(workCurrent string, f FeedFinding, now time.Time) error {
 		labels = labels[:feedFindingMaxLabels]
 	}
 	sev := "warn"
-	action := "continue"
 	if f.Severity == "critical" {
 		sev = "critical"
-		action = "surface_to_operator"
 	}
+	// K-146: a detect-only output finding NEVER carries an ack-gate tier. Model
+	// and tool output control these records, so surface_to_operator would let a
+	// hostile page halt the lead's dispatch. Both ack gates ignore "review";
+	// `yakos supervise pending` lists these records in a separate section. When
+	// kill_on_critical fires the kill itself is the response and the ledger's
+	// cancel_reason records it.
+	const action = "review"
 	ts := now.UTC().Format(time.RFC3339)
 	rec := map[string]any{
 		"ts": ts, "batch_size": 0, "scores": map[string]any{},
@@ -90,22 +95,44 @@ func ReportFeedFinding(workCurrent string, f FeedFinding, now time.Time) error {
 	if err := appendNoFollow(filepath.Join(workCurrent, "supervisor-findings.ndjson"), rec); err != nil {
 		return err
 	}
-	appendPending(filepath.Join(workCurrent, ".supervisor-pending."+sessionKey(f.Session)), map[string]any{
+	pend, err := json.Marshal(map[string]any{
 		"ts": ts, "agent": f.Runtime, "tool": "event-scan:" + f.Kind, "session_id": sessionKey(f.Session),
 		"input": map[string]any{"labels": labels, "severity": sev},
 	})
-	return nil
+	if err != nil {
+		return err
+	}
+	return appendPendingLines(filepath.Join(workCurrent, ".supervisor-pending."+sessionKey(f.Session)), []string{string(pend)})
+}
+
+// openRegularNoFollow opens path for writing without ever following a link or
+// touching a non-regular file: Lstat refuses an existing non-regular entry, the
+// open carries O_NOFOLLOW where the platform has it, and the opened descriptor
+// must be a regular file that is the same file Lstat saw (a swap between the two
+// is refused). Permissions are set by the caller on the descriptor, never the path.
+func openRegularNoFollow(path string, flag int, perm os.FileMode) (*os.File, error) {
+	pre, lerr := os.Lstat(path)
+	if lerr == nil && !pre.Mode().IsRegular() {
+		return nil, os.ErrInvalid
+	}
+	f, err := os.OpenFile(path, flag|openNoFollow, perm) //nolint:gosec
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil || !fi.Mode().IsRegular() || (lerr == nil && !os.SameFile(pre, fi)) {
+		_ = f.Close()
+		return nil, os.ErrInvalid
+	}
+	return f, nil
 }
 
 func appendNoFollow(path string, rec map[string]any) error {
-	if fi, err := os.Lstat(path); err == nil && !fi.Mode().IsRegular() {
-		return os.ErrInvalid
-	}
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec
+	f, err := openRegularNoFollow(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}

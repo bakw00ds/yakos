@@ -466,7 +466,7 @@ func execWithStreaming(
 		// K-146: detect-and-report scan of the normalized events (nil for claude).
 		ctx, cancelRun := context.WithCancel(ctx)
 		defer cancelRun()
-		tap = newFeedScanner(adapter.Name(), req.SessionID, cancelRun)
+		tap = newFeedScanner(adapter.Name(), req.SessionID, req.Project, cancelRun)
 		cmd := cp.ChatExecCmd(ctx, chatReq)
 		runtime.ConfigureGroupKill(cmd) // ctx cancel kills the whole group; Wait is bounded
 
@@ -688,7 +688,7 @@ func execWithStreaming(
 	}
 
 	if tap != nil {
-		result.ScanFindings, result.CancelReason = tap.findings, tap.cancelled
+		result.ScanFindings, result.CancelReason, result.ScanOffReason = tap.findings, tap.cancelled, tap.offReason
 	}
 
 	// Finish the ledger entry identically to Run (parity invariant).

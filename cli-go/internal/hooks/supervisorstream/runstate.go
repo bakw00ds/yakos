@@ -2,6 +2,7 @@ package supervisorstream
 
 import (
 	"encoding/json"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -146,11 +147,15 @@ func appendPending(path string, event map[string]any) {
 
 // appendPendingLine appends one already-encoded preview line (a journal record
 // carries its own). An empty line is not recorded.
-func appendPendingLine(path, line string) { appendPendingLines(path, []string{line}) }
+func appendPendingLine(path, line string) { _ = appendPendingLines(path, []string{line}) }
 
 // appendPendingLines appends already-encoded preview lines in one write and keeps
 // the file to its last 100 lines once it passes 150. Empty lines are not recorded.
-func appendPendingLines(path string, lines []string) {
+// The pending file lives in a directory the sandboxed model may be able to write
+// to, so it is opened without following links and only a regular file is ever
+// written, read or chmod-ed (through the descriptor); a link or other non-regular
+// entry is refused with os.ErrInvalid.
+func appendPendingLines(path string, lines []string) error {
 	var b strings.Builder
 	for _, l := range lines {
 		if l != "" {
@@ -159,25 +164,37 @@ func appendPendingLines(path string, lines []string) {
 		}
 	}
 	if b.Len() == 0 {
-		return
+		return nil
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) //nolint:gosec
+	f, err := openRegularNoFollow(path, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
-		return
+		return err
 	}
-	_, _ = f.WriteString(b.String())
-	_ = f.Close()
-	_ = os.Chmod(path, 0o600)
-	if all, rerr := os.ReadFile(path); rerr == nil { //nolint:gosec
-		all := strings.Split(strings.TrimRight(string(all), "\n"), "\n")
-		if len(all) > 150 {
-			tail := strings.Join(all[len(all)-100:], "\n") + "\n"
-			tmp := path + ".tmp." + strconv.Itoa(os.Getpid())
-			if os.WriteFile(tmp, []byte(tail), 0o600) == nil {
-				if renameReplace(tmp, path) != nil {
-					_ = os.Remove(tmp)
-				}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteString(b.String()); err != nil {
+		return err
+	}
+	_ = f.Chmod(0o600)
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil
+	}
+	raw, rerr := io.ReadAll(f)
+	if rerr != nil {
+		return nil
+	}
+	all := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(all) > 150 {
+		tail := strings.Join(all[len(all)-100:], "\n") + "\n"
+		tmp := path + ".tmp." + strconv.Itoa(os.Getpid())
+		// a planted link at tmp is removed, never followed
+		_ = os.Remove(tmp)
+		if tf, terr := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL|openNoFollow, 0o600); terr == nil { //nolint:gosec
+			_, werr := tf.WriteString(tail)
+			cerr := tf.Close()
+			if werr != nil || cerr != nil || renameReplace(tmp, path) != nil {
+				_ = os.Remove(tmp)
 			}
 		}
 	}
+	return nil
 }
