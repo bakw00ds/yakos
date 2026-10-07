@@ -1,0 +1,17 @@
+exit: 0
+{
+  "agent": "pinned",
+  "runtime": "claude",
+  "model": "opus",
+  "provider": "anthropic",
+  "rule": "R0",
+  "overrides": [],
+  "chain": [
+    "claude"
+  ],
+  "reason": "default chain: runtime claude by default",
+  "fallback_from": "",
+  "route_class": "default",
+  "policy_sha": "",
+  "skipped": []
+}

@@ -65,6 +65,7 @@ _yakos() {
         'decide:ask a typed decision provider (Jev or mock)'
         'budget:per-agent dollar budgets with a hard stop'
         'models:provider-aware model registry (list, show, probe)'
+        'router:explain how the router routes a dispatch'
         'plan:score and correlate plan quality'
         'work:record plan outcome and close work session'
         'workflow:run a named multi-step workflow'

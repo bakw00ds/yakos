@@ -1,0 +1,12 @@
+exit: 0
+claude/opus rule=R3 chain=[claude codex]
+agent: pinned
+runtime: claude
+model: opus
+provider: anthropic
+rule: R3
+chain: [claude codex]
+reason: rule R3 matched [class=chat]: runtime=claude fallbacks=[codex]
+fallback_from: -
+route_class: chat
+policy_sha: 3f4135ea62d49d5ac61c14051d709ac1dc84442814bc2d268d3e4d3abcc09a72

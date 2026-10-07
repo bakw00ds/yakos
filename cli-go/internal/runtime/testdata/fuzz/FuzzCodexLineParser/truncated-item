@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"type\":\"thread.started\",\"thread_id\":\"t\"}\n{\"type\":\"item.completed\",\"item\":{\"id\":\"i\",\"type\":\"agent_mes")

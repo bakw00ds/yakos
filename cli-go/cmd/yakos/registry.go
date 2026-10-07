@@ -255,7 +255,7 @@ var commandRegistry = []commandEntry{
 	},
 	{
 		Name:   "dispatch",
-		Specs:  specSet("dispatch", "--runtime", "--runtime-fallback", "--model", "--project", "--timeout", "--eval-run-id", "--allow-root"),
+		Specs:  specSet("dispatch", "--runtime", "--runtime-fallback", "--model", "--project", "--timeout", "--eval-run-id", "--allow-root", "--explain"),
 		HelpFn: printDispatchHelp,
 	},
 	{
@@ -376,6 +376,14 @@ var commandRegistry = []commandEntry{
 		Specs:  helpDerivedSpecs("retro", retro.PrintHelp),
 	},
 	{
+		Name:   "router",
+		Specs:  specSet("router", "--json", "--task-file", "--class", "--project"),
+		HelpFn: printRouterHelp,
+		AllowUnparsed: []flagAllow{
+			{Flag: "--explain", Reason: "printRouterHelp points at `yakos dispatch --explain`, dispatch's flag"},
+		},
+	},
+	{
 		Name: "serve",
 		Specs: specSet("serve", "--socket", "--pidfile", "--ws-addr", "--perf-addr", "--console-addr",
 			"--console-bind", "--console-external-host", "--rotate-ws-token", "--rotate-perf-token",
@@ -491,7 +499,7 @@ var commandRegistry = []commandEntry{
 	},
 	{
 		Name:   "workflow",
-		Specs:  specSet("workflow", "--run-id", "--operator", "--prior-run-id", "--new-run-id"),
+		Specs:  specSet("workflow", "--run-id", "--operator", "--prior-run-id", "--new-run-id", "--dry-run"),
 		HelpFn: printWorkflowHelp,
 	},
 }

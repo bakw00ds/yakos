@@ -1,0 +1,14 @@
+exit: 0
+claude/sonnet rule=R0 chain=[claude]
+agent: backend
+runtime: claude
+model: sonnet
+provider: anthropic
+rule: R0
+chain: [claude]
+reason: default chain: runtime claude by default
+fallback_from: -
+route_class: subagent
+policy_sha: -
+env_class: subagent
+env: (no gateway_classes alias for this class)
