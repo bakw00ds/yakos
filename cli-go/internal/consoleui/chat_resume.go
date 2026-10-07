@@ -72,6 +72,12 @@ func (ch *chatHandlers) runResumePane(ctx context.Context, a resumePaneArgs) {
 				WorkDirOverride: a.worktreeOverride,
 				Surface:         dispatch.SurfaceConsoleChat,
 			},
+			// K-149: the same pack bytes a one-shot pane gets (the stored file,
+			// composed once per conversation) and the skill tail of a /<slug> turn.
+			PrepareTurn: func(text string) (string, string) {
+				block, task := ch.nonClaudeTurn(a.runtimeName, conversationID, operatorID, d.Agent, text)
+				return task, block
+			},
 			Sessions: func() map[string]string {
 				if !useStore {
 					return nil

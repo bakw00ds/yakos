@@ -385,6 +385,7 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 	} else if rr.Runtime == "claude" {
 		chatReq.ResumeSessionID = p.ResumeSessionID
 	}
+	chatReq.AgentSystemPrompt = knowledgePersona(rr.Runtime, p, chatReq.AgentSystemPrompt, chatReq.ResumeSessionID != "")
 
 	// --- Acquire governor slot (mirrors Service.Run) ---
 	select {
@@ -792,4 +793,24 @@ func emitNativeEvent(ev runtime.NativeEvent, streamedText *bool, onChunk func(St
 	case runtime.EventToolResult:
 		emitToolChunk(&runtime.ToolEvent{Kind: "tool_result", ToolName: ev.ToolName, Output: ev.ToolOutput, IsError: ev.IsError}, onChunk)
 	}
+}
+
+// knowledgePersona picks the persona text of a chat turn (K-149): the stored
+// knowledge block replaces the agent body on codex and agy. claude is never
+// touched, so its --append-system-prompt bytes stay what they were; an agy turn
+// that resumes a native agy session sends none, because that conversation
+// already holds the block from its first turn.
+//
+// Which path skips: only a RunStream call whose Params.NativeSessions names an
+// agy id, i.e. a turn of an interactive agy pane (interactive.ResumeEngine,
+// K-147). The one-shot console path (chat_handler's direct RunStream) never
+// passes NativeSessions for agy, so it sends the stored block on every turn.
+func knowledgePersona(rt string, p Params, persona string, resumed bool) string {
+	if p.Knowledge == "" || (rt != "codex" && rt != "agy") {
+		return persona
+	}
+	if rt == "agy" && resumed {
+		return ""
+	}
+	return p.Knowledge
 }
