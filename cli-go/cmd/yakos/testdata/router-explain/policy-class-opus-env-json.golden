@@ -1,0 +1,26 @@
+exit: 0
+{
+  "agent": "backend",
+  "runtime": "claude",
+  "model": "sonnet",
+  "provider": "anthropic",
+  "rule": "R0",
+  "overrides": [],
+  "chain": [
+    "claude"
+  ],
+  "reason": "default chain: runtime claude by default",
+  "fallback_from": "",
+  "route_class": "opus",
+  "policy_sha": "3f4135ea62d49d5ac61c14051d709ac1dc84442814bc2d268d3e4d3abcc09a72",
+  "skipped": [],
+  "env_class": "opus",
+  "env": [
+    {
+      "name": "ANTHROPIC_DEFAULT_OPUS_MODEL",
+      "model": "claude-opus-4-1-20250805",
+      "class": "opus",
+      "overridden": false
+    }
+  ]
+}

@@ -72,3 +72,7 @@ tests/fixtures/ledger-compat/* text eol=lf
 
 # Frozen routing golden (generated once at base 24f0a6ba); compared byte for byte.
 cli-go/internal/dispatch/testdata/route_p0a_golden.txt text eol=lf
+
+# Router explain goldens (K-139b): `yakos router explain` output compared byte for
+# byte; force LF so a Windows autocrlf checkout cannot make the compare fail.
+cli-go/cmd/yakos/testdata/router-explain/*.golden text eol=lf

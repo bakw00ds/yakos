@@ -1,0 +1,14 @@
+exit: 0
+claude/sonnet rule=R0 chain=[claude]
+agent: backend
+runtime: claude
+model: sonnet
+provider: anthropic
+rule: R0
+chain: [claude]
+reason: default chain: runtime claude by default
+fallback_from: -
+route_class: opus
+policy_sha: 3f4135ea62d49d5ac61c14051d709ac1dc84442814bc2d268d3e4d3abcc09a72
+env_class: opus
+env: ANTHROPIC_DEFAULT_OPUS_MODEL not set (your environment already sets it)

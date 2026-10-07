@@ -1,0 +1,14 @@
+exit: 0
+claude/opus rule=override chain=[claude]
+agent: backend
+runtime: claude
+model: opus
+provider: anthropic
+rule: override
+overrides: model
+underlying_rule: R0
+chain: [claude]
+reason: default chain: runtime claude by default
+fallback_from: -
+route_class: default
+policy_sha: 3f4135ea62d49d5ac61c14051d709ac1dc84442814bc2d268d3e4d3abcc09a72

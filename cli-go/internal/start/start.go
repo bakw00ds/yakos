@@ -88,8 +88,8 @@ type Config struct {
 	PrintAgents bool
 
 	// PrintEnv prints the router-policy class aliases (K-141) the runtime would
-	// get and exits, without launching it. TODO(K-139b): `yakos router explain
-	// --class` replaces this dry run.
+	// get and exits, without launching it. `yakos router explain --class <class>`
+	// reports the same aliases for one class, with the routing decision.
 	PrintEnv bool
 
 	// --- session passthrough flags ---

@@ -284,6 +284,11 @@ case "$cmd" in
         fi
         bash "$script" "$@"
         ;;
+    router)
+        # The router has no bash implementation (K-143); it is Go-only.
+        echo "yakos router: requires the Go implementation (run with YAKOS_IMPL=go, or use the yakos binary)" >&2
+        exit 64  # EX_USAGE
+        ;;
     version-bump)
         bump_script="$YAKOS_ROOT/lib/skills/version-bump/scripts/bump.sh"
         if [ ! -x "$bump_script" ]; then

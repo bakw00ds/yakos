@@ -191,7 +191,7 @@ func main() {
 	//
 	// `doctor` is a deliberate exception to this gate (unless YAKOS_IMPL=bash
 	// is explicit): see isDoctorForceGo's doc comment.
-	if !isDoctorForceGo(os.Getenv("YAKOS_IMPL"), args) && !isHookForceGo(args) && !isDecideForceGo(args) && !isBudgetForceGo(args) && !isModelsForceGo(args) {
+	if !isDoctorForceGo(os.Getenv("YAKOS_IMPL"), args) && !isHookForceGo(args) && !isDecideForceGo(args) && !isBudgetForceGo(args) && !isModelsForceGo(args) && !isRouterForceGo(args) {
 		switch selectImpl(os.Getenv("YAKOS_IMPL"), passthrough.BashYakosExists(yakosRoot)) {
 		case implPassthrough:
 			// The bash dispatch has no dollar budget; enforce it here (K-119).
@@ -223,6 +223,8 @@ func main() {
 		runBudget(args[1:])
 	case "models":
 		runModels(args[1:])
+	case "router":
+		runRouter(yakosRoot, args[1:])
 	case "cost":
 		runCost(args[1:])
 	case "status":

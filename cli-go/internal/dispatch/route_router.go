@@ -330,7 +330,10 @@ func (st routerState) remember(conversation, agent, project string, d router.Rou
 type ExplainQuery struct {
 	YakosRoot, Project, Agent string
 	Runtime                   string // explicit runtime, "" or "auto" for none
+	RuntimeEnvDefault         string // $YAKOS_RUNTIME, read by the CLI one-shot path only
+	RuntimeFallbackOptIn      []string
 	Model                     string // explicit model
+	EvalRunID                 string
 	Class                     string // route class, "" = classify
 	TaskBytes                 int64
 	ConversationID            string
@@ -342,6 +345,7 @@ func Explain(ctx context.Context, q ExplainQuery) (router.RouteDecision, error) 
 	rr, err := routeDispatchAt(ctx, routeInput{
 		YakosRoot: q.YakosRoot, Project: q.Project, Agent: q.Agent,
 		RuntimeOverride: q.Runtime, ModelOverride: q.Model,
+		RuntimeEnvDefault: q.RuntimeEnvDefault, RuntimeFallbackOptIn: q.RuntimeFallbackOptIn, EvalRunID: q.EvalRunID,
 		Class: q.Class, TaskBytes: q.TaskBytes, ConversationID: q.ConversationID,
 	}, true)
 	if err != nil {

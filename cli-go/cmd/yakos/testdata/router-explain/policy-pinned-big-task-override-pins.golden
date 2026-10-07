@@ -1,0 +1,12 @@
+exit: 0
+claude/haiku rule=R2 chain=[claude]
+agent: pinned
+runtime: claude
+model: haiku
+provider: anthropic
+rule: R2
+chain: [claude]
+reason: rule R2 matched [task_bytes_gt=20000]: model=haiku
+fallback_from: -
+route_class: default
+policy_sha: 3f4135ea62d49d5ac61c14051d709ac1dc84442814bc2d268d3e4d3abcc09a72

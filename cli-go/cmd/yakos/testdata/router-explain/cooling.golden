@@ -1,0 +1,12 @@
+claude/sonnet rule=R1 chain=[codex claude]
+agent: reviewer
+runtime: claude
+model: sonnet
+provider: anthropic
+rule: R1
+chain: [codex claude]
+reason: rule R1 matched [domain=code-review]: runtime=codex fallbacks=[claude]; fell back from codex
+fallback_from: codex
+route_class: default
+policy_sha: 0123456789abcdef
+skipped: codex (cooling)
