@@ -29,6 +29,10 @@ func Match(pattern, name string) bool {
 	return fnmatchRunes([]rune(pattern), []rune(name))
 }
 
+// MatchRunes is Match for a caller that matches many names against many
+// patterns and holds them as rune slices already (no per-call conversion).
+func MatchRunes(pattern, name []rune) bool { return fnmatchRunes(pattern, name) }
+
 func fnmatchRunes(p, s []rune) bool {
 	// Iterative matcher with single-star backtracking: O(len(p)*len(s))
 	// worst case, no exponential blowup on adversarial "*a*a*a*b" patterns.

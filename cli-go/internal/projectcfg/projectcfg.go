@@ -83,6 +83,11 @@ type Config struct {
 	// provider list, so a cloned repository cannot widen where a task is sent.
 	DisableRuntimes []string
 	DisableModels   []string
+	// NeverPaths come from router.never_paths (K-140): extra credential-file globs
+	// that make a request sensitive. They ADD to the built-in never-paths the
+	// router always applies and can never remove one; a project can only narrow
+	// where a request is routed.
+	NeverPaths []string
 }
 
 // RuntimeDisabled reports whether the project switches runtime name off.
@@ -113,8 +118,51 @@ func contains(list []string, s string) bool {
 	return false
 }
 
+// neverPathRe is the shape of a router.never_paths glob: path characters and
+// glob metacharacters, no control characters, no space.
+var neverPathRe = regexp.MustCompile(`^[A-Za-z0-9_.*?\[\]!^@~+/-]{1,256}$`)
+
 // maxDisables bounds each router disable list.
 const maxDisables = 64
+
+// MaxNeverPaths bounds router.never_paths: every entry is matched against every
+// token of every request, so the list is kept short (K-140 fixup F3).
+const MaxNeverPaths = 32
+
+// maxGlobMeta and maxGlobStars bound the work one never_paths glob can cost a
+// match: at most 8 of `*?[` in total (maxGlobMeta, plus maxGlobStars for the
+// stars of `**` runs), at most two `**` runs, a glob of at most maxGlobLen bytes
+// and no bracket expression longer than maxBracketLen. A glob of 64 chained
+// `[!b]` classes, or one long class, is a CPU sink, not a credential name.
+const (
+	maxGlobMeta   = 6
+	maxGlobStars  = 2
+	maxGlobLen    = 128
+	maxBracketLen = 16
+)
+
+// NeverPathSimpleEnough reports whether a never_paths glob is cheap enough to
+// match against every token of a request. The router applies the same bound to
+// any project glob it is handed.
+func NeverPathSimpleEnough(glob string) bool {
+	if len(glob) > maxGlobLen {
+		return false
+	}
+	for i := 0; i < len(glob); i++ {
+		if glob[i] != '[' {
+			continue
+		}
+		j := i + 1
+		for j < len(glob) && glob[j] != ']' {
+			j++
+		}
+		if j-i > maxBracketLen {
+			return false
+		}
+		i = j
+	}
+	return strings.Count(glob, "**") <= maxGlobStars && strings.Count(glob, "*")+strings.Count(glob, "?")+strings.Count(glob, "[") <= maxGlobMeta+maxGlobStars
+}
 
 // modelIDRe is the shape of a model id (runtime.ModelIDPattern).
 var modelIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,63}$`)
@@ -247,7 +295,7 @@ func Parse(data []byte) (Config, []string) {
 	if v, ok := doc["router"]; ok && v != nil {
 		m, ok := stringMap(v)
 		if !ok {
-			warns = append(warns, "router: want a mapping with disable_runtimes and disable_models lists; ignored")
+			warns = append(warns, "router: want a mapping with disable_runtimes, disable_models and never_paths lists; ignored")
 		} else {
 			keys := make([]string, 0, len(m))
 			for k := range m {
@@ -264,14 +312,37 @@ func Parse(data []byte) (Config, []string) {
 					var w []string
 					cfg.DisableModels, w = disableList(k, m[k], modelIDRe)
 					warns = append(warns, w...)
+				case "never_paths":
+					var w []string
+					cfg.NeverPaths, w = neverPathList(m[k])
+					warns = append(warns, w...)
 				default:
-					warns = append(warns, "router: a project can only disable runtimes and models; ignoring that key")
+					warns = append(warns, "router: a project can only disable runtimes and models or add never_paths; ignoring that key")
 				}
 			}
 		}
 	}
 
 	return cfg, warns
+}
+
+// neverPathList reads router.never_paths: disableList's shape check, then the
+// complexity bound, then at most MaxNeverPaths entries.
+func neverPathList(v any) ([]string, []string) {
+	all, warns := disableList("never_paths", v, neverPathRe)
+	var out []string
+	for _, g := range all {
+		if !NeverPathSimpleEnough(g) {
+			warns = append(warns, "router.never_paths: skipping a glob with too many wildcards")
+			continue
+		}
+		if len(out) >= MaxNeverPaths {
+			warns = append(warns, fmt.Sprintf("router.never_paths: only the first %d entries are read", MaxNeverPaths))
+			break
+		}
+		out = append(out, g)
+	}
+	return out, warns
 }
 
 // disableList reads one router disable list: strings that match re, deduplicated,

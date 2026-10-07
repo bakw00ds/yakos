@@ -154,6 +154,10 @@ type Params struct {
 	// short lowercase identifier, so it cannot carry free text into the log.
 	Surface string
 
+	// ScanExtra: see Request.ScanExtra. Set by trusted server-side code only (the
+	// flows engine, the chat transport), never from a request body.
+	ScanExtra []string
+
 	// isMCPStamped signals that this Params was built by the MCP transport
 	// layer, not by a human-facing transport (gRPC/REST/JSON-RPC/console).
 	// Only the MCP transport sets this to true; it is not derivable from the
@@ -332,6 +336,7 @@ func (s *Service) Run(ctx context.Context, p Params) (stdout []byte, result Resu
 		WorkDirOverride: p.WorkDirOverride,
 		Effort:          p.Effort,
 		Surface:         p.Surface,
+		ScanExtra:       p.ScanExtra,
 	}
 
 	// --- Acquire governor slot ---
