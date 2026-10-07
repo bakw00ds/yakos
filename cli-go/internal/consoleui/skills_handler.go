@@ -94,6 +94,7 @@ type skillsResponse struct {
 var staticCommands = []clientCommand{
 	{Name: "clear", Summary: "clear the pane"},
 	{Name: "help", Summary: "list commands"},
+	{Name: "context", Summary: "show the knowledge pack this conversation was given"},
 	{Name: "attach", Summary: "attach to a session (coming soon)"},
 }
 

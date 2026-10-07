@@ -62,6 +62,13 @@ type ResumeEngineParams struct {
 	// failed, so the caller can drop a dead id.
 	ForgetSession func(rt string, res dispatch.Result)
 
+	// PrepareTurn, when set, is called at the start of every turn with the
+	// user's text and returns the task to dispatch (a skill tail may be appended
+	// to it) and the conversation's stored knowledge block for
+	// dispatch.Params.Knowledge (K-149). The block must be the same stored bytes
+	// every turn.
+	PrepareTurn func(text string) (task, knowledge string)
+
 	// OnTurnError receives a RunStream error that is not a cancellation (a
 	// refused budget, a bad id, a launch failure). The engine stays usable.
 	OnTurnError func(err error)
@@ -169,6 +176,9 @@ func (e *ResumeEngine) runTurn(seq uint64, text string) {
 
 	params := e.p.Base
 	params.Task = text
+	if e.p.PrepareTurn != nil {
+		params.Task, params.Knowledge = e.p.PrepareTurn(text)
+	}
 	params.ResumeSessionID = ""
 	sessions := map[string]string{}
 	if e.p.Sessions != nil {

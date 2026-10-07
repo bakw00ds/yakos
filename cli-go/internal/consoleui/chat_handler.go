@@ -188,6 +188,12 @@ type chatHandlers struct {
 	// turns gives every turn of an interactive session its dispatch-log event
 	// pair (K-136); see chat_account.go.  Always non-nil.
 	turns *turnLedger
+
+	// loopbackHost is true when the console runs on the loopback trust path
+	// (not networked); loopbackOwnerID is the host operator's identity. Only
+	// that identity may read the host's soul text (K-149 F1).
+	loopbackHost    bool
+	loopbackOwnerID string
 }
 
 // interactiveSender is the minimal interface covering the Send method consumed
@@ -1199,9 +1205,14 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			resumeID = ch.transcripts.NativeSession(conversationID, "claude", capturedOperatorID)
 		}
 
+		// Knowledge pack and skill tail (K-149): non-claude runtimes only; claude
+		// loads the rules natively and its argv stays as it was.
+		knowledgeBlock, dispatchTask := ch.nonClaudeTurn(runtimeName, conversationID, capturedOperatorID, dispReq.Agent, dispReq.Task)
+
 		params := dispatch.Params{
-			Agent: dispReq.Agent,
-			Task:  dispReq.Task,
+			Agent:     dispReq.Agent,
+			Task:      dispatchTask,
+			Knowledge: knowledgeBlock,
 			// The request's own runtime ("" for auto) and model, not the values
 			// resolved above for validation: the dispatcher resolves both again
 			// against the runtime it actually picks, so an alias follows a

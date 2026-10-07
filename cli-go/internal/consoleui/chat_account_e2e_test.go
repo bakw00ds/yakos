@@ -52,13 +52,14 @@ done
 `
 
 type ledgerServer struct {
-	ts       *httptest.Server
-	tok      string
-	logDir   string
-	workDir  string
-	mgr      *interactive.Manager
-	bus      *wsbus.Bus // the bus the handlers publish fleet.* events on
-	launches string     // the fake claude appends a line here each time it is started
+	ts        *httptest.Server
+	tok       string
+	logDir    string
+	workDir   string
+	mgr       *interactive.Manager
+	bus       *wsbus.Bus // the bus the handlers publish fleet.* events on
+	yakosRoot string     // the framework root the handlers read rules and skills from
+	launches  string     // the fake claude appends a line here each time it is started
 }
 
 // launchCount is how many times the fake claude has been started. A turn refused
@@ -153,7 +154,7 @@ func newLedgerServerOpts(t *testing.T, sdk *interactive.SDKEngineFactory, claude
 	}
 	ts := httptest.NewServer(consoleui.RequireTokenForNonStatic(tok, consoleui.RequireJSONForMutations(srv.HandlerForTest())))
 	t.Cleanup(ts.Close)
-	return ledgerServer{ts: ts, tok: tok, logDir: logDir, workDir: workDir, mgr: mgr, bus: bus, launches: launches}
+	return ledgerServer{ts: ts, tok: tok, logDir: logDir, workDir: workDir, mgr: mgr, bus: bus, launches: launches, yakosRoot: yakosRoot}
 }
 
 func (s ledgerServer) post(t *testing.T, path string, body map[string]any) *http.Response {
