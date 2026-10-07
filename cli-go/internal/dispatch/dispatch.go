@@ -218,6 +218,7 @@ func execWithStderrCapture(
 
 	if cp, ok := adapter.(cmdProvider); ok {
 		cmd := cp.ExecCmd(ctx, req)
+		runtime.ConfigureGroupKill(cmd) // ctx cancel kills the whole group; Wait is bounded
 		var outBuf bytes.Buffer
 		cmd.Stdout = &outBuf
 		cmd.Stderr = stderrBuf

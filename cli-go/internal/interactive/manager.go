@@ -227,6 +227,97 @@ func (m *Manager) EnsureSDK(conversationID, ownerOperatorID string, params SDKEn
 	return eng, nil
 }
 
+// EngineFactory builds an engine for EnsureEngine. It receives the ids the
+// manager stamps so the engine cannot disagree with the entry it lives under.
+type EngineFactory func(conversationID, ownerOperatorID string) (Engine, error)
+
+// EnsureEngine is EnsureSDK for any Engine: it returns the live engine for
+// conversationID or builds one with factory (codex/agy ResumeEngine). Cap,
+// idle-reap, owner-conflict and crash-detection behave exactly as in EnsureSDK.
+func (m *Manager) EnsureEngine(conversationID, ownerOperatorID string, factory EngineFactory) (Engine, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if entry, ok := m.entries[conversationID]; ok {
+		if entry.session.OwnerOperatorID() != ownerOperatorID {
+			return nil, ErrOwnerConflict
+		}
+		if entry.session.IsClosed() {
+			delete(m.entries, conversationID)
+		} else {
+			return entry.session, nil
+		}
+	}
+
+	if len(m.entries) >= m.cap {
+		return nil, ErrCapExceeded
+	}
+
+	eng, err := factory(conversationID, ownerOperatorID)
+	if err != nil {
+		return nil, fmt.Errorf("interactive: EnsureEngine factory: %w", err)
+	}
+	if err := eng.Start(context.Background()); err != nil {
+		return nil, fmt.Errorf("interactive: EnsureEngine start: %w", err)
+	}
+
+	m.entries[conversationID] = &managerEntry{session: eng}
+
+	go func() {
+		<-eng.Closed()
+
+		m.mu.Lock()
+		cur, present := m.entries[conversationID]
+		stillPresent := present && cur.session == eng
+		if stillPresent {
+			delete(m.entries, conversationID)
+		}
+		m.mu.Unlock()
+
+		if stillPresent {
+			slog.Warn("interactive: engine exited unexpectedly",
+				"conversationID", conversationID,
+				"owner", ownerOperatorID,
+			)
+			if m.onError != nil {
+				m.onError(conversationID, conversationID, ownerOperatorID,
+					"interactive session exited unexpectedly")
+			}
+		}
+	}()
+
+	return eng, nil
+}
+
+// AccountsOwnTurns reports whether the live engine for conversationID, owned by
+// ownerOperatorID, accounts its own turns (a ResumeEngine: RunStream writes the
+// Account pair), so the console must not run its turn ledger around them.
+func (m *Manager) AccountsOwnTurns(conversationID, ownerOperatorID string) bool {
+	m.mu.Lock()
+	entry, ok := m.entries[conversationID]
+	m.mu.Unlock()
+	if !ok || entry.session.OwnerOperatorID() != ownerOperatorID {
+		return false
+	}
+	a, ok := entry.session.(interface{ AccountsOwnTurns() bool })
+	return ok && a.AccountsOwnTurns()
+}
+
+// LiveEngineKind reports whether conversationID holds a live engine owned by
+// ownerOperatorID and, if so, whether it is a ResumeEngine (a codex or agy pane)
+// rather than a claude engine. A dispatch uses it to refuse a runtime that does
+// not match the engine already serving the conversation.
+func (m *Manager) LiveEngineKind(conversationID, ownerOperatorID string) (live, resume bool) {
+	m.mu.Lock()
+	entry, ok := m.entries[conversationID]
+	m.mu.Unlock()
+	if !ok || entry.session.IsClosed() || entry.session.OwnerOperatorID() != ownerOperatorID {
+		return false, false
+	}
+	a, isA := entry.session.(interface{ AccountsOwnTurns() bool })
+	return true, isA && a.AccountsOwnTurns()
+}
+
 // Ensure returns (or creates) the live engine for conversationID.
 //
 // If no engine exists, a new Session (CLI engine) is created and started.
