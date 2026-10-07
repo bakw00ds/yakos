@@ -174,9 +174,9 @@ func TestChatDispatch_GeminiIsNotARuntime(t *testing.T) {
 	}
 }
 
-// Interactive mode is a claude process. Toggling it on a pane that resolves to
-// codex/agy used to answer from claude silently; it now says no.
-func TestChatDispatch_InteractiveRefusedForNonClaudeRuntime(t *testing.T) {
+// Interactive mode on a codex or agy pane is a ResumeEngine (K-147), so the
+// toggle is accepted; only the SDK engine's structured questions are claude-only.
+func TestChatDispatch_InteractiveOnNonClaudeRuntime(t *testing.T) {
 	ts, tok, _, _ := newRoutingServer(t, routingYakosRoot(t), nil)
 
 	for _, c := range []struct {
@@ -184,16 +184,17 @@ func TestChatDispatch_InteractiveRefusedForNonClaudeRuntime(t *testing.T) {
 		fields map[string]any
 		want   int
 	}{
-		{"auto pane resolving to codex", map[string]any{"runtime": "", "agent": "general-codex", "interactive": true, "sessionId": "s-i1"}, http.StatusBadRequest},
-		{"explicit agy pane", map[string]any{"runtime": "agy", "agent": "backend", "interactive": true, "sessionId": "s-i2"}, http.StatusBadRequest},
+		{"auto pane resolving to codex", map[string]any{"runtime": "", "agent": "general-codex", "interactive": true, "sessionId": "s-i1"}, http.StatusServiceUnavailable},
+		{"explicit agy pane", map[string]any{"runtime": "agy", "agent": "backend", "interactive": true, "sessionId": "s-i2"}, http.StatusServiceUnavailable},
 		{"auto pane resolving to claude", map[string]any{"runtime": "", "agent": "backend", "model": "sonnet", "interactive": true, "sessionId": "s-i3"}, http.StatusServiceUnavailable},
 		{"explicit claude pane on a codex-pinned agent", map[string]any{"runtime": "claude", "agent": "general-codex", "interactive": true, "sessionId": "s-i4"}, http.StatusServiceUnavailable},
+		{"structured questions on codex", map[string]any{"runtime": "codex", "agent": "backend", "interactive": true, "structuredQuestions": true, "sessionId": "s-i5"}, http.StatusBadRequest},
 	} {
 		got, body := postDispatch(t, ts, tok, c.fields)
 		if got != c.want {
 			t.Errorf("%s: status %d (%s), want %d", c.name, got, strings.TrimSpace(body), c.want)
 		}
-		if c.want == http.StatusBadRequest && !strings.Contains(body, "interactive mode is only available for the claude runtime") {
+		if c.want == http.StatusBadRequest && !strings.Contains(body, "structured questions are only available for the claude runtime") {
 			t.Errorf("%s: body %q does not explain", c.name, body)
 		}
 	}

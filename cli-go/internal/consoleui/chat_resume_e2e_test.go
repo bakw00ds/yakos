@@ -1,0 +1,241 @@
+package consoleui_test
+
+// chat_resume_e2e_test.go: K-147. A codex or agy pane with the Interactive
+// toggle on keeps its context across turns through a ResumeEngine: one
+// RunStream per turn, the harness's own session id carried from turn to turn
+// (and across a manager restart) through the conversation's meta store, one
+// Account event pair per turn.
+//
+// The harnesses are shell stubs on PATH that log their argv and pid. The
+// hanging mode is `exec sleep` so a kill reaches the sleep itself.
+
+import (
+	"net/http"
+	"os"
+	"path/filepath"
+	goruntime "runtime"
+	"strconv"
+	"strings"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/bakw00ds/yakos/internal/consoleui"
+)
+
+const (
+	fakeCodexScript = `#!/bin/sh
+{ echo "--- call"; for a in "$@"; do printf '%s\n' "$a"; done; } >> '@FAKE_ARGV_LOG@'
+echo $$ >> '@FAKE_PIDS@'
+if [ -f '@FAKE_HANG@' ]; then exec sleep 120; fi
+printf '%s\n' '{"type":"thread.started","thread_id":"thread-codex-1"}'
+printf '%s\n' '{"type":"item.completed","item":{"id":"i","type":"agent_message","text":"reply"}}'
+printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}'
+`
+	fakeAgyScript = `#!/bin/sh
+{ echo "--- call"; for a in "$@"; do printf '%s\n' "$a"; done; } >> '@FAKE_ARGV_LOG@'
+echo $$ >> '@FAKE_PIDS@'
+if [ -f '@FAKE_HANG@' ]; then exec sleep 120; fi
+printf '%s\n' '{"event":"init","conversation_id":"conv-agy-1","init":{"model":"agy-model"}}'
+printf '%s\n' '{"event":"result","result":{"conversation_id":"conv-agy-1","status":"SUCCESS","response":"reply","model":"agy-model"}}'
+`
+)
+
+type resumeFixture struct {
+	ledgerServer
+	argvLog, pids, hang string
+}
+
+func newResumeServer(t *testing.T, harness, script string) resumeFixture {
+	t.Helper()
+	if goruntime.GOOS == "windows" {
+		t.Skip("shell stub")
+	}
+	s := newLedgerServer(t)
+	dir := t.TempDir()
+	f := resumeFixture{ledgerServer: s, argvLog: filepath.Join(dir, "argv.log"), pids: filepath.Join(dir, "pids"), hang: filepath.Join(dir, "hang")}
+	bin := t.TempDir()
+	script = strings.NewReplacer("@FAKE_ARGV_LOG@", f.argvLog, "@FAKE_PIDS@", f.pids, "@FAKE_HANG@", f.hang).Replace(script)
+	if err := os.WriteFile(filepath.Join(bin, harness), []byte(script), 0o755); err != nil { //nolint:gosec
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("OPENAI_API_KEY", "sk-test-not-real")
+	t.Cleanup(func() {
+		for _, pid := range f.pidList() {
+			killPID(pid)
+		}
+	})
+	return f
+}
+
+func (f resumeFixture) pidList() []int {
+	raw, _ := os.ReadFile(f.pids)
+	var out []int
+	for _, fld := range strings.Fields(string(raw)) {
+		if pid, err := strconv.Atoi(fld); err == nil && pid > 1 {
+			out = append(out, pid)
+		}
+	}
+	return out
+}
+
+func (f resumeFixture) calls(t *testing.T) [][]string {
+	t.Helper()
+	raw, _ := os.ReadFile(f.argvLog)
+	var out [][]string
+	for _, block := range strings.Split(string(raw), "--- call\n")[1:] {
+		out = append(out, strings.Split(strings.TrimRight(block, "\n"), "\n"))
+	}
+	return out
+}
+
+func (f resumeFixture) dispatchTurn(t *testing.T, harness, conv, task string) {
+	t.Helper()
+	resp := f.post(t, "/api/chat/dispatch", map[string]any{
+		"agent": harness, "runtime": harness, "task": task, "sessionId": "sess-" + conv,
+		"operatorId": "alice", "conversationId": conv, "interactive": true,
+	})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("dispatch: %d", resp.StatusCode)
+	}
+}
+
+func (f resumeFixture) sendTurn(t *testing.T, conv, text string) int {
+	t.Helper()
+	resp := f.post(t, "/api/chat/send", map[string]any{
+		"conversationId": conv, "operatorId": "alice", "sessionId": "sess-" + conv, "text": text,
+	})
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+func has(argv []string, want ...string) bool {
+	for i := range argv {
+		if i+len(want) <= len(argv) && strings.Join(argv[i:i+len(want)], "\x00") == strings.Join(want, "\x00") {
+			return true
+		}
+	}
+	return false
+}
+
+func (f resumeFixture) pairsAfter(t *testing.T, n int) {
+	t.Helper()
+	f.waitForEvents(t, 2*n)
+	time.Sleep(250 * time.Millisecond) // nothing more may arrive
+	var started, finished int
+	for _, ev := range f.events(t) {
+		switch ev["type"] {
+		case "dispatch_started":
+			started++
+		case "dispatch_finished":
+			finished++
+		}
+	}
+	if started != n || finished != n {
+		t.Fatalf("%d turns must leave %d started and %d finished events, got %d / %d", n, n, n, started, finished)
+	}
+}
+
+func waitCalls(t *testing.T, f resumeFixture, n int) {
+	t.Helper()
+	waitUntil(t, "harness call", func() bool { return len(f.calls(t)) >= n })
+}
+
+func TestResumePane_CodexCarriesThreadAcrossTurnsAndRestart(t *testing.T) {
+	f := newResumeServer(t, "codex", fakeCodexScript)
+	const conv = "conv-codex-resume"
+
+	f.dispatchTurn(t, "codex", conv, "first")
+	f.waitForEvents(t, 2)
+	if has(f.calls(t)[0], "resume") {
+		t.Fatalf("turn 1 must not resume: %v", f.calls(t)[0])
+	}
+	store := consoleui.NewTranscripts(f.workDir)
+	waitUntil(t, "thread id stored", func() bool { return store.NativeSession(conv, "codex", "alice") == "thread-codex-1" })
+
+	if got := f.sendTurn(t, conv, "second"); got != http.StatusAccepted {
+		t.Fatalf("send: %d", got)
+	}
+	f.waitForEvents(t, 4)
+	if c := f.calls(t); len(c) != 2 || !has(c[1], "exec", "resume") || !has(c[1], "--", "thread-codex-1", "second") {
+		t.Fatalf("turn 2 must run `exec resume ... -- thread-codex-1 second`: %v", c)
+	}
+	f.pairsAfter(t, 2)
+	if f.mgr.AccountsOwnTurns(conv, "alice") != true {
+		t.Error("a codex pane accounts its own turns")
+	}
+
+	// A manager restart: the engine is gone, the id is on disk.
+	f.mgr.Close(conv)
+	waitUntil(t, "engine gone", func() bool { return f.mgr.ActiveCount() == 0 })
+	f.dispatchTurn(t, "codex", conv, "third")
+	f.waitForEvents(t, 6)
+	if c := f.calls(t); len(c) != 3 || !has(c[2], "exec", "resume") || !has(c[2], "--", "thread-codex-1", "third") {
+		t.Fatalf("turn after a restart must resume the stored thread: %v", c)
+	}
+	f.pairsAfter(t, 3)
+	t.Cleanup(func() { f.mgr.Close(conv) })
+}
+
+func TestResumePane_AgyCarriesConversation(t *testing.T) {
+	f := newResumeServer(t, "agy", fakeAgyScript)
+	const conv = "conv-agy-resume"
+
+	f.dispatchTurn(t, "agy", conv, "first")
+	f.waitForEvents(t, 2)
+	t.Cleanup(func() { f.mgr.Close(conv) })
+	if has(f.calls(t)[0], "--conversation") {
+		t.Fatalf("turn 1 must not resume: %v", f.calls(t)[0])
+	}
+	store := consoleui.NewTranscripts(f.workDir)
+	waitUntil(t, "conversation id stored", func() bool { return store.NativeSession(conv, "agy", "alice") == "conv-agy-1" })
+	if got := f.sendTurn(t, conv, "second"); got != http.StatusAccepted {
+		t.Fatalf("send: %d", got)
+	}
+	f.waitForEvents(t, 4)
+	if c := f.calls(t); len(c) != 2 || !has(c[1], "--conversation", "conv-agy-1") {
+		t.Fatalf("turn 2 must pass --conversation conv-agy-1: %v", c)
+	}
+	f.pairsAfter(t, 2)
+}
+
+func TestResumePane_SecondSendDuringTurnIs409AndCloseLeavesNoOrphan(t *testing.T) {
+	f := newResumeServer(t, "codex", fakeCodexScript)
+	const conv = "conv-codex-hang"
+	if err := os.WriteFile(f.hang, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f.dispatchTurn(t, "codex", conv, "hang")
+	waitCalls(t, f, 1)
+	waitUntil(t, "pid", func() bool { return len(f.pidList()) == 1 })
+	pid := f.pidList()[0]
+
+	if got := f.sendTurn(t, conv, "too soon"); got != http.StatusConflict {
+		t.Fatalf("a send during a turn: %d, want 409", got)
+	}
+
+	f.mgr.Close(conv)
+	waitUntil(t, "harness process gone", func() bool { return syscall.Kill(pid, 0) != nil })
+	// The killed turn is not an error pane: nothing re-launched the harness.
+	time.Sleep(200 * time.Millisecond)
+	if n := len(f.calls(t)); n != 1 {
+		t.Errorf("harness launched %d times, want 1", n)
+	}
+}
+
+// A claude pane is untouched: it keeps the turn ledger, not a ResumeEngine.
+func TestResumePane_ClaudePaneStillUsesTurnLedger(t *testing.T) {
+	s := newLedgerServer(t)
+	resp := s.post(t, "/api/chat/dispatch", map[string]any{
+		"agent": "claude", "runtime": "claude", "task": "hello", "sessionId": "sess-cl",
+		"operatorId": "alice", "conversationId": "conv-cl", "interactive": true,
+	})
+	resp.Body.Close()
+	t.Cleanup(func() { s.mgr.Close("conv-cl") })
+	s.waitForEvents(t, 2)
+	if s.mgr.AccountsOwnTurns("conv-cl", "alice") {
+		t.Error("a claude pane must not be a ResumeEngine")
+	}
+}
