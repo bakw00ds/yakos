@@ -244,3 +244,20 @@ func TestTriggerLedger_RefusesSymlink(t *testing.T) {
 		t.Fatalf("the ledger wrote through a symlink: %q", b)
 	}
 }
+
+func TestSecretEnvRequiresYakosPrefix(t *testing.T) {
+	path := schedHome(t, "proj")
+	for _, name := range []string{"CLOUDFLARE_API_TOKEN", "MY_SECRET", "PATH"} {
+		body := "version: 1\nworkspace: {WS}\nworkflows:\n  hooked:\n    webhook: true\n    secret_env: " + name + "\n"
+		writeSched(t, path, body, 0o600)
+		_, err := workflow.LoadSchedules(wsOf(t))
+		if err == nil || !strings.Contains(err.Error(), "YAKOS_") || strings.Contains(err.Error(), "/") {
+			t.Errorf("%s accepted or unclear error in the schedules file: %v", name, err)
+		}
+		wf := &workflow.Workflow{Version: 1, Name: "hooked", Triggers: &workflow.Triggers{Webhook: &workflow.WebhookTrigger{SecretEnv: name}},
+			Nodes: []workflow.Node{{ID: "a", Agent: "reviewer", Prompt: "p", OutputLimit: 100}}}
+		if err := workflow.Validate(wf); err == nil || !strings.Contains(err.Error(), "YAKOS_") {
+			t.Errorf("%s accepted by workflow validation: %v", name, err)
+		}
+	}
+}

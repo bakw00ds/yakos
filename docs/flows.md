@@ -15,11 +15,11 @@ name: nightly-review
 triggers:
   cron: "0 2 * * *"            # 5 fields, see below
   webhook:
-    secret_env: MY_HOOK_SECRET  # name of an environment variable
+    secret_env: YAKOS_HOOK_SECRET  # name of an environment variable
 nodes: [...]
 ```
 
-`secret_env` must match `^[A-Z][A-Z0-9_]{0,63}$`. Validation rejects a bad cron
+`secret_env` must match `^[A-Z][A-Z0-9_]{0,63}$` and start with `YAKOS_`. Validation rejects a bad cron
 expression or secret name when the workflow is saved or run.
 
 ## Enabling them: the schedules file
@@ -36,7 +36,7 @@ workflows:
     workflow_sha: 9f2c...        # required: sha256 of the workflow file
   webhook-triage:
     webhook: true
-    secret_env: MY_HOOK_SECRET   # must repeat the name the workflow declares
+    secret_env: YAKOS_HOOK_SECRET   # must repeat the name the workflow declares
     workflow_sha: 41ab...
 ```
 
@@ -59,7 +59,8 @@ workflows:
   <current hash>` (no path), and `triggers.ndjson` records `"outcome":"refused"`
   with the same text. Review the file, then paste the new hash to re-enable.
   A webhook for a changed workflow answers 404.
-- `secret_env` may not name a well-known credential variable (`GITHUB_TOKEN`,
+- `secret_env` must start with `YAKOS_`, so the daemon never reads an arbitrary
+  variable. It also may not name a well-known credential variable (`GITHUB_TOKEN`,
   `AWS_SECRET_ACCESS_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, ...): the
   secret is shared with every sender. Use a dedicated variable such as
   `YAKOS_WEBHOOK_SECRET`.
@@ -141,10 +142,12 @@ console route requires and the signature below.
   signature is accepted once (the last 1000 are remembered): a captured request
   cannot be replayed. A sender's retry must be re-signed with a fresh timestamp.
 - At most 6 requests per minute per workflow name (`429`, `Retry-After: 60`),
-  counted before anything else is checked.
+  counted only for a request whose signature verified, so a caller without the
+  secret cannot lock out the real sender.
 - `Content-Type: application/json` (the console's CSRF guard requires it for
   every mutation); the body is the payload, at most 64 KiB, valid UTF-8, and
-  optional.
+  optional. An oversized body answers 404; non-UTF-8 answers 400 only once the
+  signature verified.
 - The payload goes through the same blocking injection scan as node output
   before any node sees it. The scan being unavailable refuses the call.
 - An accepted payload becomes the workflow input `payload` (declare
@@ -156,9 +159,9 @@ console route requires and the signature below.
 | Status | Meaning |
 |---|---|
 | 202 `{"run_id": ...}` | Started |
-| 404 | Not available: workflow missing, no webhook declared, not enabled, `secret_env` mismatch, workflow changed since it was enabled, schedules file untrusted or for another workspace, secret unset or too short, or a missing, wrong, stale or replayed signature. One answer for all causes, so the endpoint reveals neither whether a webhook is enabled nor whether a secret was right. |
+| 404 | Not available: workflow missing, no webhook declared, not enabled, `secret_env` mismatch, workflow changed since it was enabled, schedules file untrusted or for another workspace, secret unset or too short, a body over 64 KiB, or a missing, wrong, stale or replayed signature. One answer for all causes, so the endpoint reveals neither whether a webhook is enabled nor whether a secret was right. |
 | 409 | A run of this workflow is already active |
-| 413 | Body over 64 KiB |
+| 400 | Body is not valid UTF-8 (only for a correctly signed request) |
 | 422 | Payload refused by the injection scan |
 | 429 | Rate limit |
 

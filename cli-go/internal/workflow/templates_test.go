@@ -53,7 +53,7 @@ func TestTriggerValidation(t *testing.T) {
 	for tr, ok := range map[string]bool{
 		"triggers:\n  cron: \"*/5 * * * *\"\n":                  true,
 		"triggers:\n  cron: \"nonsense\"\n":                     false,
-		"triggers:\n  webhook:\n    secret_env: MY_SECRET\n":    true,
+		"triggers:\n  webhook:\n    secret_env: YAKOS_MY_SECRET\n":    true,
 		"triggers:\n  webhook:\n    secret_env: lower\n":        false,
 		"triggers:\n  webhook:\n    secret_env: \"A;rm -rf\"\n": false,
 		"triggers:\n  webhook: {}\n":                            false,

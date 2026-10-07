@@ -60,6 +60,15 @@ var secretEnvRe = regexp.MustCompile(`^[A-Z][A-Z0-9_]{0,63}$`)
 // ValidSecretEnvName reports whether name can name a webhook secret variable.
 func ValidSecretEnvName(name string) bool { return secretEnvRe.MatchString(name) }
 
+// secretEnvPrefix is required on every webhook secret variable: the daemon
+// reads only variables set aside for yakOS, never an arbitrary one.
+const secretEnvPrefix = "YAKOS_"
+
+// errSecretEnvPrefix is the clear, path-free refusal for a name outside it.
+func errSecretEnvPrefix() error {
+	return fmt.Errorf("secret_env must start with %s (for example YAKOS_WEBHOOK_SECRET)", secretEnvPrefix)
+}
+
 // credentialEnvNames are well-known credential variables. A webhook secret is
 // shared with every sender, so naming one of these as secret_env would hand a
 // real credential to callers; it is refused.
@@ -92,6 +101,9 @@ func validateTriggers(t *Triggers) error {
 	}
 	if t.Webhook != nil && credentialEnvNames[t.Webhook.SecretEnv] {
 		return fmt.Errorf("workflow: triggers.webhook: %w", errCredentialEnv(t.Webhook.SecretEnv))
+	}
+	if t.Webhook != nil && !strings.HasPrefix(t.Webhook.SecretEnv, secretEnvPrefix) {
+		return fmt.Errorf("workflow: triggers.webhook: %w", errSecretEnvPrefix())
 	}
 	return nil
 }
@@ -298,6 +310,9 @@ func parseSchedules(data []byte) (Schedules, error) {
 		}
 		if credentialEnvNames[e.SecretEnv] {
 			return Schedules{}, fmt.Errorf("workflow: schedules: %q: %w", name, errCredentialEnv(e.SecretEnv))
+		}
+		if e.SecretEnv != "" && !strings.HasPrefix(e.SecretEnv, secretEnvPrefix) {
+			return Schedules{}, fmt.Errorf("workflow: schedules: %q: %w", name, errSecretEnvPrefix())
 		}
 	}
 	if _, err := s.Location(); err != nil {

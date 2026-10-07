@@ -18,10 +18,13 @@ package consoleui
 //     secret is read from the daemon environment at request time. There is no
 //     bare-secret header path.
 //   - Every "not available" cause (undeclared, not enabled, untrusted file,
-//     changed workflow, unset or short secret, bad/stale/replayed signature)
+//     changed workflow, unset or short secret, bad/stale/replayed signature, oversized body)
 //     answers the same 404, so the endpoint is neither a configuration nor a
 //     secret-validity oracle. Requests are limited to 6 per minute per
-//     workflow name, answered 429 before any configuration is read.
+//     workflow name, counted only after the signature verified (an unsigned
+//     caller cannot lock out the real sender), answered 429. An oversized body
+//     answers the same 404; a non-UTF-8 body is reported (400) only to a
+//     correctly signed request.
 //   - The body is capped at 64 KiB and must be UTF-8. The raw payload passes
 //     through the engine's OutputScanFn (the same blocking injection scan node
 //     output gets) before it reaches any node; the scan being absent fails
@@ -114,12 +117,6 @@ func (h *flowsHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.trigGuard.allow(name) {
-		w.Header().Set("Retry-After", "60")
-		writeGenericError(w, http.StatusTooManyRequests, "too many requests")
-		return
-	}
-
 	// Enablement first (a small trusted file), then the workflow file: the
 	// workflow is only opened for a name the operator enabled.
 	sched, err := workflow.LoadSchedules(h.workspaceRoot)
@@ -156,22 +153,15 @@ func (h *flowsHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An oversized or unreadable body is "not available" too: before the
+	// signature is verified, only the uniform 404 may leave this handler.
 	if r.ContentLength > maxTriggerBodyBytes {
-		writeGenericError(w, http.StatusRequestEntityTooLarge, "payload too large")
+		notAvailable()
 		return
 	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxTriggerBodyBytes))
 	if err != nil {
-		var tooBig *http.MaxBytesError
-		if errors.As(err, &tooBig) {
-			writeGenericError(w, http.StatusRequestEntityTooLarge, "payload too large")
-			return
-		}
-		writeGenericError(w, http.StatusBadRequest, "failed to read request body")
-		return
-	}
-	if !utf8.Valid(body) {
-		writeGenericError(w, http.StatusBadRequest, "payload must be UTF-8")
+		notAvailable()
 		return
 	}
 
@@ -184,9 +174,21 @@ func (h *flowsHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		notAvailable()
 		return
 	}
+	// Only a correctly signed request counts toward the rate limit, so a
+	// console-token holder without the secret cannot lock out the real sender.
+	if !h.trigGuard.allow(name) {
+		w.Header().Set("Retry-After", "60")
+		writeGenericError(w, http.StatusTooManyRequests, "too many requests")
+		return
+	}
 	if !h.trigGuard.firstUse(sig) {
 		slog.Warn("flows: webhook refused, replayed signature", "workflow", name)
 		notAvailable()
+		return
+	}
+	// The sender is authenticated; now the payload shape may be reported.
+	if !utf8.Valid(body) {
+		writeGenericError(w, http.StatusBadRequest, "payload must be UTF-8")
 		return
 	}
 	// Cheap 409 before the payload scan spawns a subprocess.

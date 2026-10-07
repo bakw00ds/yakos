@@ -212,8 +212,8 @@ func TestTrigger_AuthAndLimits(t *testing.T) {
 
 	big := `"` + strings.Repeat("a", 64<<10) + `"`
 	r := env.doAs(trigID, secretHdr(trigSecret), path, big)
-	if r.StatusCode != http.StatusRequestEntityTooLarge {
-		t.Errorf("oversize body: status %d, want 413", r.StatusCode)
+	if r.StatusCode != http.StatusNotFound {
+		t.Errorf("oversize body: status %d, want 404", r.StatusCode)
 	}
 	r.Body.Close()
 	select {
@@ -439,30 +439,62 @@ func TestTrigger_ReplayAndClockWindow(t *testing.T) {
 }
 
 func TestTrigger_RateLimitedPerWorkflow(t *testing.T) {
-	env := newTrigEnv(t, nil)
+	block := make(chan struct{})
+	env := newTrigEnv(t, block)
+	defer close(block)
 	env.enable(hookEnabled, 0o600)
-	codes := map[int]int{}
-	for i := 0; i < 8; i++ {
+	// Unsigned traffic never counts: a token holder cannot lock out the sender.
+	for i := 0; i < 20; i++ {
 		r := env.doAs(trigID, nil, "/flows/api/trigger/hooked", `{}`)
-		codes[r.StatusCode]++
-		r.Body.Close()
-	}
-	if codes[http.StatusTooManyRequests] != 2 || codes[http.StatusNotFound] != 6 {
-		t.Fatalf("status counts %v, want six 404 then two 429", codes)
-	}
-	// Uniform: a name that is not a workflow is limited the same way, so a 429
-	// reveals nothing about configuration.
-	n429 := 0
-	for i := 0; i < 8; i++ {
-		r := env.doAs(trigID, nil, "/flows/api/trigger/no-such", `{}`)
-		if r.StatusCode == http.StatusTooManyRequests {
-			n429++
+		if r.StatusCode != http.StatusNotFound {
+			t.Fatalf("unsigned call %d: status %d, want 404", i, r.StatusCode)
 		}
 		r.Body.Close()
 	}
-	if n429 != 2 {
-		t.Fatalf("unknown workflow: %d limited, want 2", n429)
+	codes := map[int]int{}
+	for i := 0; i < 8; i++ {
+		r := env.doAs(trigID, secretHdr(trigSecret), "/flows/api/trigger/hooked", `{}`)
+		codes[r.StatusCode]++
+		r.Body.Close()
 	}
+	if codes[http.StatusTooManyRequests] != 2 || codes[http.StatusAccepted] != 1 || codes[http.StatusConflict] != 5 {
+		t.Fatalf("status counts %v, want 1x202, 5x409, 2x429", codes)
+	}
+}
+
+// An unsigned caller must not tell an enabled webhook from a disabled one
+// (sec-348b N1): oversize and non-UTF-8 bodies both answer the uniform 404.
+func TestTrigger_UnsignedBodyShapeIsNoOracle(t *testing.T) {
+	env := newTrigEnv(t, nil)
+	path := "/flows/api/trigger/hooked"
+	bodies := map[string]string{
+		"oversize":  `"` + strings.Repeat("a", 65<<10) + `"`,
+		"non-UTF-8": "\xff\xfe{}",
+	}
+	probe := func(state string) map[string]int {
+		out := map[string]int{}
+		for k, b := range bodies {
+			r := env.doAs(trigID, nil, path, b)
+			out[k] = r.StatusCode
+			r.Body.Close()
+		}
+		t.Logf("%s: %v", state, out)
+		return out
+	}
+	disabled := probe("disabled")
+	env.enable(hookEnabled, 0o600)
+	enabled := probe("enabled")
+	for k := range bodies {
+		if disabled[k] != http.StatusNotFound || enabled[k] != http.StatusNotFound {
+			t.Errorf("%s unsigned: disabled=%d enabled=%d, want 404 for both", k, disabled[k], enabled[k])
+		}
+	}
+	// A correctly signed non-UTF-8 body is still told why.
+	r := env.doAs(trigID, secretHdr(trigSecret), path, "\xff\xfe{}")
+	if r.StatusCode != http.StatusBadRequest {
+		t.Errorf("signed non-UTF-8: status %d, want 400", r.StatusCode)
+	}
+	r.Body.Close()
 }
 
 // Enablement pins the workflow bytes (sec-348 finding 2).
