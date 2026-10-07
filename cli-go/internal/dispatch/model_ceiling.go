@@ -38,6 +38,16 @@ func modelHint(model string) string {
 	return "yakos models show " + model
 }
 
+// overlayHint says how to make a model rankable: map the aliases in the user
+// overlay. An unpinned model ("") never ranks, with or without an overlay, so the
+// hint for it is to pin one.
+func overlayHint(runtimeName, model string) string {
+	if model == "" {
+		return fmt.Sprintf("pin a model in the agent's frontmatter: the harness default of %s has no cost class, and an overlay cannot rank it", runtimeName)
+	}
+	return fmt.Sprintf("map %s's tier aliases to model ids in the overlay %s", runtimeName, modelreg.OverlayPath(modelreg.DefaultStateDir()))
+}
+
 // enforceCeiling applies agent's max_model ceiling to model on the runtime that
 // will run it. The ceiling is a Claude tier word and is read as a cost class
 // (modelreg ceilingClass), so it governs every harness:
@@ -60,11 +70,11 @@ func enforceCeiling(reg *modelreg.Registry, runtimeName, agent, ceiling, model s
 	case modelreg.CeilingLowered:
 		return got, fmt.Sprintf("model %q lowered to %q: agent %s has max_model %s (budget-policy.yml or built-in)", model, got, agent, ceiling), nil
 	case modelreg.CeilingUnranked:
-		return "", "", fmt.Errorf("dispatch: model %s on %s has no cost class in the model registry, so agent %s's max_model ceiling %s cannot be applied and it is refused (see: %s)",
-			modelLabel(model), runtimeName, agent, ceiling, modelHint(model))
+		return "", "", fmt.Errorf("dispatch: model %s on %s has no cost class in the model registry, so agent %s's max_model ceiling %s cannot be applied and it is refused (see: %s; %s)",
+			modelLabel(model), runtimeName, agent, ceiling, modelHint(model), overlayHint(runtimeName, model))
 	case modelreg.CeilingNoLowerModel:
-		return "", "", fmt.Errorf("dispatch: model %s on %s is above agent %s's max_model ceiling %s and the registry maps no model at or below it on %s, so it is refused (see: %s)",
-			modelLabel(model), runtimeName, agent, ceiling, runtimeName, modelHint(model))
+		return "", "", fmt.Errorf("dispatch: model %s on %s is above agent %s's max_model ceiling %s and the registry maps no model at or below it on %s, so it is refused (see: %s; %s)",
+			modelLabel(model), runtimeName, agent, ceiling, runtimeName, modelHint(model), overlayHint(runtimeName, model))
 	}
 	return model, "", nil
 }
@@ -76,4 +86,20 @@ func enforceCeiling(reg *modelreg.Registry, runtimeName, agent, ceiling, model s
 // the harness maps it to nothing, the harness default.
 func projectDisablesModel(reg *modelreg.Registry, cfg projectcfg.Config, runtimeName, model string) (string, bool) {
 	return cfg.ModelDisabledBy(func(listed string) bool { return reg.Matches(runtimeName, listed, model) })
+}
+
+// EnforceModelCeiling is enforceCeiling for callers outside the dispatcher (the
+// bash-passthrough clamp in cmd/yakos): it applies ceiling, an agent's max_model,
+// to model on runtimeName against the same registry a native dispatch uses, and
+// returns the model to run, a note when it was lowered, or an error when the
+// model is refused. ceiling "" means no ceiling.
+func EnforceModelCeiling(runtimeName, agent, ceiling, model string) (replaced, note string, err error) {
+	if ceiling == "" {
+		return model, "", nil
+	}
+	r, err := modelRegistryFor()
+	if err != nil {
+		return "", "", fmt.Errorf("dispatch: model registry: %w", err)
+	}
+	return enforceCeiling(r, runtimeName, agent, ceiling, model)
 }

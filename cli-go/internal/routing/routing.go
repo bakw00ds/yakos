@@ -2320,7 +2320,7 @@ func runPromote(cfg Config) (Result, error) {
 	}
 
 	// 1. Locate agent file.
-	agentFile, isFramework, err := findAgentForPromote(cfg.YakosRoot, cfg.AgentID, cfg.Project)
+	agentFile, isFramework, project, err := findAgentForPromote(cfg.YakosRoot, cfg.AgentID, cfg.Project)
 	if err != nil {
 		return Result{}, fmt.Errorf("model-routing promote: agent %q not found in project or framework", cfg.AgentID)
 	}
@@ -2356,17 +2356,19 @@ func runPromote(cfg Config) (Result, error) {
 		evalRunID = "unknown"
 	}
 
-	// 4. Backup.
+	// 4. Backup. The reader gets the project findAgentForPromote resolved, not
+	// cfg.Project (the CLI leaves it empty), so the linked-directory check applies
+	// on the real path. The read comes first: a refused file leaves nothing behind.
+	ar := agentReader{cfg.YakosRoot, project}
+	original, err := ar.read(agentFile)
+	if err != nil {
+		return Result{}, fmt.Errorf("model-routing promote: read agent: %w", err)
+	}
 	if err := os.MkdirAll(cfg.BackupsDir, 0755); err != nil { //nolint:gosec
 		return Result{}, fmt.Errorf("model-routing promote: mkdir backups: %w", err)
 	}
 	tsSafe := cfg.Now.UTC().Format("20060102T150405Z")
 	backupFile := filepath.Join(cfg.BackupsDir, cfg.AgentID+"-"+tsSafe+".md")
-	ar := agentReader{cfg.YakosRoot, cfg.Project}
-	original, err := ar.read(agentFile)
-	if err != nil {
-		return Result{}, fmt.Errorf("model-routing promote: read agent: %w", err)
-	}
 	if err := os.WriteFile(backupFile, original, 0644); err != nil { //nolint:gosec
 		return Result{}, fmt.Errorf("model-routing promote: backup: %w", err)
 	}
@@ -2429,8 +2431,9 @@ func runPromote(cfg Config) (Result, error) {
 	}, nil
 }
 
-// findAgentForPromote searches project then framework. Returns (path, isFramework, error).
-func findAgentForPromote(yakosRoot, id, project string) (string, bool, error) {
+// findAgentForPromote searches project then framework. Returns (path, isFramework, project, error); project is the root the
+// project lookup used (cfg.Project, else YAKOS_PROJECT_DIR, else the cwd).
+func findAgentForPromote(yakosRoot, id, project string) (string, bool, string, error) {
 	// Project override first.
 	if project == "" {
 		if pd := os.Getenv("YAKOS_PROJECT_DIR"); pd != "" {
@@ -2446,16 +2449,16 @@ func findAgentForPromote(yakosRoot, id, project string) (string, bool, error) {
 	if project != "" {
 		f := filepath.Join(project, ".claude", "agents", id+".md")
 		if _, err := os.Stat(f); err == nil {
-			return f, false, nil
+			return f, false, project, nil
 		}
 	}
 	if yakosRoot != "" {
 		f := filepath.Join(yakosRoot, "lib", "agents", id+".md")
 		if _, err := os.Stat(f); err == nil {
-			return f, true, nil
+			return f, true, project, nil
 		}
 	}
-	return "", false, fmt.Errorf("not found")
+	return "", false, project, fmt.Errorf("not found")
 }
 
 // latestCandidateFor returns the most recent candidateRecord for agentID, or nil.

@@ -111,3 +111,31 @@ func TestReadExtendsTemplate_BareIDInLibAgentsOnly(t *testing.T) {
 		}
 	}
 }
+
+// The linked-directory check compares directories, not strings: a project root
+// spelled another way (here a symlink to it) than the agent path still gets it.
+func TestReadAgentFile_LinkedDirCheckSurvivesAnotherSpellingOfTheRoot(t *testing.T) {
+	root, project, _ := readerFixture(t)
+	real := filepath.Join(t.TempDir(), "agents")
+	if err := os.MkdirAll(real, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(real, "a.md"), []byte("a"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(project, ".claude", "agents")
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, dir); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(project, alias); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	// The root is the alias; the path is spelled through the real project.
+	if _, err := ReadAgentFile(root, alias, filepath.Join(dir, "a.md")); !errors.Is(err, ErrRefused) {
+		t.Errorf("err = %v, want ErrRefused", err)
+	}
+}

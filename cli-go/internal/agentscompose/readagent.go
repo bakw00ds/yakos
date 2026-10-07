@@ -11,6 +11,7 @@ package agentscompose
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 )
 
@@ -27,7 +28,7 @@ var ErrRefused = errors.New("agent file refused")
 func ReadAgentFile(yakosRoot, project, path string) ([]byte, error) {
 	if project != "" {
 		dir := filepath.Join(project, ".claude", "agents")
-		if filepath.Dir(filepath.Clean(path)) == filepath.Clean(dir) {
+		if sameDir(filepath.Dir(filepath.Clean(path)), dir) {
 			if p := InspectProjectDir(project, dir); p != DirOK {
 				return nil, fmt.Errorf("%w: %s", ErrRefused, p.Reason())
 			}
@@ -41,6 +42,25 @@ func ReadAgentFile(yakosRoot, project, path string) ([]byte, error) {
 		return nil, fmt.Errorf("%w: %s", ErrRefused, skip)
 	}
 	return data, nil
+}
+
+// sameDir reports whether a and b name one directory: the same cleaned string, or
+// directories os.SameFile calls the same (a case-variant or symlinked spelling of
+// the project root). A string compare alone let a caller that spelled the root
+// differently skip the linked-directory check.
+func sameDir(a, b string) bool {
+	if a == b {
+		return true
+	}
+	ia, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	ib, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(ia, ib)
 }
 
 // ReadExtendsTemplate reads the template an `extends:` value names: lib/agents/<id>.md

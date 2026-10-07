@@ -14,6 +14,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -49,30 +51,51 @@ const maxCooldownScopes = 256
 type cooldownSet struct {
 	mu  sync.Mutex
 	now func() time.Time
-	m   map[string]*router.Cooldown
+	m   map[string]*cooldownScope
+}
+
+// cooldownScope is one project's table, with the directory it was made for so a
+// later spelling of the same directory finds it.
+type cooldownScope struct {
+	dir fs.FileInfo // nil when the root could not be stat-ed
+	cd  *router.Cooldown
 }
 
 func newCooldownSet(now func() time.Time) *cooldownSet {
-	return &cooldownSet{now: now, m: map[string]*router.Cooldown{}}
+	return &cooldownSet{now: now, m: map[string]*cooldownScope{}}
 }
 
-// of returns the cooldown table of project. The root is cleaned so two spellings
-// of one path share a table; "" (no project) has a table of its own.
+// of returns the cooldown table of project. Two spellings of one directory (a
+// symlink to it, a case-variant path on a case-insensitive volume) share a table,
+// decided the way K-86 validateProjectPath decides it, with os.SameFile; a root
+// that cannot be stat-ed is keyed by its cleaned string. "" (no project) has a
+// table of its own.
 func (s *cooldownSet) of(project string) *router.Cooldown {
+	var info fs.FileInfo
 	if project != "" {
 		project = filepath.Clean(project)
+		if fi, err := os.Stat(project); err == nil {
+			info = fi
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	c := s.m[project]
-	if c == nil {
-		if len(s.m) >= maxCooldownScopes {
-			s.m = map[string]*router.Cooldown{}
-		}
-		c = router.NewCooldown(s.now)
-		s.m[project] = c
+	if sc := s.m[project]; sc != nil {
+		return sc.cd
 	}
-	return c
+	if info != nil {
+		for _, sc := range s.m {
+			if sc.dir != nil && os.SameFile(sc.dir, info) {
+				return sc.cd
+			}
+		}
+	}
+	if len(s.m) >= maxCooldownScopes {
+		s.m = map[string]*cooldownScope{}
+	}
+	sc := &cooldownScope{dir: info, cd: router.NewCooldown(s.now)}
+	s.m[project] = sc
+	return sc.cd
 }
 
 // policyAction is a selected policy rule as the chain sees it.
@@ -216,6 +239,9 @@ func (st routerState) decision(ci chainInput, choice RuntimeChoice, mc modelChoi
 		FallbackFrom: choice.FallbackFrom,
 		RouteClass:   st.class,
 		PolicySHA:    st.policy.SHA,
+	}
+	for _, sk := range choice.Skipped {
+		d.Skipped = append(d.Skipped, router.Skip{Runtime: sk.Runtime, Reason: sk.Reason, Cooling: strings.HasPrefix(sk.Reason, coolingReasonPrefix)})
 	}
 	switch {
 	case st.pin != nil && choice.ChosenBy == RuntimeBySticky:

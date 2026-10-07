@@ -6,6 +6,8 @@ package dispatch
 // trusted policy entry, not a stub.
 
 import (
+	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -219,5 +221,139 @@ func TestDisableModels_MatchesTierNamesAndHarnessAliases(t *testing.T) {
 				t.Errorf("the error does not name router.disable_models: %v", err)
 			}
 		})
+	}
+}
+
+// ---- the ceiling and the fallback chain (rev-339 B1) ---------------------------
+
+const codexThenClaude = "rules:\n  - match: {agent: c-sonnet}\n    action: {runtime: codex, fallbacks: [claude]}\n"
+
+// A candidate whose model fails the ceiling is skipped, with a reason, and the
+// chain lands on the next one.
+func TestCeiling_ChainSkipsACandidateWhoseModelFailsTheCeiling(t *testing.T) {
+	quietStderr(t)
+	captureRouteLog(t)
+	setPolicy(t, codexThenClaude)
+	withCeilings(t, map[string]string{"c-sonnet": "sonnet"})
+	root, project := ceilingRoot(t), projectWithYML(t, "")
+	got, err := route(t, root, project, "c-sonnet", nil)
+	if err != nil {
+		t.Fatalf("a capped agent must fall to claude, not refuse: %v", err)
+	}
+	if got.Runtime != "claude" || got.Model != "sonnet" || got.RuntimeChosenBy != RuntimeByFallback {
+		t.Errorf("landed on %s/%q by %s", got.Runtime, got.Model, got.RuntimeChosenBy)
+	}
+	sk := got.Decision.Skipped
+	if len(sk) != 1 || sk[0].Runtime != "codex" || !strings.HasPrefix(sk[0].Reason, "ceiling") {
+		t.Errorf("Skipped = %+v, want [codex: ceiling...]", sk)
+	}
+}
+
+// disable_models is skipped over the same way.
+func TestDisableModels_ChainSkipsADisabledModel(t *testing.T) {
+	quietStderr(t)
+	captureRouteLog(t)
+	setPolicy(t, codexThenClaude)
+	withCeilings(t, nil)
+	root := ceilingRoot(t)
+	project := projectWithYML(t, "router:\n  disable_models: [cheap]\n")
+	got, err := route(t, root, project, "c-sonnet", nil)
+	if err != nil || got.Runtime != "claude" {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if sk := got.Decision.Skipped; len(sk) != 1 || sk[0].Runtime != "codex" || !strings.HasPrefix(sk[0].Reason, "disable_models") {
+		t.Errorf("Skipped = %+v", sk)
+	}
+}
+
+// With no candidate left the error names the id, the ceiling, the command and
+// the overlay to map aliases in.
+func TestCeiling_NoCandidateLeftNamesIdCeilingCommandAndOverlay(t *testing.T) {
+	quietStderr(t)
+	captureRouteLog(t)
+	setPolicy(t, "rules:\n  - match: {agent: codex-pinned}\n    action: {runtime: codex}\n")
+	withCeilings(t, map[string]string{"codex-pinned": "sonnet"})
+	root, project := ceilingRoot(t), projectWithYML(t, "")
+	_, err := route(t, root, project, "codex-pinned", nil)
+	if err == nil {
+		t.Fatal("expected a refusal")
+	}
+	for _, want := range []string{`"gpt-5.5"`, "max_model ceiling sonnet", "yakos models show gpt-5.5", modelreg.OverlayFileName, "overlay"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+}
+
+// An unpinned codex model never ranks: the error says to pin one.
+func TestCeiling_UnpinnedCodexErrorSaysPinAModel(t *testing.T) {
+	quietStderr(t)
+	resetRouterState(t)
+	withCeilings(t, map[string]string{"codex-bare": "sonnet"})
+	root, project := ceilingRoot(t), projectWithYML(t, "")
+	_, err := route(t, root, project, "codex-bare", nil)
+	if err == nil || !strings.Contains(err.Error(), "pin a model") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// A runtime the operator named is never moved: the refusal is final.
+func TestCeiling_ExplicitRuntimeIsRefusedNotMoved(t *testing.T) {
+	quietStderr(t)
+	captureRouteLog(t)
+	setPolicy(t, codexThenClaude)
+	withCeilings(t, map[string]string{"c-sonnet": "sonnet"})
+	root, project := ceilingRoot(t), projectWithYML(t, "")
+	got, err := route(t, root, project, "c-sonnet", func(in *routeInput) {
+		in.RuntimeOverride, in.RuntimeFallbackOptIn = "codex", []string{"claude"}
+	})
+	if err == nil || !strings.Contains(err.Error(), "max_model ceiling sonnet") {
+		t.Fatalf("--runtime codex under a ceiling must be refused, got %+v %v", got, err)
+	}
+}
+
+// A pinned conversation is refused, not moved.
+func TestCeiling_StickyPinIsRefusedNotMoved(t *testing.T) {
+	quietStderr(t)
+	captureRouteLog(t)
+	setPolicy(t, codexThenClaude)
+	withCeilings(t, nil)
+	root, project := ceilingRoot(t), projectWithYML(t, "")
+	first, err := route(t, root, project, "c-sonnet", func(in *routeInput) { in.ConversationID = "conv" })
+	if err != nil || first.Runtime != "codex" {
+		t.Fatalf("turn 1: %+v %v", first, err)
+	}
+	withCeilings(t, map[string]string{"c-sonnet": "sonnet"})
+	got, err := route(t, root, project, "c-sonnet", func(in *routeInput) { in.ConversationID = "conv" })
+	if err == nil {
+		t.Fatalf("a pinned conversation must be refused under the ceiling, got %+v", got)
+	}
+}
+
+// A dry run prints nothing to stderr: the lowering note rides in the reason.
+func TestCeiling_ExplainWritesNothingToStderr(t *testing.T) {
+	resetRouterState(t)
+	captureRouteLog(t)
+	withCeilings(t, map[string]string{"c-opus": "sonnet"})
+	root, project := ceilingRoot(t), projectWithYML(t, "")
+
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	d, err := Explain(context.Background(), ExplainQuery{YakosRoot: root, Project: project, Agent: "c-opus"})
+	os.Stderr = orig
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 0 {
+		t.Errorf("explain wrote to stderr: %q", out)
+	}
+	if d.ModelID != "sonnet" || !strings.Contains(d.Reason, `lowered to "sonnet"`) {
+		t.Errorf("decision = %+v", d)
 	}
 }

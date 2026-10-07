@@ -167,6 +167,9 @@ const (
 // select's `auto`).
 const autoRuntime = "auto"
 
+// coolingReasonPrefix starts the reason of a runtime skipped for the cooldown.
+const coolingReasonPrefix = "cooling down after repeated failures"
+
 // SkippedRuntime is a chain candidate that was passed over, and why.
 type SkippedRuntime struct {
 	Runtime string
@@ -388,6 +391,10 @@ type chainInput struct {
 	// cooling reports a runtime being skipped after repeated failures; nil = no
 	// cooldown (also for a probe-less preferred-runtime query).
 	cooling func(string) (bool, time.Duration)
+	// excluded are runtimes the walk must pass over because their resolved model
+	// failed the agent's max_model ceiling or the project's disable_models, with
+	// the reason. Only routeDispatchAt sets it, never for an explicit candidate.
+	excluded map[string]string
 }
 
 type candidate struct{ name, by string }
@@ -551,6 +558,10 @@ func walkChain(ctx context.Context, in chainInput, probe func(context.Context, s
 			choice.Skipped = append(choice.Skipped, SkippedRuntime{c.name, unsupportedReasonFor(c.name)})
 			continue
 		}
+		if why, skip := in.excluded[c.name]; skip {
+			choice.Skipped = append(choice.Skipped, SkippedRuntime{c.name, why})
+			continue
+		}
 		if in.project.RuntimeDisabled(c.name) {
 			choice.Skipped = append(choice.Skipped, SkippedRuntime{c.name, "disabled by this project's .yakos.yml (router.disable_runtimes)"})
 			continue
@@ -558,7 +569,7 @@ func walkChain(ctx context.Context, in chainInput, probe func(context.Context, s
 		if honorCooling && !c.explicit() {
 			if cool, left := in.cooling(c.name); cool {
 				*cooled = true
-				choice.Skipped = append(choice.Skipped, SkippedRuntime{c.name, fmt.Sprintf("cooling down after repeated failures (%ds left)", int(left.Seconds())+1)})
+				choice.Skipped = append(choice.Skipped, SkippedRuntime{c.name, fmt.Sprintf(coolingReasonPrefix+" (%ds left)", int(left.Seconds())+1)})
 				continue
 			}
 		}
@@ -947,34 +958,7 @@ func routeDispatchAt(ctx context.Context, in routeInput, explain bool) (*routed,
 		warnTo = io.Discard
 	}
 	st := applyRouter(&ci, agent, in.Agent, in.Class, in.TaskBytes, in.Project, in.ConversationID, warnTo)
-	choice, notes, err := chooseRuntime(ctx, ci, runtimeProbe)
-	for _, n := range notes {
-		fmt.Fprintf(warnTo, "yakos dispatch: %s\n", n)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if choice.ChosenBy == RuntimeByFallback && !explain {
-		fmt.Fprintf(routeLog, "yakos dispatch: preferred runtime unavailable [%s]; falling back to '%s'\n",
-			skippedSummary(choice.Skipped), choice.Runtime)
-	}
-	adapter, err := runtime.Resolve(choice.Runtime)
-	if err != nil {
-		return nil, fmt.Errorf("dispatch: %w", err)
-	}
 
-	mc, err := resolveModel(choice.Runtime, choice.ChosenBy == RuntimeByFallback, in.ModelOverride, in.EvalRunID, agent)
-	if err != nil {
-		return nil, err
-	}
-
-	mc, fromPolicy := st.applyModel(choice.Runtime, in.ModelOverride, mc)
-
-	// A user-level max_model ceiling (K-119) lowers a dearer model, whether it came
-	// from a project's supervisor.model or the agent's frontmatter, on any runtime;
-	// a model the registry cannot rank under a ceiling is refused (enforceCeiling).
-	// The project is passed so an agent it names as its supervisor keeps the
-	// supervisor's ceiling.
 	var reg *modelreg.Registry
 	registry := func() (*modelreg.Registry, error) {
 		if reg == nil {
@@ -986,35 +970,107 @@ func routeDispatchAt(ctx context.Context, in routeInput, explain bool) (*routed,
 		}
 		return reg, nil
 	}
-	if ceiling := budget.MaxModel(in.Agent, budget.Options{Project: in.Project}); ceiling != "" {
-		r, err := registry()
-		if err != nil {
-			return nil, err
-		}
-		clamped, note, err := enforceCeiling(r, choice.Runtime, in.Agent, ceiling, mc.model)
-		if err != nil {
-			return nil, err
-		}
-		if note != "" {
-			mc.model, mc.explicit = clamped, true
-			fmt.Fprintf(os.Stderr, "yakos budget: %s\n", note)
-		}
-	}
+	ceiling := budget.MaxModel(in.Agent, budget.Options{Project: in.Project})
 
-	if len(ci.project.DisableModels) > 0 {
-		r, err := registry()
+	// Walk the chain; a candidate whose resolved model fails the agent's max_model
+	// ceiling or the project's disable_models is skipped (with a reason) and the
+	// chain is walked again, so a rule `runtime: codex, fallbacks: [claude]` falls
+	// to claude for a sonnet-capped agent instead of refusing. A runtime the
+	// operator named (--runtime, a bare runtime agent, a sticky pin) or a --model
+	// override is never moved: its refusal is final. Each pass excludes one more
+	// runtime, so the loop is bounded by the chain length.
+	var (
+		choice     RuntimeChoice
+		notes      []string
+		adapter    runtime.Adapter
+		mc         modelChoice
+		fromPolicy bool
+		ceilNote   string
+		refusals   int
+	)
+	for {
+		choice, notes, err = chooseRuntime(ctx, ci, runtimeProbe)
+		if err != nil {
+			if refusals > 0 && ctx.Err() == nil {
+				err = fmt.Errorf("dispatch: no runtime left for agent %q: %s", in.Agent, skippedSummary(choice.Skipped))
+			}
+			for _, n := range notes {
+				fmt.Fprintf(warnTo, "yakos dispatch: %s\n", n)
+			}
+			return nil, err
+		}
+		adapter, err = runtime.Resolve(choice.Runtime)
+		if err != nil {
+			return nil, fmt.Errorf("dispatch: %w", err)
+		}
+		mc, err = resolveModel(choice.Runtime, choice.ChosenBy == RuntimeByFallback, in.ModelOverride, in.EvalRunID, agent)
 		if err != nil {
 			return nil, err
 		}
-		if listed, hit := projectDisablesModel(r, ci.project, choice.Runtime, mc.model); hit {
-			if listed == mc.model {
-				return nil, fmt.Errorf("dispatch: model %q is disabled by this project's .yakos.yml (router.disable_models)", mc.model)
+		mc, fromPolicy = st.applyModel(choice.Runtime, in.ModelOverride, mc)
+
+		// A user-level max_model ceiling (K-119) lowers a dearer model, whether it
+		// came from a project's supervisor.model or the agent's frontmatter, on any
+		// runtime; a model the registry cannot rank under a ceiling is refused
+		// (enforceCeiling). The project is passed so an agent it names as its
+		// supervisor keeps the supervisor's ceiling.
+		var refusal error
+		ceilNote = ""
+		if ceiling != "" {
+			r, rerr := registry()
+			if rerr != nil {
+				return nil, rerr
 			}
-			return nil, fmt.Errorf("dispatch: model %s is disabled by this project's .yakos.yml (router.disable_models lists %q)", modelLabel(mc.model), listed)
+			clamped, note, cerr := enforceCeiling(r, choice.Runtime, in.Agent, ceiling, mc.model)
+			if cerr != nil {
+				refusal = fmt.Errorf("dispatch: ceiling: %s", strings.TrimPrefix(cerr.Error(), "dispatch: "))
+			} else if note != "" {
+				mc.model, mc.explicit = clamped, true
+				ceilNote = note
+			}
 		}
+		if refusal == nil && len(ci.project.DisableModels) > 0 {
+			r, rerr := registry()
+			if rerr != nil {
+				return nil, rerr
+			}
+			if listed, hit := projectDisablesModel(r, ci.project, choice.Runtime, mc.model); hit {
+				if listed == mc.model {
+					refusal = fmt.Errorf("dispatch: disable_models: model %q is disabled by this project's .yakos.yml (router.disable_models)", mc.model)
+				} else {
+					refusal = fmt.Errorf("dispatch: disable_models: model %s is disabled by this project's .yakos.yml (router.disable_models lists %q)", modelLabel(mc.model), listed)
+				}
+			}
+		}
+		if refusal == nil {
+			break
+		}
+		cand := candidate{choice.Runtime, choice.ChosenBy}
+		if cand.explicit() || in.ModelOverride != "" {
+			return nil, refusal
+		}
+		if ci.excluded == nil {
+			ci.excluded = map[string]string{}
+		}
+		ci.excluded[choice.Runtime] = strings.TrimPrefix(refusal.Error(), "dispatch: ")
+		refusals++
+	}
+	for _, n := range notes {
+		fmt.Fprintf(warnTo, "yakos dispatch: %s\n", n)
+	}
+	if choice.ChosenBy == RuntimeByFallback && !explain {
+		fmt.Fprintf(routeLog, "yakos dispatch: preferred runtime unavailable [%s]; falling back to '%s'\n",
+			skippedSummary(choice.Skipped), choice.Runtime)
+	}
+	if ceilNote != "" && !explain {
+		fmt.Fprintf(os.Stderr, "yakos budget: %s\n", ceilNote)
 	}
 
 	decision := st.decision(ci, choice, mc, fromPolicy)
+	if ceilNote != "" && explain {
+		// A dry run prints nothing to stderr; the note rides in the reason.
+		decision.Reason += "; " + ceilNote
+	}
 	if !explain {
 		explicit := in.ModelOverride != "" || choice.ChosenBy == RuntimeByOverride || choice.ChosenBy == RuntimeByAgentName
 		st.remember(in.ConversationID, in.Agent, in.Project, decision, explicit)

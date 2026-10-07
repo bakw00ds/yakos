@@ -13,6 +13,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/cliflag"
+	"github.com/bakw00ds/yakos/internal/dispatch"
 )
 
 // Exit-code contract of `yakos budget` (docs/budgets.md):
@@ -423,11 +424,45 @@ func budgetGateBeforePassthrough(args []string, yakosRoot string) []string {
 	if st.State == budget.StateWarning {
 		fmt.Fprintf(os.Stderr, "yakos budget: %s\n", st.Message())
 	}
-	out := clampDispatchModel(args, agent)
-	if !hasModelFlag(out) {
-		out = clampFrontmatterModel(out, agent, project, yakosRoot)
+	out, err := passthroughClamped(args, agent, project, yakosRoot)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(budget.ExitHardStop)
 	}
 	return out
+}
+
+// passthroughClamped applies the agent's max_model ceiling to a passthrough
+// dispatch's argv: it lowers a model above the ceiling and refuses one the
+// registry cannot rank, as the Go-native dispatch does. The project is passed so
+// an agent the project names as its supervisor keeps the supervisor's ceiling.
+func passthroughClamped(args []string, agent, project, yakosRoot string) ([]string, error) {
+	out, err := clampDispatchModel(args, agent, project)
+	if err != nil {
+		return nil, err
+	}
+	if !hasModelFlag(out) {
+		return clampFrontmatterModel(out, agent, project, yakosRoot)
+	}
+	return out, nil
+}
+
+// passthroughRuntime is the harness whose registry column ranks the model: the
+// --runtime the argv names, else claude (the bash dispatch's default).
+func passthroughRuntime(args []string) string {
+	rt := "claude"
+	for i, a := range args {
+		switch {
+		case a == "--runtime" && i+1 < len(args):
+			rt = args[i+1]
+		case strings.HasPrefix(a, "--runtime="):
+			rt = strings.TrimPrefix(a, "--runtime=")
+		}
+	}
+	if rt == "" || rt == "auto" {
+		rt = "claude"
+	}
+	return rt
 }
 
 func hasModelFlag(args []string) bool {
@@ -443,31 +478,37 @@ func hasModelFlag(args []string) bool {
 // bash dispatch would resolve the agent's frontmatter model and pin the relay
 // to it, bypassing the max_model ceiling. When the composed frontmatter model
 // exceeds the ceiling, an explicit --model <ceiling> is appended (K-116).
-func clampFrontmatterModel(args []string, agent, project, yakosRoot string) []string {
+func clampFrontmatterModel(args []string, agent, project, yakosRoot string) ([]string, error) {
 	if yakosRoot == "" {
-		return args
+		return args, nil
 	}
 	roster, err := agentscompose.Compose(yakosRoot, project)
 	if err != nil {
-		return args
+		return args, nil
 	}
 	for _, a := range roster {
 		if a.ID != agent || a.Model == "" {
 			continue
 		}
-		clamped, note := budget.ClampModel(agent, a.Model, budget.Options{})
+		ceiling := budget.MaxModel(agent, budget.Options{Project: project})
+		clamped, note, err := dispatch.EnforceModelCeiling(passthroughRuntime(args), agent, ceiling, a.Model)
+		if err != nil {
+			return nil, err
+		}
 		if note == "" {
-			return args
+			return args, nil
 		}
 		fmt.Fprintf(os.Stderr, "yakos budget: %s\n", note)
-		return append(append([]string(nil), args...), "--model", clamped)
+		return append(append([]string(nil), args...), "--model", clamped), nil
 	}
-	return args
+	return args, nil
 }
 
 // clampDispatchModel lowers an explicit --model on a passthrough dispatch to
 // the agent's max_model ceiling (the bash dispatch has no ceiling of its own).
-func clampDispatchModel(args []string, agent string) []string {
+func clampDispatchModel(args []string, agent, project string) ([]string, error) {
+	ceiling := budget.MaxModel(agent, budget.Options{Project: project})
+	rt := passthroughRuntime(args)
 	out := append([]string(nil), args...)
 	for i := 0; i < len(out); i++ {
 		model := ""
@@ -479,7 +520,10 @@ func clampDispatchModel(args []string, agent string) []string {
 		default:
 			continue
 		}
-		clamped, note := budget.ClampModel(agent, model, budget.Options{})
+		clamped, note, err := dispatch.EnforceModelCeiling(rt, agent, ceiling, model)
+		if err != nil {
+			return nil, err
+		}
 		if note == "" {
 			continue
 		}
@@ -490,5 +534,5 @@ func clampDispatchModel(args []string, agent string) []string {
 			out[i] = "--model=" + clamped
 		}
 	}
-	return out
+	return out, nil
 }

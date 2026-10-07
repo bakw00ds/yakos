@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -234,5 +235,27 @@ func TestCooldownSet_ScopeKeyAndBound(t *testing.T) {
 	}
 	if n := len(s.m); n > maxCooldownScopes {
 		t.Errorf("%d scopes kept, the bound is %d", n, maxCooldownScopes)
+	}
+}
+
+// A symlinked spelling of a project shares its cooldown table; another project
+// does not (sec-339 L1).
+func TestCooldownSet_SymlinkedSpellingSharesOneScope(t *testing.T) {
+	s := newCooldownSet(nil)
+	real, other := t.TempDir(), t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	if s.of(real) != s.of(link) {
+		t.Error("a link to a project and the project must share one cooldown table")
+	}
+	if s.of(link) == s.of(other) {
+		t.Error("two different projects must not share a table")
+	}
+	// The order of first use does not matter.
+	s2 := newCooldownSet(nil)
+	if s2.of(link) != s2.of(real) {
+		t.Error("the link seen first must still share with the project")
 	}
 }

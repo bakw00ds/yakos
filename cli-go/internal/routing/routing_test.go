@@ -1438,6 +1438,42 @@ func TestGenRunID_Unique(t *testing.T) {
 
 // ---- the router reads agents through the roster reader ------------------------
 
+// The CLI never sets cfg.Project for promote: the project comes from
+// YAKOS_PROJECT_DIR or the cwd. A linked .claude must be refused on that path
+// too, with nothing written (sec-339 H1).
+func TestPromote_RefusesALinkedClaudeDirWithNoProjectSet(t *testing.T) {
+	cfg := newCfg(t)
+	cfg.Subcommand, cfg.AgentID, cfg.Project = "promote", "backend", ""
+	project := t.TempDir()
+	outsideClaude := t.TempDir()
+	const original = "---\nmodel: opus\n---\nbody\n"
+	if err := os.MkdirAll(filepath.Join(outsideClaude, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(outsideClaude, "agents", "backend.md")
+	if err := os.WriteFile(target, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outsideClaude, filepath.Join(project, ".claude")); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	t.Setenv("YAKOS_PROJECT_DIR", project)
+	writeCandidateRecord(t, cfg.CandidatesFile, "backend", "opus", "haiku", "2026-06-01T00:00:00Z")
+	_, err := Run(cfg)
+	if !errors.Is(err, agentscompose.ErrRefused) {
+		t.Fatalf("promote: err = %v, want ErrRefused", err)
+	}
+	if b, _ := os.ReadFile(target); string(b) != original {
+		t.Errorf("the file outside the project was rewritten: %q", b)
+	}
+	if ents, _ := os.ReadDir(cfg.BackupsDir); len(ents) != 0 {
+		t.Error("a refused agent was backed up")
+	}
+	if _, err := os.Stat(cfg.BackupsDir); err == nil {
+		t.Error("a refused promote created the backups directory")
+	}
+}
+
 // A project agent that is a link out of the agent directories, or over the size
 // cap, is refused by promote and eval; the link's target is not edited.
 func TestPromote_RefusesWhatTheRosterReaderRefuses(t *testing.T) {
