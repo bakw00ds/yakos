@@ -419,7 +419,7 @@ var commandRegistry = []commandEntry{
 	{
 		Name: "start",
 		Specs: specSet("start", "--runtime", "--safe", "--allow-root", "--no-agents", "--dry-run",
-			"--print-agents", "--continue", "--fork-session", "--ide", "--bare", "--strict-mcp",
+			"--print-agents", "--print-env", "--continue", "--fork-session", "--ide", "--bare", "--strict-mcp",
 			"--no-repl", "--web", "--console-addr", "--ws-addr", "--perf-addr", "--networked",
 			"--console-bind", "--console-external-host", "--ide-root", "--no-project-ide",
 			"--resume", "--model", "--share-terminal", "--direct"),

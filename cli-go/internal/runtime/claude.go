@@ -168,7 +168,7 @@ func (a *ClaudeAdapter) Dispatch(ctx context.Context, req DispatchRequest) (*Dis
 // third-party binary, and vice versa.
 func buildEnv(req DispatchRequest) []string {
 	env := filterEnv(os.Environ(), claudeEnvSpec)
-	return appendDispatchEnv(env, req)
+	return appendDispatchEnv(applyClaudeAliases(env), req)
 }
 
 // modelDropLog receives the one-line notice when a model name cannot be
@@ -858,7 +858,7 @@ type ChatDispatchRequest struct {
 // dispatch: an allowlisted subset of the parent env (see env.go / M4) plus
 // dispatch-specific variables.
 func buildEnvChat(req ChatDispatchRequest) []string {
-	env := filterEnv(os.Environ(), claudeEnvSpec)
+	env := applyClaudeAliases(filterEnv(os.Environ(), claudeEnvSpec))
 	if req.ModelOverride != "" {
 		env = append(env, "YAKOS_MODEL_OVERRIDE="+req.ModelOverride)
 	}

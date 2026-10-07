@@ -48,6 +48,11 @@ type File struct {
 	// allows to run without their sandbox. Entries are matched exactly and
 	// case-insensitively; there are no wildcards.
 	AllowUnsandboxedRuntimes []string `yaml:"allow_unsandboxed_runtimes,omitempty"`
+
+	// GatewayClasses is the raw gateway_classes key (K-141), kept as a node so
+	// a malformed shape never fails the whole file. Read it through
+	// File.Classes (gatewayclasses.go), which validates it.
+	RawGatewayClasses yaml.Node `yaml:"gateway_classes,omitempty"`
 }
 
 // ErrUntrusted marks a policy file ignored for being a symlink, not a regular

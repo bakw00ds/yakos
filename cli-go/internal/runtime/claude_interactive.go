@@ -150,7 +150,7 @@ func EncodeUserTurn(text string) []byte {
 // so limiting it also narrows what an H2-style terminal-access leak could
 // expose.
 func buildEnvInteractive(modelOverride string) []string {
-	env := filterEnv(os.Environ(), claudeEnvSpec)
+	env := applyClaudeAliases(filterEnv(os.Environ(), claudeEnvSpec))
 	if modelOverride != "" {
 		env = append(env, "YAKOS_MODEL_OVERRIDE="+modelOverride)
 	}

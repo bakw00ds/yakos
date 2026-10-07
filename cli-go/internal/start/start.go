@@ -87,6 +87,11 @@ type Config struct {
 	// PrintAgents prints the composed agent JSON and exits.
 	PrintAgents bool
 
+	// PrintEnv prints the router-policy class aliases (K-141) the runtime would
+	// get and exits, without launching it. TODO(K-139b): `yakos router explain
+	// --class` replaces this dry run.
+	PrintEnv bool
+
 	// --- session passthrough flags ---
 
 	// Continue resumes the most recent claude session (claude-only).
@@ -327,13 +332,13 @@ func Run(cfg Config) (*Banner, error) {
 	}
 
 	// Warn on auth not configured even if not bailing.
-	if !authOk && !cfg.DryRun && !cfg.PrintAgents {
+	if !authOk && !cfg.DryRun && !cfg.PrintAgents && !cfg.PrintEnv {
 		_, _ = fmt.Fprintf(ew, "WARN: %q auth not detected; the runtime may prompt or fail. Run 'yakos auth login %s' to fix.\n", runtime, authLoginTarget(runtime))
 	}
 
 	// Skip PATH check when a test has injected ExecFn, when --no-repl is set
 	// (no REPL will be exec'd), or when in dry-run / print-agents mode.
-	if !cfg.DryRun && !cfg.PrintAgents && !cfg.NoREPL && cfg.ExecFn == nil {
+	if !cfg.DryRun && !cfg.PrintAgents && !cfg.PrintEnv && !cfg.NoREPL && cfg.ExecFn == nil {
 		if !cliOk {
 			return nil, fmt.Errorf("start: %q CLI not on PATH. Install it, then retry. (--dry-run works without the CLI installed.)", runtime)
 		}
@@ -368,6 +373,14 @@ func Run(cfg Config) (*Banner, error) {
 			PermMode:     permMode,
 			AgentCount:   agentCount,
 		}, nil
+	}
+
+	// ---- print-env mode (early exit) ------------------------------------------
+
+	if cfg.PrintEnv {
+		printGatewayEnv(w, runtime, gatewayStateDir(cfg, env), env)
+		return &Banner{Project: name, ProjectRepo: projectRepo, ControlDir: controlDir, Runtime: runtime,
+			Capabilities: caps, CLIOk: cliOk, AuthOk: authOk, PermMode: permMode, AgentCount: agentCount}, nil
 	}
 
 	// ---- mode flags label ------------------------------------------------------
@@ -1128,6 +1141,11 @@ func buildExecArgs(runtime, projectRepo, permMode string, agentCount int, cfg Co
 
 	// Build environment for exec.
 	execEnv := buildExecEnv(runtime, env, cfg.AllowRoot)
+	if runtime == "claude" {
+		// K-141: class aliases from the user-level router policy, through the
+		// same helper the dispatch builders use. The operator's own variable wins.
+		execEnv, _ = runtimeenv.ApplyGatewayAliases(gatewayStateDir(cfg, env), execEnv)
+	}
 
 	return argv0, argv, execEnv, nil
 }
@@ -1307,6 +1325,8 @@ Terminal sharing (ADR-0008 Phase 1):
 Inspection:
     --dry-run             Print what would be exec'd; exit 0.
     --print-agents        Print the composed agent JSON; exit 0.
+    --print-env           Print the router-policy class aliases (gateway_classes)
+                          the claude runtime would get; exit 0.
     --                    End of yakos flags; rest passed to runtime CLI.
 
 Examples:
