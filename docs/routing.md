@@ -444,8 +444,9 @@ policy_sha: 3f4135ea62d49d5ac61c14051d709ac1dc84442814bc2d268d3e4d3abcc09a72
   upstream outputs); the console chat handler and `yakos dispatch` do. A caller
   that omits it can still get a different runtime than `Run` picks for a
   sensitive request. They see no task size (`task_bytes_gt` rules).
-- The bash dispatch path has no router at all (K-143); `YAKOS_IMPL` does not
-  select a router.
+- The bash dispatch path has no router at all. Since K-143 `yakos dispatch`
+  runs the Go path unless `YAKOS_IMPL=bash`, so the router applies by default;
+  under `YAKOS_IMPL=bash` there is no router and no `--explain`.
 
 ## Sensitive class (K-140)
 

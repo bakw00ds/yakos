@@ -382,6 +382,21 @@ echo ""
 info "(All integrations above are optional. See COMPATIBILITY.md and COOKBOOK.md for usage.)"
 echo ""
 
+# ---- implementation (K-143; twin of checkImplementation in internal/doctor) ----
+#
+# Which implementation `yakos dispatch` runs on. This script only runs when the
+# bash tree was invoked, so the tree is present. YAKOS_IMPL is project-settable
+# (a committed .claude/settings.json env block), so its value is never printed:
+# two fixed lines.
+
+echo "Implementation"
+if [ "${YAKOS_IMPL:-}" = "bash" ]; then
+    warn "yakos dispatch: bash (YAKOS_IMPL=bash); no router, no --explain, codex and agy start without their sandbox flags"
+else
+    info "yakos dispatch: Go-native (default); YAKOS_IMPL=bash selects the bash oracle"
+fi
+echo ""
+
 # ---- runtime feature probe (--probe-runtime only) -------------------------
 #
 # Doctor is a shell script; it can't actually call Claude Code's
