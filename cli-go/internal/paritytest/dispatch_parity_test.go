@@ -23,13 +23,24 @@ package paritytest
 //	D2 explicit --runtime that cannot run: Go fails (ExplicitRuntimeError) unless
 //	   --runtime-fallback opts in; bash walks the fallback lists (K-132).
 //	D3 model of a non-claude runtime: bash prints the tier (sonnet), Go maps it
-//	   to the runtime's model id (models registry). Models are compared for
-//	   claude only.
+//	   to the runtime's model id (models registry) or leaves the harness
+//	   default (an empty model, as for codex). Models are compared for
+//	   claude only, except on the non-claude-model-id row, which compares the
+//	   model of a codex resolution and so observes D3.
 //	D4 `model-policy:` agent frontmatter (a promoted eval policy): bash lets it
 //	   override `model:`, Go does not read it (the router policy file replaces it).
 //	D5 not exercised because the case runs with no policy file: router rules,
 //	   agent pins in the policy, cooldown, sticky conversations, `--explain`
 //	   itself (bash has none).
+//
+// Each id has a kind check (kindChecks): a row listed under D1/D2/D3/D4 passes
+// only when it diverges in THAT way (D1: bash runs the runtime that
+// router.disable_runtimes disables and Go does not; D2: Go refuses an explicit
+// runtime bash falls back from; D3: same runtime, bash prints a tier and Go the
+// runtime's own model; D4: same runtime, bash applies the model-policy: value and Go the
+// model: tier). A different divergence on the row (a runtime or argv mismatch
+// on the D4 row, say) is reported as unexpected. TestDispatchDryRunParity also
+// requires the observed set to be exactly {D1, D2, D3, D4}.
 //
 // The argv shape compared is the claude CLI's flags and flag values (paths
 // replaced), the --agents ids and their model, and the --model value; the task
@@ -58,7 +69,11 @@ type pvariant struct {
 	yml      string
 	extra    []string // extra dispatch args for both sides
 	agents   []string // nil: the whole roster; else only these (the fixture ids are always available)
-	expected string   // non-empty: a documented divergence id; the row MUST diverge
+	expected string   // non-empty: a documented divergence id; the row MUST diverge, in the kind kindChecks[expected] names
+	// allModels compares the model of every runtime, not only claude's. Only
+	// the D3 row sets it: the other rows compare codex/agy on runtime alone
+	// because D3 would make all of them diverge.
+	allModels bool
 }
 
 // sample is the subset that covers each branch of the chain: a plain agent, one
@@ -72,6 +87,7 @@ var parityVariants = []pvariant{
 	{name: "default-codex-fallback-claude", yml: "default-runtime: codex\ndefault-fallback: [claude]\n", agents: sample},
 	{name: "disable-runtime", yml: "default-runtime: codex\nrouter:\n  disable_runtimes: [codex]\n", agents: []string{"backend", "fx-plain"}, expected: "D1"},
 	{name: "explicit-runtime-unavailable", yml: "default-fallback: [claude]\n", extra: []string{"--runtime", "agy"}, agents: []string{"backend", "fx-plain"}, expected: "D2"},
+	{name: "non-claude-model-id", yml: "default-runtime: codex\n", agents: []string{"backend", "fx-plain"}, allModels: true, expected: "D3"},
 	{name: "model-policy-frontmatter", agents: []string{"fx-policy"}, expected: "D4"},
 }
 
@@ -300,7 +316,7 @@ type paritySpec struct {
 }
 
 // diverge says how bash and Go differ for one row ("" when they agree).
-func diverge(bash, goR resolution, project string) string {
+func diverge(bash, goR resolution, project string, allModels bool) string {
 	if bash.Err != "" || goR.Err != "" {
 		if bash.Err != "" && goR.Err != "" {
 			return ""
@@ -309,6 +325,9 @@ func diverge(bash, goR resolution, project string) string {
 	}
 	if bash.Runtime != goR.Runtime {
 		return "runtime"
+	}
+	if allModels && bash.Model != goR.Model {
+		return "model"
 	}
 	if bash.Runtime == "claude" {
 		if bash.Model != goR.Model {
@@ -319,6 +338,60 @@ func diverge(bash, goR resolution, project string) string {
 		}
 	}
 	return ""
+}
+
+// kindChecks says whether a divergent row is the documented kind of one id; it
+// returns "" for yes, else what differs. Reasons name the resolutions only.
+var kindChecks = map[string]func(bash, goR resolution) string{
+	// D1: bash (blind to router.disable_runtimes) runs the disabled runtime; Go
+	// does not run it (another runtime, or a refusal).
+	"D1": func(b, g resolution) string {
+		if b.Err != "" || b.Runtime != "codex" {
+			return "bash did not run the disabled runtime codex"
+		}
+		if g.Err == "" && g.Runtime == "codex" {
+			return "Go still runs the disabled runtime"
+		}
+		return ""
+	},
+	// D2: the explicit --runtime agy has no CLI. Bash falls back to another
+	// runtime; Go refuses with the explicit-runtime error.
+	"D2": func(b, g resolution) string {
+		if b.Err != "" || b.Runtime == "agy" {
+			return "bash did not fall back from the explicit runtime"
+		}
+		if g.Err == "" {
+			return "Go did not refuse the explicit runtime"
+		}
+		if !strings.Contains(g.Err, "agy") {
+			return "Go error does not name the explicit runtime: " + g.Err
+		}
+		return ""
+	},
+	// D3: same non-claude runtime, bash prints the tier, Go the runtime's own
+	// model (registry id, or empty for the harness default).
+	"D3": func(b, g resolution) string {
+		if b.Err != "" || g.Err != "" || b.Runtime != g.Runtime || b.Runtime == "claude" {
+			return "not a same-runtime non-claude resolution"
+		}
+		// Go prints no model for a runtime with no registry entry for the tier
+		// (the harness default), or the registry's id.
+		if b.Model != "sonnet" || g.Model == b.Model {
+			return "models are not tier (bash) versus the runtime's own model (Go)"
+		}
+		return ""
+	},
+	// D4: same claude runtime; bash takes model-policy: opus, Go the model:
+	// balanced tier (sonnet).
+	"D4": func(b, g resolution) string {
+		if b.Err != "" || g.Err != "" || b.Runtime != "claude" || g.Runtime != "claude" {
+			return "not a same-runtime claude resolution"
+		}
+		if b.Model != "opus" || g.Model != "sonnet" {
+			return "models are not model-policy (bash opus) versus model: tier (Go sonnet)"
+		}
+		return ""
+	},
 }
 
 // collectParity resolves every (variant, agent) row on both sides.
@@ -362,10 +435,14 @@ func collectParity(t *testing.T, e parityEnv, variants []pvariant) (header strin
 	seenExpected = map[string]int{}
 	header = fmt.Sprintf("%-30s %-24s %-22s %-22s %s", "variant", "agent", "bash", "go", "diff")
 	for _, j := range jobs {
-		d := diverge(j.b, j.g, j.spec.project)
+		d := diverge(j.b, j.g, j.spec.project, j.spec.variant.allModels)
 		if d != "" && j.spec.variant.expected != "" {
-			seenExpected[j.spec.variant.expected]++
-			continue
+			if why := kindChecks[j.spec.variant.expected](j.b, j.g); why != "" {
+				d = "expected " + j.spec.variant.expected + " but: " + why + " (" + d + ")"
+			} else {
+				seenExpected[j.spec.variant.expected]++
+				continue
+			}
 		}
 		if d != "" || j.spec.variant.expected != "" {
 			// Unexpected divergence; a row listed as divergent that agrees is
@@ -419,6 +496,14 @@ func TestDispatchDryRunParity(t *testing.T) {
 		if v.expected != "" && seen[v.expected] == 0 {
 			t.Errorf("documented divergence %s was not observed", v.expected)
 		}
+	}
+	var got []string
+	for id := range seen {
+		got = append(got, id)
+	}
+	sort.Strings(got)
+	if strings.Join(got, ",") != "D1,D2,D3,D4" {
+		t.Errorf("the observed divergences are %v, want exactly [D1 D2 D3 D4]", got)
 	}
 }
 
@@ -476,5 +561,66 @@ func TestLauncherDefaultIsGoAndBashOverrideWorks(t *testing.T) {
 	out, code := run("bash", explain...)
 	if code == 0 || !strings.Contains(out, "unknown flag '--explain'") {
 		t.Errorf("YAKOS_IMPL=bash must restore the bash dispatch (exit %d):\n%s", code, out)
+	}
+}
+
+// A different divergence on a documented row must fail it: the check is on the
+// KIND of divergence, not on "any divergence". Seeding a Go-only state default
+// changes the runtime on the D4 row (which is a model-only divergence).
+func TestDispatchDryRunParityDocumentedRowRejectsOtherDivergence(t *testing.T) {
+	e := newParityEnv(t)
+	e.extraGoHome = func(home string) {
+		dir := filepath.Join(home, ".yakos-state")
+		mustWrite(t, filepath.Join(dir, "default-runtime"), "codex\n")
+		_ = os.Chmod(dir, 0o700)
+		_ = os.Chmod(filepath.Join(dir, "default-runtime"), 0o600)
+	}
+	var d4 pvariant
+	for _, v := range parityVariants {
+		if v.expected == "D4" {
+			d4 = v
+		}
+	}
+	_, _, bad, seen := collectParity(t, e, []pvariant{d4})
+	if len(bad) == 0 || seen["D4"] != 0 {
+		t.Fatalf("a runtime mismatch on the D4 row was accepted as D4 (bad=%v seen=%v)", bad, seen)
+	}
+	if !strings.Contains(strings.Join(bad, "\n"), "expected D4 but") {
+		t.Errorf("the table does not say the D4 kind was not met:\n%s", strings.Join(bad, "\n"))
+	}
+}
+
+// The kind checks themselves: the documented shape passes, and a neighbouring
+// divergence (the wrong runtime, the wrong model, an unrelated error) fails.
+func TestDivergenceKindChecks(t *testing.T) {
+	r := func(rt, m string) resolution { return resolution{Runtime: rt, Model: m} }
+	e := func(msg string) resolution { return resolution{Err: msg} }
+	cases := []struct {
+		id      string
+		b, g    resolution
+		wantErr bool
+	}{
+		{"D1", r("codex", "sonnet"), r("claude", "sonnet"), false},
+		{"D1", r("codex", "sonnet"), e("no runtime available"), false},
+		{"D1", r("claude", "sonnet"), r("agy", "sonnet"), true},
+		{"D1", r("codex", "sonnet"), r("codex", "sonnet"), true},
+		{"D2", r("claude", "sonnet"), e("explicit runtime agy cannot run"), false},
+		{"D2", r("claude", "sonnet"), r("claude", "sonnet"), true},
+		{"D2", r("claude", "sonnet"), e("boom"), true},
+		{"D2", r("agy", "sonnet"), e("agy: missing"), true},
+		{"D3", r("codex", "sonnet"), r("codex", ""), false},
+		{"D3", r("codex", "sonnet"), r("codex", "gpt-5"), false},
+		{"D3", r("codex", "sonnet"), r("agy", ""), true},
+		{"D3", r("codex", "sonnet"), r("codex", "sonnet"), true},
+		{"D3", r("claude", "sonnet"), r("claude", "opus"), true},
+		{"D4", r("claude", "opus"), r("claude", "sonnet"), false},
+		{"D4", r("claude", "opus"), r("codex", "sonnet"), true},
+		{"D4", r("claude", "haiku"), r("claude", "sonnet"), true},
+		{"D4", r("claude", "opus"), r("claude", "opus"), true},
+	}
+	for _, c := range cases {
+		if got := kindChecks[c.id](c.b, c.g); (got != "") != c.wantErr {
+			t.Errorf("%s bash=%v go=%v: check said %q, wantErr=%v", c.id, c.b, c.g, got, c.wantErr)
+		}
 	}
 }
