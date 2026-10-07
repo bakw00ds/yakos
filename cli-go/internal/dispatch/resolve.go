@@ -26,6 +26,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/auth"
 	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/projectcfg"
+	"github.com/bakw00ds/yakos/internal/router"
 	"github.com/bakw00ds/yakos/internal/runtime"
 	"github.com/bakw00ds/yakos/internal/statepath"
 )
@@ -155,6 +156,10 @@ const (
 	RuntimeByStateDefault   = "state-default"
 	RuntimeByDefault        = "default"
 	RuntimeByFallback       = "fallback"
+	// RuntimeByPolicy: a rule of the router policy file chose it (router.go).
+	RuntimeByPolicy = "policy"
+	// RuntimeBySticky: the conversation was already routed there (router.go).
+	RuntimeBySticky = "sticky"
 )
 
 // autoRuntime is the explicit spelling of "no override" (the console runtime
@@ -193,6 +198,11 @@ type RouteQuery struct {
 	// FallbackOptIn are the runtimes the operator listed to fall back to (the
 	// CLI's --runtime-fallback). Only the CLI sets it.
 	FallbackOptIn []string
+	// Class and TaskBytes are what router rules match on besides the agent; a
+	// caller that does not know them leaves them zero and a rule that needs them
+	// does not match.
+	Class     string
+	TaskBytes int64
 }
 
 // probeResult is the outcome of checking one chain candidate.
@@ -368,6 +378,15 @@ type chainInput struct {
 	// --runtime-fallback). An explicit runtime uses only these; any other
 	// choice tries them after the agent's and the project's own lists.
 	optIn []string
+
+	// The router's inputs (route_router.go). All zero when no policy rule applies,
+	// in which case the chain is the P0a chain exactly.
+	policy *policyAction
+	// sticky is the runtime this conversation was first routed to ("" = none).
+	sticky string
+	// cooling reports a runtime being skipped after repeated failures; nil = no
+	// cooldown (also for a probe-less preferred-runtime query).
+	cooling func(string) (bool, time.Duration)
 }
 
 type candidate struct{ name, by string }
@@ -375,7 +394,7 @@ type candidate struct{ name, by string }
 // explicit reports whether the operator named this runtime: an override, or a
 // bare runtime name used as the agent (`yakos dispatch codex "..."`).
 func (c candidate) explicit() bool {
-	return c.by == RuntimeByOverride || c.by == RuntimeByAgentName
+	return c.by == RuntimeByOverride || c.by == RuntimeByAgentName || c.by == RuntimeBySticky
 }
 
 func supportedRuntime(name string) bool {
@@ -399,8 +418,15 @@ func preferred(in chainInput) (candidate, []string) {
 		return candidate{in.override, RuntimeByOverride}, nil
 	case agentRuntime == "" && agentscompose.IsKnownRuntime(in.agentName):
 		return candidate{in.agentName, RuntimeByAgentName}, nil
+	case in.sticky != "":
+		return candidate{in.sticky, RuntimeBySticky}, nil
+	case in.policy.overridesPins():
+		return candidate{in.policy.runtime, RuntimeByPolicy}, nil
 	case agentRuntime != "":
 		return candidate{agentRuntime, RuntimeByFrontmatter}, nil
+	}
+	if in.policy != nil && in.policy.runtime != "" {
+		return candidate{in.policy.runtime, RuntimeByPolicy}, nil
 	}
 	if name, src := in.project.RuntimeFor(domain); name != "" {
 		by := RuntimeByProjectDefault
@@ -446,13 +472,19 @@ func buildChain(in chainInput) ([]candidate, []string) {
 		chain = append(chain, candidate{name, RuntimeByFallback})
 	}
 	if !first.explicit() {
-		if in.agent != nil {
-			for _, f := range in.agent.RuntimeFallback {
+		if in.policy.replacesFallbacks(first, in.agent) {
+			for _, f := range in.policy.fallbacks {
 				add(f)
 			}
-		}
-		for _, f := range in.project.DefaultFallback {
-			add(f)
+		} else {
+			if in.agent != nil {
+				for _, f := range in.agent.RuntimeFallback {
+					add(f)
+				}
+			}
+			for _, f := range in.project.DefaultFallback {
+				add(f)
+			}
 		}
 	}
 	for _, f := range in.optIn {
@@ -492,8 +524,21 @@ func implicitFallbacks(in chainInput, chosen string) []string {
 // (used to learn the preferred runtime without touching the machine). A
 // cancelled ctx ends the walk with its error.
 func chooseRuntime(ctx context.Context, in chainInput, probe func(context.Context, string) probeResult) (RuntimeChoice, []string, error) {
-	chain, notes := buildChain(in)
+	var cooled bool
+	choice, notes, err := walkChain(ctx, in, probe, probe != nil && in.cooling != nil, &cooled)
+	// A cooldown is a preference, not a ban: when every candidate that remains is
+	// cooling, walk again ignoring it rather than refuse to dispatch at all.
+	if cooled && choice.Runtime == "" && ctx.Err() == nil {
+		return walkChain(ctx, in, probe, false, &cooled)
+	}
+	return choice, notes, err
+}
+
+// walkChain is one pass over the chain. *cooled is set when a candidate was
+// passed over for cooling down.
+func walkChain(ctx context.Context, in chainInput, probe func(context.Context, string) probeResult, honorCooling bool, cooled *bool) (RuntimeChoice, []string, error) {
 	var choice RuntimeChoice
+	chain, notes := buildChain(in)
 	for i, c := range chain {
 		if !supportedRuntime(c.name) {
 			// An explicit override that names no runtime is an error, not a
@@ -504,6 +549,17 @@ func chooseRuntime(ctx context.Context, in chainInput, probe func(context.Contex
 			}
 			choice.Skipped = append(choice.Skipped, SkippedRuntime{c.name, unsupportedReasonFor(c.name)})
 			continue
+		}
+		if in.project.RuntimeDisabled(c.name) {
+			choice.Skipped = append(choice.Skipped, SkippedRuntime{c.name, "disabled by this project's .yakos.yml (router.disable_runtimes)"})
+			continue
+		}
+		if honorCooling && !c.explicit() {
+			if cool, left := in.cooling(c.name); cool {
+				*cooled = true
+				choice.Skipped = append(choice.Skipped, SkippedRuntime{c.name, fmt.Sprintf("cooling down after repeated failures (%ds left)", int(left.Seconds())+1)})
+				continue
+			}
 		}
 		if probe != nil {
 			if p := probe(ctx, c.name); !p.OK {
@@ -657,7 +713,9 @@ func agentForQuery(q RouteQuery) *agentscompose.ComposedAgent {
 // uses it to print the runtime it is about to dispatch to. It prints nothing
 // about fallbacks itself.
 func ResolveRuntime(ctx context.Context, q RouteQuery) (RuntimeChoice, error) {
-	in := loadChainInput(agentForQuery(q), q.Agent, q.Project, q.Override, q.EnvDefault, q.FallbackOptIn, false)
+	agent := agentForQuery(q)
+	in := loadChainInput(agent, q.Agent, q.Project, q.Override, q.EnvDefault, q.FallbackOptIn, false)
+	applyRouter(&in, agent, q.Agent, q.Class, q.TaskBytes, "", "", nil)
 	choice, _, err := chooseRuntime(ctx, in, runtimeProbe)
 	return choice, err
 }
@@ -668,7 +726,9 @@ func ResolveRuntime(ctx context.Context, q RouteQuery) (RuntimeChoice, error) {
 // per runtime) before the work is queued; the real choice, with probing and
 // fallback, is made again by Run and RunStream.
 func PreferredRuntime(q RouteQuery) (RuntimeChoice, error) {
-	in := loadChainInput(agentForQuery(q), q.Agent, q.Project, q.Override, q.EnvDefault, q.FallbackOptIn, false)
+	agent := agentForQuery(q)
+	in := loadChainInput(agent, q.Agent, q.Project, q.Override, q.EnvDefault, q.FallbackOptIn, false)
+	applyRouter(&in, agent, q.Agent, q.Class, q.TaskBytes, "", "", nil)
 	choice, _, err := chooseRuntime(context.Background(), in, nil)
 	return choice, err
 }
@@ -835,6 +895,11 @@ type routeInput struct {
 	RuntimeFallbackOptIn      []string
 	ModelOverride             string
 	EvalRunID                 string
+	// Router inputs (route_router.go): the route class ("" = classify), the
+	// task's size and the conversation, for rule matching and stickiness.
+	Class          string
+	TaskBytes      int64
+	ConversationID string
 }
 
 // routed is the result of routing one dispatch.
@@ -850,12 +915,21 @@ type routed struct {
 	// frontmatter or a budget clamp, as opposed to the runtime default. Only
 	// then does a chat adapter pass the model to its CLI.
 	ModelExplicit bool
+	// Decision is the router's record of this routing: the rule, the reason, the
+	// chain and the policy it was made under.
+	Decision router.RouteDecision
 }
 
 // routeDispatch is the one place that turns (agent, overrides, project state)
 // into (agent, runtime, model). Run and RunStream both call it, so the one-shot
 // and streaming paths cannot drift apart (the PR #203 class of bug).
 func routeDispatch(ctx context.Context, in routeInput) (*routed, error) {
+	return routeDispatchAt(ctx, in, false)
+}
+
+// routeDispatchAt is routeDispatch; explain makes it a dry run that records
+// nothing (no sticky pin) and prints no fallback notice.
+func routeDispatchAt(ctx context.Context, in routeInput, explain bool) (*routed, error) {
 	roster, err := agentscompose.Compose(in.YakosRoot, in.Project)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch: compose agents: %w", err)
@@ -867,14 +941,19 @@ func routeDispatch(ctx context.Context, in routeInput) (*routed, error) {
 	}
 
 	ci := loadChainInput(agent, in.Agent, in.Project, in.RuntimeOverride, in.RuntimeEnvDefault, in.RuntimeFallbackOptIn, true)
+	var warnTo io.Writer = routeLog
+	if explain {
+		warnTo = io.Discard
+	}
+	st := applyRouter(&ci, agent, in.Agent, in.Class, in.TaskBytes, in.Project, in.ConversationID, warnTo)
 	choice, notes, err := chooseRuntime(ctx, ci, runtimeProbe)
 	for _, n := range notes {
-		fmt.Fprintf(routeLog, "yakos dispatch: %s\n", n)
+		fmt.Fprintf(warnTo, "yakos dispatch: %s\n", n)
 	}
 	if err != nil {
 		return nil, err
 	}
-	if choice.ChosenBy == RuntimeByFallback {
+	if choice.ChosenBy == RuntimeByFallback && !explain {
 		fmt.Fprintf(routeLog, "yakos dispatch: preferred runtime unavailable [%s]; falling back to '%s'\n",
 			skippedSummary(choice.Skipped), choice.Runtime)
 	}
@@ -888,6 +967,8 @@ func routeDispatch(ctx context.Context, in routeInput) (*routed, error) {
 		return nil, err
 	}
 
+	mc, fromPolicy := st.applyModel(choice.Runtime, in.ModelOverride, mc)
+
 	// A user-level max_model ceiling (K-119) lowers a dearer model, whether it
 	// came from a project's supervisor.model or the agent's frontmatter. The
 	// ceiling is expressed in Claude tiers, so it applies to claude only.
@@ -898,7 +979,18 @@ func routeDispatch(ctx context.Context, in routeInput) (*routed, error) {
 		}
 	}
 
+	if ci.project.ModelDisabled(mc.model) {
+		return nil, fmt.Errorf("dispatch: model %q is disabled by this project's .yakos.yml (router.disable_models)", mc.model)
+	}
+
+	decision := st.decision(ci, choice, mc, fromPolicy)
+	if !explain {
+		explicit := in.ModelOverride != "" || choice.ChosenBy == RuntimeByOverride || choice.ChosenBy == RuntimeByAgentName
+		st.remember(in.ConversationID, in.Agent, in.Project, decision, explicit)
+	}
+
 	return &routed{
+		Decision:        decision,
 		Agent:           agent,
 		Adapter:         adapter,
 		Runtime:         choice.Runtime,

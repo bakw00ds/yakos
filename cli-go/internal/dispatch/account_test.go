@@ -258,24 +258,29 @@ func TestBuildFinished_UnknownRuntimeHasNoBilling(t *testing.T) {
 	}
 }
 
-// No routing fields until the router lands: they are absent, not empty.
-func TestRun_Ledger_RoutingFieldsAreAbsentUntilTheRouterLands(t *testing.T) {
+// With no policy rule the router writes the default rule R0 and the class, and no
+// policy sha (there is no policy to cite).
+func TestRun_Ledger_RoutingFieldsWithoutPolicy(t *testing.T) {
 	fakeRuntimeBin(t, "claude", "claude-stream-json-oneshot-SYNTHETIC.ndjson", "", 0)
 	_, ev, _ := runWith(t, "claude", nil)
-	for _, k := range []string{"route_rule", "route_reason", "route_class", "policy_sha"} {
-		if _, has := ev[k]; has {
-			t.Errorf("%s must be absent: %v", k, ev[k])
-		}
+	assertField(t, ev, "route_rule", "R0")
+	assertField(t, ev, "route_class", "default")
+	if r, _ := ev["route_reason"].(string); !strings.HasPrefix(r, "default chain: runtime claude") {
+		t.Errorf("route_reason = %q", r)
 	}
-	// A request that carries them has them written (the router's hand-off).
-	fakeRuntimeBin(t, "claude", "claude-stream-json-oneshot-SYNTHETIC.ndjson", "", 0)
-	_, ev, _ = runWith(t, "claude", func(r *Request) {
-		r.RouteRule, r.RouteReason, r.RouteClass, r.PolicySHA = "R3", "class chat matched", "chat", "ab12cd34"
-	})
-	assertField(t, ev, "route_rule", "R3")
-	assertField(t, ev, "route_reason", "class chat matched")
-	assertField(t, ev, "route_class", "chat")
-	assertField(t, ev, "policy_sha", "ab12cd34")
+	if _, has := ev["policy_sha"]; has {
+		t.Errorf("policy_sha must be absent without a policy: %v", ev["policy_sha"])
+	}
+}
+
+// Account writes the routing fields a Request carries (the router's hand-off) and
+// nothing else sets them.
+func TestBuildFinished_WritesRoutingFieldsOfTheRequest(t *testing.T) {
+	ev := buildFinished(Request{AgentName: "a", Runtime: "claude", Project: "/p",
+		RouteRule: "R3", RouteReason: "class chat matched", RouteClass: "chat", PolicySHA: "ab12cd34"}, Result{}, fixedTime)
+	if ev.RouteRule != "R3" || ev.RouteReason != "class chat matched" || ev.RouteClass != "chat" || ev.PolicySHA != "ab12cd34" {
+		t.Fatalf("routing fields not carried: %+v", ev)
+	}
 }
 
 // ---- hygiene ---------------------------------------------------------------------

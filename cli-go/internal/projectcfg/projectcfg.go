@@ -72,7 +72,39 @@ type Config struct {
 
 	// PerDomain maps an agent's domain to a runtime. Nil when unset.
 	PerDomain map[string]string
+
+	// DisableRuntimes and DisableModels come from the router: block
+	//
+	//	router:
+	//	  disable_runtimes: [codex]
+	//	  disable_models: [gpt-5.6-sol]
+	//
+	// A project can only switch things off: there is no enable, no add and no
+	// provider list, so a cloned repository cannot widen where a task is sent.
+	DisableRuntimes []string
+	DisableModels   []string
 }
+
+// RuntimeDisabled reports whether the project switches runtime name off.
+func (c Config) RuntimeDisabled(name string) bool { return contains(c.DisableRuntimes, name) }
+
+// ModelDisabled reports whether the project switches model id off.
+func (c Config) ModelDisabled(id string) bool { return contains(c.DisableModels, id) }
+
+func contains(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+// maxDisables bounds each router disable list.
+const maxDisables = 64
+
+// modelIDRe is the shape of a model id (runtime.ModelIDPattern).
+var modelIDRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,63}$`)
 
 // RuntimeFor returns the runtime this file selects for an agent in domain and
 // which key chose it: per-domain[domain] first, then default-runtime. It
@@ -199,7 +231,62 @@ func Parse(data []byte) (Config, []string) {
 		}
 	}
 
+	if v, ok := doc["router"]; ok && v != nil {
+		m, ok := stringMap(v)
+		if !ok {
+			warns = append(warns, "router: want a mapping with disable_runtimes and disable_models lists; ignored")
+		} else {
+			keys := make([]string, 0, len(m))
+			for k := range m {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				switch k {
+				case "disable_runtimes":
+					var w []string
+					cfg.DisableRuntimes, w = disableList(k, m[k], idRe)
+					warns = append(warns, w...)
+				case "disable_models":
+					var w []string
+					cfg.DisableModels, w = disableList(k, m[k], modelIDRe)
+					warns = append(warns, w...)
+				default:
+					warns = append(warns, "router: a project can only disable runtimes and models; ignoring that key")
+				}
+			}
+		}
+	}
+
 	return cfg, warns
+}
+
+// disableList reads one router disable list: strings that match re, deduplicated,
+// at most maxDisables of them.
+func disableList(key string, v any, re *regexp.Regexp) ([]string, []string) {
+	list, ok := v.([]any)
+	if !ok {
+		return nil, []string{"router." + key + ": want a list; ignored"}
+	}
+	var out, warns []string
+	seen := map[string]bool{}
+	for _, el := range list {
+		s, ok := el.(string)
+		s = strings.TrimSpace(s)
+		if !ok || !re.MatchString(s) {
+			warns = append(warns, "router."+key+": skipping an entry that is not an id")
+			continue
+		}
+		if len(out) >= maxDisables {
+			warns = append(warns, fmt.Sprintf("router.%s: only the first %d entries are read", key, maxDisables))
+			break
+		}
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out, warns
 }
 
 // scalarID reports v as a runtime identifier. Only YAML strings qualify, which

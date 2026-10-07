@@ -74,6 +74,8 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 		RuntimeFallbackOptIn: req.RuntimeFallbackOptIn,
 		ModelOverride:        req.Model,
 		EvalRunID:            req.EvalRunID,
+		TaskBytes:            int64(len(req.Task)),
+		ConversationID:       req.ConversationID,
 	})
 	if err != nil {
 		return nil, Result{}, err
@@ -90,6 +92,8 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 	req.FallbackFrom = rr.FallbackFrom
 	req.ModelChosenBy = modelChosenBy
 	req.ModelResolved = modelResolved
+	req.RouteRule, req.RouteReason = rr.Decision.RuleID, rr.Decision.Reason
+	req.RouteClass, req.PolicySHA = rr.Decision.RouteClass, rr.Decision.PolicySHA
 
 	// --- 6. Build agent JSON (claude uses --agents; others use file-based) ---
 	agentJSON := ""
@@ -143,6 +147,8 @@ func Run(ctx context.Context, req Request) (stdout []byte, result Result, err er
 
 	var stderrBuf bytes.Buffer
 	dispatchOut, exitCode, dispatchErr := execWithStderrCapture(ctx, adapter, dispatchReq, &stderrBuf)
+
+	noteRun(ctx, runtimeName, exitCode, dispatchErr)
 
 	tsEnd := time.Now()
 	durationS := tsEnd.Sub(tsStart).Seconds()

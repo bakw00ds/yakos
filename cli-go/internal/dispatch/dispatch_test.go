@@ -20,6 +20,7 @@ var fixedTime = time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
 // YAKOS_DISPATCH_LOG so events are written there rather than ~/.yakos-state.
 func isolatedLogDir(t *testing.T) string {
 	t.Helper()
+	resetRouterState(t)
 	dir := t.TempDir()
 	t.Setenv("YAKOS_DISPATCH_LOG", dir)
 	return dir

@@ -9,19 +9,25 @@
 // On Windows the owner and mode checks do not apply (as for the budget policy);
 // the file must still be a regular, non-symlink file under the user's profile.
 //
-// Today the file carries one key:
+// The file carries two keys:
 //
 //	allow_unsandboxed_runtimes: [codex, agy]
+//	rules: [...]                     # the router rules (internal/router)
 //
-// Runtimes named there may be dispatched without their sandbox (codex
+// Runtimes named in the first may be dispatched without their sandbox (codex
 // --dangerously-bypass-approvals-and-sandbox, agy without --sandbox). Every
 // other runtime, and every runtime when the file is missing or untrusted, keeps
-// its sandbox flags. The router (P1) will add its rules to the same File;
-// unknown keys are ignored so a policy written for a newer yakOS never fails
+// its sandbox flags. The router reads its rules from this same File, through
+// this same Load and trust check; it has no reader of its own. This package
+// does not interpret the rules (the router validates each one); it hands them
+// over undecoded so that one malformed rule cannot discard the whole file.
+// Unknown keys are ignored so a policy written for a newer yakOS never fails
 // this check.
 package routerpolicy
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -48,6 +54,14 @@ type File struct {
 	// allows to run without their sandbox. Entries are matched exactly and
 	// case-insensitively; there are no wildcards.
 	AllowUnsandboxedRuntimes []string `yaml:"allow_unsandboxed_runtimes,omitempty"`
+
+	// Rules is the raw `rules:` node, decoded and validated rule by rule by the
+	// router. Zero when the key is absent.
+	Rules yaml.Node `yaml:"rules,omitempty"`
+
+	// SHA is the hex SHA-256 of the bytes that were read, "" for a missing or
+	// untrusted file. It identifies the policy a decision was made under.
+	SHA string `yaml:"-"`
 
 	// GatewayClasses is the raw gateway_classes key (K-141), kept as a node so
 	// a malformed shape never fails the whole file. Read it through
@@ -138,7 +152,21 @@ func Load(stateDir string) (File, error) {
 	if err := yaml.Unmarshal(data, &p); err != nil {
 		return File{}, fmt.Errorf("parse %s: %w", path, err)
 	}
+	sum := sha256.Sum256(data)
+	p.SHA = hex.EncodeToString(sum[:])
 	return p, nil
+}
+
+// FileSHA returns the SHA of the one trusted policy file in stateDir, "" when
+// it is missing, untrusted or unreadable. It is the single definition of
+// policy_sha: the router's decision gets it from Load (File.SHA) and the
+// env-alias stamp reads it through this helper, so the two never differ.
+func FileSHA(stateDir string) string {
+	f, err := Load(stateDir)
+	if err != nil {
+		return ""
+	}
+	return f.SHA
 }
 
 // AllowsUnsandboxed reports whether the trusted policy in stateDir lists

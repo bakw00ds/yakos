@@ -286,6 +286,85 @@ pins today's behaviour so changing it is deliberate.
   candidates and for `list`. No dispatch-log field, accounting rule, listener or
   console page changes.
 
+## Router rules (`rules:` in router-policy.yml)
+
+The router sits at the one step `Run` and `RunStream` share. **R0** is the
+default rule: the resolve chain described above (override, agent frontmatter,
+per-domain, default-runtime, env, state default, claude; then the fallbacks,
+filtered by the sign-in probe). With no rules in the policy file every decision
+is R0 and equals that chain exactly.
+
+Rules live in `~/.yakos-state/router-policy.yml`, the file that also holds
+`allow_unsandboxed_runtimes`, read by the same reader under the same trust check
+(a regular file you own, not group or world writable; otherwise it is ignored
+with a warning that names no path). At most six rules are read; they are numbered
+`R1`..`R6` in file order and the first match wins.
+
+```yaml
+rules:
+  - match: {domain: code-review}        # class, agent, domain, task_bytes_gt, tags
+    action: {runtime: codex, model: gpt-5.5, fallbacks: [claude]}
+  - match: {task_bytes_gt: 20000}
+    action: {model: haiku}
+    override_pins: true                 # outrank the agent's runtime:/model: pins
+```
+
+- A key left out of `match` matches anything; every key that is set must hold.
+  `tags` has no source yet, so a rule that lists tags does not match.
+- `action` keys left out leave the default choice alone. A rule's `model` is
+  checked against the runtime that runs it, and dropped with a notice when that
+  runtime cannot take it (a Claude tier never goes to codex or agy, another
+  vendor's id never to Claude Code). It is not carried to a fallback runtime.
+- Frontmatter `runtime:` and `model:` pins outrank a rule unless it sets
+  `override_pins: true`. An explicit `--runtime`, `--model`, a bare runtime name
+  as the agent, and a conversation's earlier routing always outrank a rule.
+- A runtime that fails three times in a row (a non-zero exit counts, not only an
+  exec error) is skipped for 60 seconds (in memory). This is a preference: if
+  nothing else can run, it is tried anyway. The cooldown, like the conversation
+  pins below, only engages when a trusted `router-policy.yml` exists (any
+  content, rules or not). With no policy file the resolve chain is exactly the
+  one above, failures included.
+- With a policy file present a conversation keeps the runtime and model of its
+  first turn. The router never moves it, and the cooldown never moves a pinned
+  conversation: its runtime is used even while cooling (the turn may fail with
+  that runtime's own error). The cooldown only skips runtimes when choosing for
+  a conversation with no pin or no conversation id. An explicit runtime or model
+  on the request (`--runtime`, `--model`, the API field) is the operator moving
+  the conversation, and re-pins it: later turns stay where the operator put it.
+  A rule-derived or default decision never overwrites a pin.
+- A pin is keyed by conversation id, agent, project root and the sha of the
+  policy file. A pin made under another project root or an earlier version of
+  the policy is ignored and replaced by the new decision, so a conversation id
+  reused across projects, or a policy edit, starts fresh.
+- A project `.yakos.yml` may only switch things off:
+  `router: {disable_runtimes: [codex], disable_models: [gpt-5.5]}`. It cannot add
+  a rule, a runtime or a provider.
+
+The ledger row of a dispatch carries `route_rule`, `route_reason`, `route_class`
+and (when rules are in force) `policy_sha`. None of it goes into a prompt.
+
+`route_reason` is owned by the router and is set on every row from the decision
+(`default chain: runtime claude by frontmatter`, `rule R2 matched [...]: ...`,
+`sticky: ...`). When a Claude dispatch also ran with the `gateway_classes`
+aliases above, `; env-alias` is appended to that reason
+(`default chain: runtime claude by frontmatter; env-alias`); `route_reason` is
+just `env-alias` only if the router left it empty. `policy_sha` is the SHA-256
+of the one trusted `router-policy.yml`; the router and the alias stamp read it
+through the same helper (`routerpolicy.FileSHA` / `routerpolicy.Load`). It is
+present when rules are in force or aliases were applied, absent otherwise.
+
+### Not routed yet
+
+- Console interactive turns (the chat panes) do not go through the router: they
+  carry no `route_*` fields and ignore rules (K-147, K-148). Console one-shot
+  chat and gRPC use `RunStream`, which does.
+- The runtime pre-checks (`PreferredRuntime`, `ResolveRuntime`: validating a
+  model or a pane's runtime before the run) see no task size and no route class
+  (K-140), so a `task_bytes_gt` or `class` rule can make a pre-check validate
+  against a different runtime than `Run` picks.
+- The bash dispatch path has no router at all (K-143); `YAKOS_IMPL` does not
+  select a router.
+
 ## Claude Code request-class aliases (K-141)
 
 The user-level router policy (`~/.yakos-state/router-policy.yml`, the same
@@ -349,8 +428,8 @@ have no documented knob and wait for the gateway hint headers (K-151).
 - `yakos start` applies them on the Go implementation (`YAKOS_IMPL=go`); the
   bash `cli/lib/start.sh` path does not know the policy and sets nothing.
 - The one-shot dispatch ledger row of a claude run that had aliases set carries
-  `route_reason=env-alias` and `policy_sha` (sha256 of the sorted
-  `NAME=model` lines that were set).
+  `; env-alias` appended to the router's `route_reason`, and `policy_sha` (the
+  sha256 of the trusted policy file, as for any routed row).
 
 ### Commands
 

@@ -5,7 +5,10 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/bakw00ds/yakos/internal/routerpolicy"
 )
 
 func envAliasHome(t *testing.T, policy string) {
@@ -33,16 +36,28 @@ func envAliasHome(t *testing.T, policy string) {
 	}
 }
 
-func TestRun_Ledger_EnvAliasRowCarriesReasonAndTableSHA(t *testing.T) {
+// route_reason is the router's and always set; the stamp appends to it.
+// policy_sha is the sha of the trusted policy file, the same value the router
+// computes (routerpolicy.Load).
+func TestRun_Ledger_EnvAliasRowComposesReasonAndFileSHA(t *testing.T) {
 	fakeRuntimeBin(t, "claude", "claude-stream-json-oneshot-SYNTHETIC.ndjson", "", 0) // sets its own HOME
-	envAliasHome(t, "gateway_classes: {subagent: haiku}\n")
+	const policy = "gateway_classes: {subagent: haiku}\n"
+	envAliasHome(t, policy)
 	_, ev, _ := runWith(t, "claude", nil)
-	sum := sha256.Sum256([]byte("CLAUDE_CODE_SUBAGENT_MODEL=haiku\n"))
-	assertField(t, ev, "route_reason", "env-alias")
+	sum := sha256.Sum256([]byte(policy))
+	reason, _ := ev["route_reason"].(string)
+	if !strings.HasPrefix(reason, "default chain: ") || !strings.HasSuffix(reason, "; env-alias") {
+		t.Errorf("route_reason = %q, want the router's reason with \"; env-alias\" appended", reason)
+	}
+	assertField(t, ev, "route_rule", "R0")
 	assertField(t, ev, "policy_sha", hex.EncodeToString(sum[:]))
+	home, _ := os.UserHomeDir()
+	if want := routerpolicy.FileSHA(filepath.Join(home, ".yakos-state")); want != hex.EncodeToString(sum[:]) {
+		t.Errorf("FileSHA = %q, want %q", want, hex.EncodeToString(sum[:]))
+	}
 }
 
-func TestRun_Ledger_NoEnvAliasMeansNoRouteFields(t *testing.T) {
+func TestRun_Ledger_NoEnvAliasMeansNoEnvAliasStamp(t *testing.T) {
 	cases := map[string]func(t *testing.T){
 		"no policy": func(t *testing.T) { envAliasHome(t, "") },
 		"operator env wins": func(t *testing.T) {
@@ -56,8 +71,8 @@ func TestRun_Ledger_NoEnvAliasMeansNoRouteFields(t *testing.T) {
 			fakeRuntimeBin(t, "claude", "claude-stream-json-oneshot-SYNTHETIC.ndjson", "", 0)
 			setup(t)
 			_, ev, _ := runWith(t, "claude", nil)
-			if _, ok := ev["route_reason"]; ok {
-				t.Errorf("route_reason must be absent: %v", ev["route_reason"])
+			if r, _ := ev["route_reason"].(string); r == "" || strings.Contains(r, "env-alias") {
+				t.Errorf("route_reason must be the router's alone: %q", r)
 			}
 			if _, ok := ev["policy_sha"]; ok {
 				t.Errorf("policy_sha must be absent: %v", ev["policy_sha"])
@@ -71,17 +86,24 @@ func TestRun_Ledger_EnvAliasNotStampedOnOtherHarnesses(t *testing.T) {
 	fakeRuntimeBin(t, "codex", "codex-exec-json-0.154.0-ok.ndjson", "", 0)
 	envAliasHome(t, "gateway_classes: {subagent: haiku}\n")
 	_, ev, _ := runWith(t, "codex", nil)
-	if _, ok := ev["route_reason"]; ok {
-		t.Errorf("route_reason = %v on codex", ev["route_reason"])
+	if r, _ := ev["route_reason"].(string); strings.Contains(r, "env-alias") {
+		t.Errorf("route_reason = %q on codex", r)
 	}
 }
 
-// A route record the router already wrote is kept.
-func TestStampEnvAlias_KeepsAnExistingRouteRecord(t *testing.T) {
+// The router's route record is kept; the stamp only appends to the reason and
+// never replaces a policy_sha the router set.
+func TestStampEnvAlias_ComposesOntoAnExistingRouteRecord(t *testing.T) {
 	envAliasHome(t, "gateway_classes: {subagent: haiku}\n")
-	req := Request{RouteReason: "rule:cheap", PolicySHA: "ab"}
+	req := Request{RouteReason: "rule R1 matched", PolicySHA: "ab"}
 	stampEnvAlias(&req, "claude")
-	if req.RouteReason != "rule:cheap" || req.PolicySHA != "ab" {
-		t.Fatalf("overwritten: %+v", req)
+	stampEnvAlias(&req, "claude") // idempotent
+	if req.RouteReason != "rule R1 matched; env-alias" || req.PolicySHA != "ab" {
+		t.Fatalf("got %+v", req)
+	}
+	empty := Request{}
+	stampEnvAlias(&empty, "claude")
+	if empty.RouteReason != "env-alias" || empty.PolicySHA == "" {
+		t.Fatalf("empty reason: %+v", empty)
 	}
 }
