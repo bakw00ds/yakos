@@ -19,8 +19,10 @@ package agent
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -296,12 +298,11 @@ func runNew(cfg Config, w io.Writer) (*Result, error) {
 
 	extends := cfg.Extends
 	if extends != "" {
-		fwPath := filepath.Join(cfg.YakosRoot, "lib", "agents", extends+".md")
-		projPath := filepath.Join(project, ".claude", "agents", extends+".md")
-		if _, err := os.Stat(fwPath); err != nil {
-			if _, err2 := os.Stat(projPath); err2 != nil {
-				return nil, fmt.Errorf("agent new: --extends %q not found in framework or project agents", extends)
+		if _, err := agentscompose.ReadExtendsTemplate(cfg.YakosRoot, project, extends); err != nil {
+			if errors.Is(err, agentscompose.ErrRefused) {
+				return nil, fmt.Errorf("agent new: --extends: %w", err)
 			}
+			return nil, fmt.Errorf("agent new: --extends %q not found in framework agents", extends)
 		}
 	}
 
@@ -462,7 +463,7 @@ func runLint(cfg Config, w io.Writer) (*Result, error) {
 		base := e.Name()
 		localErrs := 0
 
-		fm, body, parseErr := readAgentFile(fPath)
+		fm, body, parseErr := readAgentFile(cfg.YakosRoot, project, fPath)
 		if parseErr != nil {
 			errFn(fmt.Sprintf("%s: cannot read file: %v", base, parseErr))
 			continue
@@ -505,30 +506,28 @@ func runLint(cfg Config, w io.Writer) (*Result, error) {
 			}
 		}
 
-		// extends: target exists in framework or project.
+		// extends: a bare id naming a framework template in lib/agents, the one
+		// place Compose extends from.
 		if ext := fm["extends"]; ext != "" {
-			extFwFile := filepath.Join(cfg.YakosRoot, "lib", "agents", ext+".md")
-			extProjFile := filepath.Join(projDir, ext+".md")
-			extFound := false
-			if _, err := os.Stat(extFwFile); err == nil {
-				extFound = true
-				// Check extends-version drift.
-				if extFm, _, err := readAgentFile(extFwFile); err == nil {
-					fwVer := extFm["version"]
-					projExtVer := fm["extends-version"]
-					if fwVer != "" && projExtVer != "" && fwVer != projExtVer {
-						warnFn(fmt.Sprintf("%s: extends-version %s but framework %s is at version %s — review with 'yakos agent diff %s'",
-							base, projExtVer, ext, fwVer, strings.TrimSuffix(base, ".md")))
-					} else if fwVer != "" && projExtVer == "" {
-						warnFn(fmt.Sprintf("%s: extends %q (v%s) but no 'extends-version:' recorded — add to track future drift", base, ext, fwVer))
-					}
-				}
-			} else if _, err := os.Stat(extProjFile); err == nil {
-				extFound = true
-			}
-			if !extFound {
-				errFn(fmt.Sprintf("%s: extends %q not found in framework or project agents", base, ext))
+			tmpl, extErr := agentscompose.ReadExtendsTemplate(cfg.YakosRoot, project, ext)
+			switch {
+			case errors.Is(extErr, agentscompose.ErrRefused):
+				errFn(fmt.Sprintf("%s: extends: %v", base, extErr))
 				localErrs++
+			case extErr != nil:
+				errFn(fmt.Sprintf("%s: extends %q not found in framework agents", base, ext))
+				localErrs++
+			default:
+				// Check extends-version drift.
+				extFm, _ := splitFrontmatter(string(tmpl))
+				fwVer := parseFrontmatterSimple(extFm)["version"]
+				projExtVer := fm["extends-version"]
+				if fwVer != "" && projExtVer != "" && fwVer != projExtVer {
+					warnFn(fmt.Sprintf("%s: extends-version %s but framework %s is at version %s — review with 'yakos agent diff %s'",
+						base, projExtVer, ext, fwVer, strings.TrimSuffix(base, ".md")))
+				} else if fwVer != "" && projExtVer == "" {
+					warnFn(fmt.Sprintf("%s: extends %q (v%s) but no 'extends-version:' recorded — add to track future drift", base, ext, fwVer))
+				}
 			}
 		}
 
@@ -590,10 +589,11 @@ func splitList(raw string) []string {
 	return result
 }
 
-// readAgentFile reads an agent .md file and returns (frontmatter map, body, error).
+// readAgentFile reads an agent .md file through agentscompose's hardened reader
+// (symlinks only into the agent directories, 4 MiB cap, regular files only) and returns (frontmatter map, body, error).
 // The frontmatter map has string values only (simple key: value parsing, not full YAML).
-func readAgentFile(path string) (map[string]string, string, error) {
-	data, err := os.ReadFile(path) //nolint:gosec
+func readAgentFile(yakosRoot, project, path string) (map[string]string, string, error) {
+	data, err := agentscompose.ReadAgentFile(yakosRoot, project, path)
 	if err != nil {
 		return nil, "", err
 	}
@@ -660,7 +660,7 @@ func runDiff(cfg Config, w io.Writer) (*Result, error) {
 		return nil, fmt.Errorf("agent diff: %s not found", projFile)
 	}
 
-	fm, projBody, err := readAgentFile(projFile)
+	fm, projBody, err := readAgentFile(cfg.YakosRoot, project, projFile)
 	if err != nil {
 		return nil, fmt.Errorf("agent diff: read %s: %w", projFile, err)
 	}
@@ -673,18 +673,14 @@ func runDiff(cfg Config, w io.Writer) (*Result, error) {
 	}
 
 	parentFile := filepath.Join(cfg.YakosRoot, "lib", "agents", parent+".md")
-	if _, err := os.Stat(parentFile); err != nil {
-		// Try project-local parent.
-		parentFile = filepath.Join(project, ".claude", "agents", parent+".md")
-		if _, err2 := os.Stat(parentFile); err2 != nil {
-			return nil, fmt.Errorf("agent diff: parent %q not found", parent)
-		}
+	parentData, err := agentscompose.ReadExtendsTemplate(cfg.YakosRoot, project, parent)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("agent diff: parent %q not found", parent)
 	}
-
-	_, parentBody, err := readAgentFile(parentFile)
 	if err != nil {
-		return nil, fmt.Errorf("agent diff: read parent %s: %w", parentFile, err)
+		return nil, fmt.Errorf("agent diff: read parent %q: %w", parent, err)
 	}
+	_, parentBody := splitFrontmatter(string(parentData))
 
 	_, _ = fmt.Fprintf(w, "agent diff: %s (extends: %s)\n", cfg.Name, parent)
 	_, _ = fmt.Fprintf(w, "--- %s\n", parentFile)

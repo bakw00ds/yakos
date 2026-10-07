@@ -626,7 +626,7 @@ func execWithStreaming(
 		}
 	}
 
-	noteRun(ctx, req.Runtime, exitCode, execErr)
+	noteRun(ctx, req.Project, req.Runtime, exitCode, execErr)
 
 	tsEnd := time.Now()
 	durationS := tsEnd.Sub(tsStart).Seconds()

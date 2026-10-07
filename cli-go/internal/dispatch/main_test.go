@@ -105,7 +105,7 @@ func withStateDefaultWarn(t *testing.T, name, warning string) {
 func resetRouterState(t *testing.T) {
 	t.Helper()
 	oc, ost, od := routerCooldown, routerSticky, routerPolicyDir
-	routerCooldown, routerSticky = router.NewCooldown(nil), router.NewSticky()
+	routerCooldown, routerSticky = newCooldownSet(nil), router.NewSticky()
 	routerPolicyDir = func() string { return "" }
 	t.Cleanup(func() { routerCooldown, routerSticky, routerPolicyDir = oc, ost, od })
 }

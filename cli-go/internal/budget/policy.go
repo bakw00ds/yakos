@@ -26,11 +26,13 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/bakw00ds/yakos/internal/decision"
+	"github.com/bakw00ds/yakos/internal/modelreg"
 	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
@@ -381,19 +383,63 @@ func updatePolicy(stateDir string, fn func(*Policy)) error {
 // supervisor <usd> --max-model fable` lifts it).
 var builtinMaxModel = map[string]string{"supervisor": "sonnet"}
 
-// ClampModel returns model lowered to agent's configured max_model ceiling,
-// plus a note when it changed. A model outside the four tiers (a full model
-// id) or an agent with no ceiling is returned unchanged.
-func ClampModel(agent, model string, o Options) (string, string) {
-	pol, _ := LoadPolicy(o.dir()) // an unusable policy still leaves the built-in ceiling
+// tierCeiling returns agent's own max_model ceiling in pol: its policy entry,
+// else the built-in. A word that is not one of the four tiers is no ceiling.
+func tierCeiling(pol Policy, agent string) string {
 	ceil := pol.Agents[agent].MaxModel
 	if ceil == "" {
 		ceil = builtinMaxModel[agent]
 	}
-	if ceil == "" || modelRank[ceil] == 0 || modelRank[model] == 0 || modelRank[model] <= modelRank[ceil] {
+	if modelRank[ceil] == 0 {
+		return ""
+	}
+	return ceil
+}
+
+// MaxModel returns the max_model ceiling in force for agent: its own, and, when
+// o.Project names agent as its supervisor, the lower of that and the
+// supervisor's. A project that renames its supervisor (`supervisor: agent:
+// watchdog`) therefore keeps the supervisor's sonnet ceiling, the same rule that
+// keeps its budget (see effective). It is "" when there is none. The ceiling is a
+// Claude tier word; modelreg reads it for any harness.
+func MaxModel(agent string, o Options) string {
+	pol, _ := LoadPolicy(o.dir()) // an unusable policy still leaves the built-in ceiling
+	ceil := tierCeiling(pol, agent)
+	if sup := readProjectConfig(o.Project).aliasFor(agent); sup != "" {
+		if c := tierCeiling(pol, sup); c != "" && (ceil == "" || modelRank[c] < modelRank[ceil]) {
+			ceil = c
+		}
+	}
+	return ceil
+}
+
+// claudeRegistry is the embedded catalog with no overlay and no project. The
+// claude column cannot be remapped by an overlay, so it ranks the four tiers the
+// same everywhere, and ClampModel needs nothing more.
+var claudeRegistry = sync.OnceValues(func() (*modelreg.Registry, error) {
+	return modelreg.Load(modelreg.Options{})
+})
+
+// ClampModel returns model lowered to agent's configured max_model ceiling,
+// plus a note when it changed. A model outside the four tiers (a full model
+// id) or an agent with no ceiling is returned unchanged. The ordering is
+// modelreg's (Registry.Clamp on the claude harness), the one ordering the
+// dispatcher applies to every harness (see dispatch.enforceCeiling, which refuses
+// where this leaves a model alone).
+func ClampModel(agent, model string, o Options) (string, string) {
+	ceil := MaxModel(agent, o)
+	if ceil == "" {
 		return model, ""
 	}
-	return ceil, fmt.Sprintf("model %q lowered to %q: agent %s has max_model %s (budget-policy.yml or built-in)", model, ceil, agent, ceil)
+	reg, err := claudeRegistry()
+	if err != nil {
+		return model, ""
+	}
+	clamped, lowered := reg.Clamp("claude", model, ceil)
+	if !lowered {
+		return model, ""
+	}
+	return clamped, fmt.Sprintf("model %q lowered to %q: agent %s has max_model %s (budget-policy.yml or built-in)", model, clamped, agent, ceil)
 }
 
 // ValidateAgent rejects names that could not be a dispatch agent name.

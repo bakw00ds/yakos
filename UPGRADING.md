@@ -6,6 +6,20 @@ current release, what survives, and how to fully uninstall when needed.
 This doc is the **upgrade authority** — `yakos --help`, README, and
 CHANGELOG point here. Last updated for v0.39.
 
+## Unreleased: model ceilings across runtimes, `--extends` (K-139c)
+
+- **Ceilinged codex agents are refused until you map codex aliases.** A
+  `max_model` ceiling is a cost class that now governs every runtime. The registry
+  ranks no codex model out of the box, so a codex agent under a ceiling is refused
+  with an error that names the model, the ceiling, `yakos models show <id>` and the
+  overlay file. Map `cheap`, `balanced` and `frontier` for codex in
+  `model-registry.yml` (mode 0600, in the yakOS state directory) to rank them. A
+  codex agent with no pinned `model:` never ranks, even with the overlay: pin one.
+  A routing rule with fallbacks skips the codex candidate and lands on the next.
+- **`yakos agent --extends` no longer accepts a project agent**, and `yakos agent
+  lint` errors on a project-local `extends:`. Only a bare id under the framework's
+  `lib/agents` is read. Copy the template into the agent instead of extending it.
+
 ## Upgrading to v0.62.0.0
 
 v0.62.0.0 is a minor release. A v0.61.0.0 binary upgrades in place with

@@ -14,8 +14,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/router"
@@ -28,9 +33,70 @@ var routerPolicyDir = routerpolicy.StateDir
 // routerCooldown and routerSticky are the process-wide, in-memory router state.
 // Tests replace them.
 var (
-	routerCooldown = router.NewCooldown(nil)
+	routerCooldown = newCooldownSet(nil)
 	routerSticky   = router.NewSticky()
 )
+
+// maxCooldownScopes bounds how many project roots the cooldown keeps a table for.
+// A project root comes from the request, so an unbounded map would let a stream of
+// distinct roots grow the daemon without limit. Past the bound the tables are
+// dropped and start again, which forgets failures: the safe direction (the
+// cooldown only ever reorders a chain).
+const maxCooldownScopes = 256
+
+// cooldownSet is the cooldown, scoped per project root (sec-335 L2). One table for
+// the whole process let a hostile project fail a runtime three times and cool it
+// for every other project the daemon serves. A project's failures now cool only
+// its own dispatches.
+type cooldownSet struct {
+	mu  sync.Mutex
+	now func() time.Time
+	m   map[string]*cooldownScope
+}
+
+// cooldownScope is one project's table, with the directory it was made for so a
+// later spelling of the same directory finds it.
+type cooldownScope struct {
+	dir fs.FileInfo // nil when the root could not be stat-ed
+	cd  *router.Cooldown
+}
+
+func newCooldownSet(now func() time.Time) *cooldownSet {
+	return &cooldownSet{now: now, m: map[string]*cooldownScope{}}
+}
+
+// of returns the cooldown table of project. Two spellings of one directory (a
+// symlink to it, a case-variant path on a case-insensitive volume) share a table,
+// decided the way K-86 validateProjectPath decides it, with os.SameFile; a root
+// that cannot be stat-ed is keyed by its cleaned string. "" (no project) has a
+// table of its own.
+func (s *cooldownSet) of(project string) *router.Cooldown {
+	var info fs.FileInfo
+	if project != "" {
+		project = filepath.Clean(project)
+		if fi, err := os.Stat(project); err == nil {
+			info = fi
+		}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if sc := s.m[project]; sc != nil {
+		return sc.cd
+	}
+	if info != nil {
+		for _, sc := range s.m {
+			if sc.dir != nil && os.SameFile(sc.dir, info) {
+				return sc.cd
+			}
+		}
+	}
+	if len(s.m) >= maxCooldownScopes {
+		s.m = map[string]*cooldownScope{}
+	}
+	sc := &cooldownScope{dir: info, cd: router.NewCooldown(s.now)}
+	s.m[project] = sc
+	return sc.cd
+}
 
 // policyAction is a selected policy rule as the chain sees it.
 type policyAction struct {
@@ -107,22 +173,23 @@ func applyRouter(ci *chainInput, agent *agentscompose.ComposedAgent, agentName s
 	// The cooldown only skips runtimes the chain may choose among. A pinned
 	// conversation's runtime is an explicit candidate (RuntimeBySticky), which
 	// the walk never skips, so the cooldown cannot move it.
-	ci.cooling = routerCooldown.Cooling
+	ci.cooling = routerCooldown.of(project).Cooling
 	return st
 }
 
-// noteRun feeds a finished run to the cooldown: a run that failed to execute or
-// exited non-zero counts against its runtime, a clean one clears the count. A run
-// cut short by its context says nothing about the runtime.
-func noteRun(ctx context.Context, rt string, exitCode int, err error) {
+// noteRun feeds a finished run to the cooldown of the project it ran for: a run
+// that failed to execute or exited non-zero counts against its runtime, a clean
+// one clears the count. A run cut short by its context says nothing about the
+// runtime.
+func noteRun(ctx context.Context, project, rt string, exitCode int, err error) {
 	if ctx.Err() != nil {
 		return
 	}
 	if err != nil || exitCode != 0 {
-		routerCooldown.Failure(rt)
+		routerCooldown.of(project).Failure(rt)
 		return
 	}
-	routerCooldown.Success(rt)
+	routerCooldown.of(project).Success(rt)
 }
 
 // applyModel lets the router adjust the model resolveModel chose for rt:

@@ -115,16 +115,40 @@ func TestPassthroughClampsExplicitModel(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("YAKOS_DISPATCH_LOG", state)
-	got := clampDispatchModel([]string{"dispatch", "supervisor", "t", "--model", "opus", "--project", "/p"}, "supervisor")
+	got, _ := clampDispatchModel([]string{"dispatch", "supervisor", "t", "--model", "opus", "--project", "/p"}, "supervisor", "/p")
 	if strings.Join(got, " ") != "dispatch supervisor t --model haiku --project /p" {
 		t.Fatalf("%v", got)
 	}
-	got = clampDispatchModel([]string{"dispatch", "supervisor", "t", "--model=opus"}, "supervisor")
+	got, _ = clampDispatchModel([]string{"dispatch", "supervisor", "t", "--model=opus"}, "supervisor", "")
 	if got[3] != "--model=haiku" {
 		t.Fatalf("%v", got)
 	}
-	if got := clampDispatchModel([]string{"dispatch", "supervisor", "t", "--model", "haiku"}, "supervisor"); got[4] != "haiku" {
+	if got, _ := clampDispatchModel([]string{"dispatch", "supervisor", "t", "--model", "haiku"}, "supervisor", ""); got[4] != "haiku" {
 		t.Fatalf("%v", got)
+	}
+}
+
+// sec-339 M1: the passthrough clamp knows the project, so an agent the project
+// names as its supervisor keeps the supervisor's ceiling, and a model the registry
+// cannot rank under a ceiling is refused, as on the Go-native path.
+func TestPassthroughClampKnowsTheProject(t *testing.T) {
+	t.Setenv("YAKOS_DISPATCH_LOG", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+	proj := t.TempDir()
+	if err := os.WriteFile(filepath.Join(proj, ".yakos.yml"), []byte("supervisor:\n  agent: watchdog\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := clampDispatchModel([]string{"dispatch", "watchdog", "t", "--model", "opus", "--project", proj}, "watchdog", proj)
+	if err != nil || got[4] != "sonnet" {
+		t.Fatalf("renamed supervisor not clamped: %v %v", got, err)
+	}
+	if _, err := clampDispatchModel([]string{"dispatch", "supervisor", "t", "--model", "claude-opus-5-5"}, "supervisor", proj); err == nil ||
+		!strings.Contains(err.Error(), "refused") {
+		t.Fatalf("an unranked id under a ceiling must be refused, got %v", err)
+	}
+	// An agent with no ceiling is untouched, unranked id or not.
+	if got, err := clampDispatchModel([]string{"dispatch", "backend", "t", "--model", "claude-opus-5-5"}, "backend", proj); err != nil || got[4] != "claude-opus-5-5" {
+		t.Fatalf("no ceiling: %v %v", got, err)
 	}
 }
 
