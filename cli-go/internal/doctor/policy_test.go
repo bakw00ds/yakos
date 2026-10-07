@@ -328,8 +328,10 @@ func TestCheckPolicy_BashDispatchRunsHarnessesWithoutTheirSandbox(t *testing.T) 
 		want  bool
 		named string
 	}{
-		{"unset impl, bash tree, codex and agy", "", true, map[string]string{"codex": "/x/codex", "agy": "/x/agy"}, true, "codex, agy"},
-		{"unset impl, bash tree, agy only", "", true, map[string]string{"agy": "/x/agy"}, true, "agy"},
+		// K-143: with YAKOS_IMPL unset dispatch is Go-native, so only an explicit bash is reported.
+		{"unset impl, bash tree, codex and agy", "", true, map[string]string{"codex": "/x/codex", "agy": "/x/agy"}, false, ""},
+		{"explicit bash impl, codex and agy", "bash", true, map[string]string{"codex": "/x/codex", "agy": "/x/agy"}, true, "codex, agy"},
+		{"explicit bash impl, agy only", "bash", true, map[string]string{"agy": "/x/agy"}, true, "agy"},
 		{"explicit bash impl", "bash", true, map[string]string{"codex": "/x/codex"}, true, "codex"},
 		{"explicit bash impl without the bash tree errors out instead of running", "bash", false, map[string]string{"codex": "/x/codex"}, false, ""},
 		{"impl go", "go", true, map[string]string{"codex": "/x/codex", "agy": "/x/agy"}, false, ""},
@@ -360,8 +362,8 @@ func TestCheckPolicy_BashDispatchRunsHarnessesWithoutTheirSandbox(t *testing.T) 
 			if !strings.Contains(got.Message, tc.named) {
 				t.Errorf("name the installed harnesses %q: %q", tc.named, got.Message)
 			}
-			if !strings.Contains(got.Fix, "YAKOS_IMPL=go") {
-				t.Errorf("the fix is YAKOS_IMPL=go: %q", got.Fix)
+			if !strings.Contains(got.Fix, "unset YAKOS_IMPL") {
+				t.Errorf("the fix is to unset YAKOS_IMPL: %q", got.Fix)
 			}
 		})
 	}
@@ -376,11 +378,12 @@ func TestCheckPolicy_BashDispatchNeverPrintsTheYakosImplValue(t *testing.T) {
 		impl string
 		want string // fixed wording the finding must use instead
 	}{
-		{marker, "YAKOS_IMPL is not set to go"},
-		{"go-" + marker, "YAKOS_IMPL is not set to go"},
-		{"  " + marker + "  ", "YAKOS_IMPL is not set to go"},
+		{marker, ""},
+		{"go-" + marker, ""},
+		{"  " + marker + "  ", ""},
 		{"bash", "YAKOS_IMPL=bash"},
-		{"", "YAKOS_IMPL is not set to go"},
+		{"  bash ", ""}, // the launcher compares the exact value, so this is Go-native
+		{"", ""},
 	}
 	for _, tc := range cases {
 		f := newPolicyFixture(t)
@@ -389,8 +392,11 @@ func TestCheckPolicy_BashDispatchNeverPrintsTheYakosImplValue(t *testing.T) {
 		f.env["YAKOS_IMPL"] = tc.impl
 		f.env["OPENAI_API_KEY"] = "set" // keep the codex profile finding out of the way
 		got, ok := byID(f.check())["bash-dispatch-unsandboxed"]
+		if ok != (tc.want != "") {
+			t.Fatalf("YAKOS_IMPL=%q: reported = %v, want %v", tc.impl, ok, tc.want != "")
+		}
 		if !ok {
-			t.Fatalf("YAKOS_IMPL=%q: want the bash-dispatch finding", tc.impl)
+			continue
 		}
 		if strings.Contains(got.Message+got.Fix, marker) {
 			t.Errorf("YAKOS_IMPL=%q: the finding printed the variable's value: %+v", tc.impl, got)
@@ -485,9 +491,10 @@ func TestCheckPolicy_StatePathOverridesAreReportedByNameNeverByValue(t *testing.
 func TestCheckPolicy_OrderedBySeverityThenIDAndDeterministic(t *testing.T) {
 	skipWithoutPosixModes(t)
 	f := newPolicyFixture(t)
-	f.sdk, f.sdkEnabled = true, true                                       // medium: sdk-sidecar-no-api-key
-	f.found["codex"] = "/x/codex"                                          // low: codex-shared-login
-	f.bash = true                                                          // high: bash-dispatch-unsandboxed
+	f.sdk, f.sdkEnabled = true, true // medium: sdk-sidecar-no-api-key
+	f.found["codex"] = "/x/codex"    // low: codex-shared-login
+	f.bash = true
+	f.env["YAKOS_IMPL"] = "bash"                                           // high: bash-dispatch-unsandboxed
 	f.env["YAKOS_STATE_DIR"] = "/x"                                        // medium: state-path-override
 	writePolicy(t, f.home, "allow_unsandboxed_runtimes: [codex]\n", 0o600) // high
 	first := f.check()

@@ -114,6 +114,44 @@ jobs:
           # A -run pattern that matches nothing passes; refuse that.
           grep -q -- '^--- PASS: TestRouterExplainGoldenWithPolicy' "$log"
 
+  dispatch-parity:
+    name: dispatch parity (bash vs Go, YAKOS_IMPL=${{ matrix.impl }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # go: the parity case plus the launcher test. bash: the parity case
+        # skips itself (the Go binary would hand dispatch to bash), the launcher
+        # test proves YAKOS_IMPL=bash restores the bash path.
+        impl: [go, bash]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: '1.25'
+          cache-dependency-path: cli-go/go.sum
+      - name: Build the yakos binary
+        run: make build
+        timeout-minutes: 8
+      - name: Run the dispatch parity case
+        working-directory: cli-go
+        env:
+          YAKOS_IMPL: ${{ matrix.impl }}
+          # A missing bin/yakos fails instead of skipping.
+          YAKOS_REQUIRE_GO_BINARY: "1"
+        run: |
+          log="$(mktemp)"
+          go test -v -count=1 -timeout 15m -run 'TestDispatchDryRunParity|TestLauncherDefaultIsGoAndBashOverrideWorks' ./internal/paritytest | tee "$log"
+          # A -run pattern that matches nothing passes, and the go leg must not
+          # pass by skipping.
+          grep -q -- '^--- PASS: TestLauncherDefaultIsGoAndBashOverrideWorks' "$log"
+          if [ "$YAKOS_IMPL" = go ]; then
+            grep -q -- '^--- PASS: TestDispatchDryRunParity ' "$log"
+            grep -q -- '^--- PASS: TestDispatchDryRunParityDetectsGoSideDivergence' "$log"
+          fi
+
   soul-skill-noop:
     name: soul/skill silent no-op regression coverage
     runs-on: ubuntu-latest

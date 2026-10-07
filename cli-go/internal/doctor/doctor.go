@@ -111,6 +111,10 @@ const (
 	// SectionPolicy is the `yakos doctor --policy` report (K-137). Its findings
 	// are recorded on Report.Policy, not Report.Findings.
 	SectionPolicy
+
+	// SectionImplementation reports which implementation `yakos dispatch` runs
+	// on (K-143).
+	SectionImplementation
 )
 
 // Finding is one reported item: a severity level plus a human-readable message.
@@ -299,6 +303,7 @@ func Run(cfg Config) (*Report, error) {
 	r.checkAgentBudgets()
 	r.checkHookFallback()
 	r.checkRuntimeIsolation()
+	r.checkImplementation()
 
 	if cfg.ProbeRuntime {
 		r.checkRuntimeProbe()
@@ -1225,4 +1230,34 @@ func refreshPathNote(yakosRoot string, environ func(string) string) string {
 		return "yakos refresh: proxied to bash (bash CLI tree present, YAKOS_IMPL unset); hooks stay bash and --hooks-impl is rejected. Set YAKOS_IMPL=go for the hybrid hook default"
 	}
 	return "yakos refresh: Go-native (no bash CLI tree); the hybrid hook default applies"
+}
+
+// ---- implementation ---------------------------------------------------------
+
+// dispatchImplNote says which implementation `yakos dispatch` runs on. Since
+// K-143 it is the Go dispatcher unless the operator set YAKOS_IMPL=bash. The
+// variable is project-settable (a committed .claude/settings.json env block),
+// so its value never reaches the line: it names two fixed states.
+func dispatchImplNote(yakosRoot string, environ func(string) string) string {
+	if environ == nil {
+		environ = os.Getenv
+	}
+	if environ("YAKOS_IMPL") != "bash" { // exactly what the launcher gate compares
+		return "yakos dispatch: Go-native (default); YAKOS_IMPL=bash selects the bash oracle"
+	}
+	if !passthrough.BashYakosExists(yakosRoot) {
+		return "yakos dispatch: bash requested (YAKOS_IMPL=bash) but the bash CLI tree is not installed, so dispatch will fail; unset YAKOS_IMPL"
+	}
+	return "yakos dispatch: bash (YAKOS_IMPL=bash); no router, no --explain, codex and agy start without their sandbox flags"
+}
+
+func (r *runner) checkImplementation() {
+	_, _ = fmt.Fprintln(r.w, "Implementation")
+	note := dispatchImplNote(r.yakosRoot, r.cfg.Environ)
+	if strings.Contains(note, "YAKOS_IMPL=bash)") {
+		r.warn(SectionImplementation, "%s", note)
+	} else {
+		r.info(SectionImplementation, "%s", note)
+	}
+	_, _ = fmt.Fprintln(r.w, "")
 }

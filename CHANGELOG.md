@@ -7,7 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`yakos dispatch` runs the Go dispatcher by default (K-143).** With
+  `YAKOS_IMPL` unset it used to be proxied to the bash `dispatch.sh` whenever
+  the bash tree was installed. Now only `YAKOS_IMPL=bash` does that. Behavior
+  change: the Go path honors router policy, budgets and `--explain`, starts
+  codex and agy with their sandbox flags, and does not fall back for an
+  explicit `--runtime` (see UPGRADING.md). `yakos doctor` prints which
+  implementation dispatch uses, and `doctor --policy` now flags
+  `YAKOS_IMPL=bash` instead of an unset variable.
+
 ### Added
+
+- **test(parity): `dispatch-dry-run-parity`.** Resolves every roster agent
+  through bash `dispatch.sh` and Go under each project-config variant and fails
+  on the first unlisted divergence; the four intended ones are listed in
+  `docs/runtime-matrix.md`. New CI job `dispatch parity`, run with
+  `YAKOS_IMPL=go` and `YAKOS_IMPL=bash`.
 
 - **docs(rules): `sprint-cost-discipline` rule.** Always-loaded; bounds PR size
   (≤3k added lines), review fan-out, and agent lifetime per round, from the

@@ -383,16 +383,12 @@ func checkAgySignIn(e PolicyEnv) []PolicyFinding {
 
 // checkBashDispatch reports `yakos dispatch` reaching the bash CLI while codex or
 // agy is installed. The bash adapters still start both with the bypass flags
-// (cli/lib/runtimes/codex.sh, agy.sh) until the Go dispatcher becomes the
-// default (K-143); the Go dispatcher passes the sandbox flags.
+// (cli/lib/runtimes/codex.sh, agy.sh); the Go dispatcher passes the sandbox
+// flags. Since K-143 `dispatch` is Go-native unless YAKOS_IMPL=bash, so only
+// that explicit choice is reported.
 func checkBashDispatch(e PolicyEnv) []PolicyFinding {
-	impl := strings.TrimSpace(e.Getenv("YAKOS_IMPL"))
-	if impl == "go" || !e.BashTreePresent {
+	if e.Getenv("YAKOS_IMPL") != "bash" || !e.BashTreePresent {
 		return nil // Go-native, or nothing for bash to run (an explicit bash errors out)
-	}
-	via := "YAKOS_IMPL is not set to go and the bash CLI tree is installed"
-	if impl == "bash" {
-		via = "YAKOS_IMPL=bash"
 	}
 	var installed []string
 	for _, rt := range []string{"codex", "agy"} {
@@ -406,9 +402,9 @@ func checkBashDispatch(e PolicyEnv) []PolicyFinding {
 	return []PolicyFinding{{
 		ID:       "bash-dispatch-unsandboxed",
 		Severity: PolicyHigh,
-		Message: fmt.Sprintf("yakos dispatch runs through the bash CLI (%s), which starts %s WITHOUT their sandbox flags; the Go dispatcher passes codex --sandbox workspace-write and agy --sandbox",
-			via, strings.Join(installed, ", ")),
-		Fix: "export YAKOS_IMPL=go (the bash dispatch path keeps the bypass flags until K-143 makes Go the default)",
+		Message: fmt.Sprintf("yakos dispatch runs through the bash CLI (YAKOS_IMPL=bash), which starts %s WITHOUT their sandbox flags; the Go dispatcher passes codex --sandbox workspace-write and agy --sandbox",
+			strings.Join(installed, ", ")),
+		Fix: "unset YAKOS_IMPL (the Go dispatcher is the default; the bash path keeps the bypass flags)",
 	}}
 }
 

@@ -26,6 +26,7 @@ was removed on 2026-09-01 in favor of agy).
 | Non-interactive print mode | ✅ `claude -p` | ✅ `codex exec` | ✅ `agy -p` |
 | Machine-readable stream | ✅ `--output-format stream-json` | ✅ `exec --json` (JSONL) | ✅ `--output-format stream-json` (NDJSON, `event` key; recorded) |
 | Headless resume | ✅ `--resume <id>` | ✅ `codex exec resume <thread_id>` | ✅ `--conversation <id>` |
+| `yakos dispatch` implementation (K-143) | ✅ Go by default | ✅ Go by default | ✅ Go by default |
 | Sandbox flag (K-133) | n/a (permission mode) | ✅ `--sandbox workspace-write`: an OS sandbox, network off by default | ⚠ `--sandbox` blocks writes outside the workspace by default only; not a containment boundary (K-158, below) |
 | Agent file yakOS writes | (none — JSON injection) | `.codex/agents/yakos-<id>.toml` | `.agents/skills/yakos-<id>/SKILL.md` |
 
@@ -105,9 +106,8 @@ Listing agy in `allow_unsandboxed_runtimes` removes the default write block and
 changes nothing else.
 
 The bash adapters (`cli/lib/runtimes/{codex,agy}.sh`, used by `yakos dispatch`
-when the bash tree is present and `YAKOS_IMPL` is unset) still run with the
-bypass flags; that path retires when the Go dispatcher becomes the default
-(K-143).
+only under `YAKOS_IMPL=bash`) still run with the bypass flags. The Go
+dispatcher became the default for `yakos dispatch` in K-143 (below).
 
 ## What yakOS does per-runtime
 
@@ -507,14 +507,56 @@ the console have no opt-in. Pins, `.yakos.yml` defaults, `YAKOS_RUNTIME` and the
 state default keep walking the fallback lists, as `cli/lib/dispatch.sh` does.
 
 **Deliberate divergence from bash.** `cli/lib/dispatch.sh` walks the fallback
-lists for an explicit `--runtime` as well. The Go dispatcher does not. K-143
-(the parity matrix) must record this as intended rather than port the bash
-behavior back.
+lists for an explicit `--runtime` as well. The Go dispatcher does not. The K-143 parity case
+([below](#which-implementation-runs-yakos-dispatch-k-143)) records it as intended
+(D2) rather than porting the bash behavior back.
 
 The state default (`~/.yakos-state/default-runtime`) is trusted only when it is
 a regular file owned by you, not group or world writable, in a directory with
 the same properties (not a symlink). A file that fails this is reported and
 ignored.
+
+## Which implementation runs `yakos dispatch` (K-143)
+
+`yakos dispatch` runs the Go dispatcher unless `YAKOS_IMPL=bash` is set. The
+`yakos` binary decides: `YAKOS_IMPL=bash` hands the call to `cli/yakos`
+(`cli/lib/dispatch.sh`); anything else, including unset, runs the Go path. The
+bash tree stays as the oracle for the parity case and as the way back. Other
+commands keep their own routing (unset means bash when the bash tree is
+installed, except `hook`, `decide`, `budget`, `models` and `router`, which are
+always Go, and `doctor`, which is Go unless `YAKOS_IMPL=bash`). `yakos doctor` prints an `Implementation` line saying
+which one dispatch uses; `yakos doctor --policy` flags `YAKOS_IMPL=bash` when
+codex or agy is installed (no sandbox flags on that path).
+
+| `YAKOS_IMPL` | `yakos dispatch` | `yakos dispatch --explain`, `yakos router` |
+|---|---|---|
+| unset | Go | works |
+| `go` | Go | works |
+| `bash` | bash (`dispatch.sh`) | `--explain` is an unknown flag; `router` needs Go |
+
+The bash script itself never reads the variable, and neither does the dispatch
+code inside Go: it only chooses which entry point starts.
+
+**Parity.** The case `dispatch-dry-run-parity` (`cli-go/internal/paritytest`,
+CI job `dispatch parity`) resolves every agent in `lib/agents` plus fixture
+project agents with no router policy file, once through the real `dispatch.sh`
+against stub runtime CLIs and once through `yakos dispatch --explain` plus the
+real Go dispatch, and compares runtime, model (claude), and the shape of the
+claude argv. It runs under the project-config variants none, `default-runtime`,
+`per-domain`, `default-fallback`, `router.disable_runtimes` and an unavailable
+explicit `--runtime`. The first unlisted divergence fails it with a table of
+rows. The divergences are intended and the case checks that each is still
+observed:
+
+| id | Go behavior | bash behavior |
+|---|---|---|
+| D1 | `router.disable_runtimes` in `.yakos.yml` skips or refuses a runtime | key not read |
+| D2 | an explicit `--runtime` that cannot run fails unless `--runtime-fallback` | walks the fallback lists |
+| D3 | model of a non-claude runtime is that runtime's model id (registry) | the tier name |
+| D4 | `model-policy:` frontmatter is not read | overrides `model:` |
+
+Go-only and so not exercised (no policy file): router rules, cooldown, sticky
+conversations, and `--explain`.
 
 ## Model tiers
 
