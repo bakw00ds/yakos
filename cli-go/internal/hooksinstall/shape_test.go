@@ -271,7 +271,7 @@ func TestInstallShapeWritesAbsoluteBinary(t *testing.T) {
 	exe, _ := os.Executable()
 	exe, _ = filepath.EvalSymlinks(exe)
 	got2, _ := os.ReadFile(p2)
-	if !strings.Contains(string(got2), exe+" hook run --shape codex") {
+	if !strings.Contains(string(got2), jsonText(exe)+" hook run --shape codex") {
 		t.Errorf("default binary is not the running executable %s:\n%s", exe, got2)
 	}
 }
