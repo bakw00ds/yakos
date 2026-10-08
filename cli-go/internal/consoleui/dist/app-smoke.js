@@ -644,10 +644,54 @@ function routingTest() {
   same('other transcript roles are ignored', yr.fromTranscript({ role: 'assistant' }), null);
   var el = cp.buildMessageElement(p.messages[0], p, 'rt-sse');
   same('app.js renders the chip through the module', el.className, 'chat-msg chat-route-chip');
+
+  // K-173: a reload replays the stored cards, banner and chips in order, through
+  // the real restore path; hostile text stays data.
+  var replayed = null;
+  var rp = cp.makePane('rt-replay', 'conv-rt-replay');
+  var entriesJSON = [
+    { role: 'user', text: 'go', ts: 't0', session_id: 's1' },
+    { role: 'route', text: 'why', runtime: 'codex', pinned: 'pane', ts: 't1', session_id: 's1' },
+    { role: 'handoff', handoff_from: 'claude', runtime: 'codex', turns: 2, digest_bytes: 99, redactions: 1, ts: 't2', session_id: 's1' },
+    { role: 'thinking', text: 'hmm ' + evil, truncated: true, ts: 't3', session_id: 's1' },
+    { role: 'tool_use', tool_name: 'Bash', text: 'ls ' + evil, ts: 't4', session_id: 's1' },
+    { role: 'tool_result', tool_name: 'Bash', text: 'out ' + evil, is_error: true, ts: 't5', session_id: 's1' },
+    { role: 'tool_use', tool_name: 'Read', text: 'a', ts: 't6', session_id: 's1' },
+    { role: 'tool_result', tool_name: 'Read', text: 'b', ts: 't7', session_id: 's1' },
+    { role: 'tool_result', tool_name: 'Orphan', text: 'c', ts: 't8', session_id: 's2' },
+    { role: 'assistant', text: 'done', ts: 't9', session_id: 's1' },
+    { role: 'summary', exit_code: 0, ts: 't10', session_id: 's1' },
+    { role: 'mystery', text: 'x', ts: 't11', session_id: 's1' },
+  ];
+  var realFetch3 = global.fetch;
+  global.fetch = function() {
+    return Promise.resolve({ ok: true, status: 200, headers: { get: function() { return null; } }, json: function() { return Promise.resolve(entriesJSON); } });
+  };
+  try { cp.loadTranscript(rp); } finally { global.fetch = realFetch3; }
+  replayed = new Promise(function(resolve) { setTimeout(resolve, 20); }).then(function() {
+    same('replayed roles', rp.messages.map(function(m) { return m.role; }),
+      ['user', 'route', 'handoff', 'thinking', 'tool_use', 'tool_use', 'tool_result', 'assistant', 'summary']);
+    same('handoff data', [rp.messages[2].handoff.from, rp.messages[2].handoff.to, rp.messages[2].handoff.turns], ['claude', 'codex', 2]);
+    same('thinking keeps the flag and the text as data', [rp.messages[3].truncated, rp.messages[3].streaming, rp.messages[3].text], [true, false, 'hmm ' + evil]);
+    same('the result pairs with its call', [rp.messages[4].toolInput, rp.messages[4].toolOutput, rp.messages[4].isError, rp.messages[4].hasResult], ['ls ' + evil, 'out ' + evil, true, true]);
+    same('the next call pairs with its own result', [rp.messages[5].toolName, rp.messages[5].toolOutput], ['Read', 'b']);
+    same('a result with no call of its session stands alone', [rp.messages[6].toolName, rp.messages[6].toolOutput], ['Orphan', 'c']);
+    // The restored message renders through the pane's own renderer: the hostile
+    // text must not appear as markup.
+    var toolHTML = cp.buildMessageElement(rp.messages[4], rp, 'rt-replay');
+    var asText = JSON.stringify(toolHTML && (toolHTML.innerHTML || toolHTML.textContent || ''));
+    lacks('no raw tag from a replayed card', asText, evil);
+    same('the banner element is ours', cp.buildMessageElement(rp.messages[2], rp, 'rt-replay').className, 'chat-msg chat-handoff-banner');
+  });
+  var ac = [];
+  same('applyTranscript ignores other roles', yr.applyTranscript(ac, { role: 'assistant', text: 'x' }), false);
+  same('and a malformed call', yr.applyTranscript(null, { role: 'tool_use' }), false);
+  replayed.catch(function(e) { rtFail(String(e && e.stack || e)); });
+  global.__k173Replay = replayed;
 }
 try { routingTest(); } catch (e) { rtFail(String(e && e.stack || e)); }
 
-treeRescanTest().then(function() {
+Promise.resolve(global.__k173Replay).then(treeRescanTest).then(function() {
   process.stdout.write(
     'PASS: app.js loaded without error; data-theme="' + _themeAttr +
     '"; DOMContentLoaded registered.\n'
