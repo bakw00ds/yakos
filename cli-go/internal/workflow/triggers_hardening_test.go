@@ -26,7 +26,6 @@ func schedFor2(t *testing.T, ws string) *workflow.Scheduler {
 	t.Helper()
 	eng, workDir := newTestEngine(t, ok)
 	writeWF(t, workDir, "nightly", cronWF)
-	t.Cleanup(func() { time.Sleep(10 * time.Millisecond) })
 	return &workflow.Scheduler{
 		Engine:    eng,
 		Load:      func() (workflow.Schedules, error) { return workflow.LoadSchedules(ws) },
