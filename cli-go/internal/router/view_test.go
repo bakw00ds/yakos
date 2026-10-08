@@ -76,3 +76,23 @@ func TestSensitiveViewAndKnownClasses(t *testing.T) {
 		t.Errorf("classes = %s", got)
 	}
 }
+
+// K-177: explain shows whether the Jev routing shadow is on, in both forms, and
+// leaves the line out when the caller does not say.
+func TestExplainShowsTheJevShadowState(t *testing.T) {
+	d := RouteDecision{Runtime: "claude", RuleID: RuleDefault, Chain: []string{"claude"}}
+	var b strings.Builder
+	WriteExplain(&b, ExplainView{Agent: "a", Decision: d, JevShadow: "off"})
+	if !strings.Contains(b.String(), "jev_shadow: off\n") {
+		t.Errorf("text form: %s", b.String())
+	}
+	js, err := ExplainJSON(ExplainView{Agent: "a", Decision: d, JevShadow: "on"})
+	if err != nil || !strings.Contains(string(js), `"jev_shadow": "on"`) {
+		t.Errorf("json form: %s %v", js, err)
+	}
+	b.Reset()
+	WriteExplain(&b, ExplainView{Agent: "a", Decision: d})
+	if strings.Contains(b.String(), "jev_shadow") {
+		t.Errorf("unset state printed: %s", b.String())
+	}
+}

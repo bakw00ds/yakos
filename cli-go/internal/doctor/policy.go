@@ -24,6 +24,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/auth"
 	"github.com/bakw00ds/yakos/internal/codexhome"
+	"github.com/bakw00ds/yakos/internal/decision"
 	"github.com/bakw00ds/yakos/internal/routerpolicy"
 	yakruntime "github.com/bakw00ds/yakos/internal/runtime"
 )
@@ -144,6 +145,7 @@ func CheckPolicy(env PolicyEnv) []PolicyFinding {
 	out = append(out, checkAgySignIn(e)...)
 	out = append(out, checkParserSkew(e)...)
 	out = append(out, checkStatePathOverrides(e)...)
+	out = append(out, checkRoutingShadow(e)...)
 	sort.SliceStable(out, func(i, j int) bool {
 		if ri, rj := out[i].Severity.rank(), out[j].Severity.rank(); ri != rj {
 			return ri > rj
@@ -508,6 +510,24 @@ func checkStatePathOverrides(e PolicyEnv) []PolicyFinding {
 		})
 	}
 	return out
+}
+
+// checkRoutingShadow reports the Jev routing shadow when the user opted in: it
+// sends the first 2 KiB of each task off the host. Nothing is reported while it
+// is off, which is the default.
+func checkRoutingShadow(e PolicyEnv) []PolicyFinding {
+	if e.Home == "" {
+		return nil
+	}
+	if !decision.ResolveRoutingShadow(filepath.Join(e.Home, ".yakos-state"), "", e.Getenv).Enabled {
+		return nil
+	}
+	return []PolicyFinding{{
+		ID:       "jev-routing-shadow-on",
+		Severity: PolicyLow,
+		Message:  "the Jev routing shadow is on (routing_shadow in decision-policy.yml): the agent name, the route class and the first 2 KiB of each non-sensitive task are sent to TypeSafe. It records a tier suggestion and never changes a route",
+		Fix:      "remove routing_shadow from ~/.yakos-state/decision-policy.yml to stop it, or set YAKOS_DECISION_DISABLE=1",
+	}}
 }
 
 func containsString(list []string, s string) bool {
