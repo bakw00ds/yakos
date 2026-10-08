@@ -1,0 +1,6 @@
+argv0=claude
+claude
+--add-dir
+<repo>
+--permission-mode
+bypassPermissions

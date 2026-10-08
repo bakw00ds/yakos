@@ -430,7 +430,7 @@ var commandRegistry = []commandEntry{
 			"--print-agents", "--print-env", "--continue", "--fork-session", "--ide", "--bare", "--strict-mcp",
 			"--no-repl", "--web", "--console-addr", "--ws-addr", "--perf-addr", "--networked",
 			"--console-bind", "--console-external-host", "--ide-root", "--no-project-ide",
-			"--resume", "--model", "--share-terminal", "--direct"),
+			"--resume", "--model", "--share-terminal", "--direct", "--native"),
 		HelpFn: internalstart.PrintHelp,
 		AllowUnparsed: []flagAllow{
 			{Flag: "--dangerously-bypass-approvals-and-sandbox", Reason: "start.PrintHelp prose describing CODEX's own bypass flag, not a yakos start flag; cmd_start.go / internal/start are off-limits for this PR"},
