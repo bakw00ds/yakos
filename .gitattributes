@@ -77,3 +77,6 @@ cli-go/internal/dispatch/testdata/route_p0a_golden.txt text eol=lf
 # byte; force LF so a Windows autocrlf checkout cannot make the compare fail.
 cli-go/cmd/yakos/testdata/router-explain/*.golden text eol=lf
 cli-go/internal/doctor/testdata/*.golden text eol=lf
+
+# K-151 gateway fixtures: replayed byte for byte, so no EOL conversion.
+cli-go/internal/gateway/anthropic/testdata/* -text

@@ -78,6 +78,8 @@ func runServe(yakosRoot string, args []string) {
 	consoleStructuredQuestions := false
 	shareTerminal := false
 	openAIEndpoint := false
+	gateway := false
+	gatewayPassthroughSubscription := false
 
 	// YAKOS_ROOT env override mirrors runValidate / runRefresh behavior:
 	// when the binary is not installed at <root>/bin/yakos (e.g. in tests or
@@ -113,6 +115,8 @@ func runServe(yakosRoot string, args []string) {
 		{Name: "--console-structured-questions", Kind: cliflag.Bool, Bool: &consoleStructuredQuestions},
 		{Name: "--share-terminal", Kind: cliflag.Bool, Bool: &shareTerminal},
 		{Name: "--openai-endpoint", Kind: cliflag.Bool, Bool: &openAIEndpoint},
+		{Name: "--gateway", Kind: cliflag.Bool, Bool: &gateway},
+		{Name: "--gateway-passthrough-subscription", Kind: cliflag.Bool, Bool: &gatewayPassthroughSubscription},
 		{Name: "--ide-root", Kind: cliflag.String, Str: &ideRoot, ValueDesc: "a path"},
 		{Name: "--detach", Kind: cliflag.Bool, Bool: &detach},
 	}}
@@ -196,24 +200,26 @@ func runServe(yakosRoot string, args []string) {
 	yakosRoot = resolveLibRoot(yakosRoot, home, os.Stderr)
 
 	cfg := internalserve.Config{
-		WorkspaceRoot:              workspaceRoot,
-		SocketPath:                 socketPath,
-		PIDFile:                    pidFile,
-		YakosRoot:                  yakosRoot,
-		WSAddr:                     wsAddr,
-		PerfAddr:                   perfAddr,
-		NoPerfDash:                 noPerfDash,
-		ConsoleAddr:                consoleAddr,
-		ConsoleBind:                consoleBind,
-		ConsoleExternalHosts:       consoleExternalHosts,
-		IDERoot:                    ideRoot,
-		NoConsole:                  noConsole,
-		ConsoleBootstrapCertName:   consoleBootstrapCertName,
-		NoBootstrapCert:            noBootstrapCert,
-		ConsoleAllowBash:           consoleAllowBash,
-		ConsoleStructuredQuestions: consoleStructuredQuestions,
-		ShareTerminal:              shareTerminal,
-		OpenAIEndpoint:             openAIEndpoint,
+		WorkspaceRoot:                  workspaceRoot,
+		SocketPath:                     socketPath,
+		PIDFile:                        pidFile,
+		YakosRoot:                      yakosRoot,
+		WSAddr:                         wsAddr,
+		PerfAddr:                       perfAddr,
+		NoPerfDash:                     noPerfDash,
+		ConsoleAddr:                    consoleAddr,
+		ConsoleBind:                    consoleBind,
+		ConsoleExternalHosts:           consoleExternalHosts,
+		IDERoot:                        ideRoot,
+		NoConsole:                      noConsole,
+		ConsoleBootstrapCertName:       consoleBootstrapCertName,
+		NoBootstrapCert:                noBootstrapCert,
+		ConsoleAllowBash:               consoleAllowBash,
+		ConsoleStructuredQuestions:     consoleStructuredQuestions,
+		ShareTerminal:                  shareTerminal,
+		OpenAIEndpoint:                 openAIEndpoint,
+		Gateway:                        gateway,
+		GatewayPassthroughSubscription: gatewayPassthroughSubscription,
 		HooksRun: func(ctx context.Context, shape, name string, body []byte) hookio.Response {
 			return shaperun.Run(ctx, shape, name, body, shapeDeps(yakosRoot))
 		},
@@ -628,6 +634,14 @@ Flags:
                             bearer = the REST write token. Same as openai_endpoint: true
                             in ~/.yakos-state/router-policy.yml. See
                             docs/openai-compatible-endpoint.md.
+  --gateway                 Serve the Anthropic pass-through gateway (/v1/messages,
+                            /v1/messages/count_tokens, /v1/models) on 127.0.0.1:7897
+                            for a routed 'yakos start'. Loopback only, forwards to
+                            api.anthropic.com only. Same as anthropic_gateway: true in
+                            ~/.yakos-state/router-policy.yml. See docs/adr/ADR-0011.md.
+  --gateway-passthrough-subscription
+                            Let a subscription OAuth token (sk-ant-oat*) through the
+                            gateway. Refused with 403 by default; read ADR-0011 first.
   --perf-addr <addr>        Standalone performance dashboard address (default 127.0.0.1:7895).
                             Only used when --no-console is set.
   --no-perf                 Disable the standalone performance dashboard.

@@ -223,6 +223,7 @@ func runStart(yakosRoot string, args []string) {
 	noProjectIDE := false
 	shareTerminal := false
 	direct := false
+	routed := false
 	var passthrough []string
 
 	// Explicit-flag sentinels for daemon auto-spawn decision.
@@ -274,6 +275,7 @@ func runStart(yakosRoot string, args []string) {
 		{Name: "--model", Kind: cliflag.String, Str: &model, ValueDesc: "an alias"},
 		{Name: "--share-terminal", Kind: cliflag.Bool, Bool: &shareTerminal},
 		{Name: "--direct", Kind: cliflag.Bool, Bool: &direct},
+		{Name: "--routed", Kind: cliflag.Bool, Bool: &routed},
 	}}
 	head, tail := splitStartTerminator(args, fs)
 	rest, perr := fs.Parse(head)
@@ -552,12 +554,16 @@ func runStart(yakosRoot string, args []string) {
 		ConsoleToken:        consoleTok,
 		ShareTerminal:       shareTerminal,
 		Direct:              direct,
+		Routed:              routed,
 		DaemonAutoSpawn:     spawnDaemon,
 		ExecFn:              startExecFnOverride, // nil in production; injectable for tests
 		Writer:              os.Stdout,
 		ErrWriter:           os.Stderr,
 	}
 
+	if routed && !dryRun && !printAgents && !printEnv && !noREPL {
+		warnIfGatewayDown(os.Stderr)
+	}
 	banner, err := start.Run(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "start: %v\n", err)
@@ -671,4 +677,16 @@ func splitStartTerminator(args []string, fs *cliflag.Set) (head, tail []string) 
 		}
 	}
 	return args, nil
+}
+
+// warnIfGatewayDown says so when nothing listens on the gateway port, so a
+// --routed launch does not fail later with an opaque connection error.
+func warnIfGatewayDown(w io.Writer) {
+	addr := strings.TrimPrefix(start.RoutedBaseURL, "http://")
+	c, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+	if err != nil {
+		fmt.Fprintf(w, "start: warning: nothing is listening on %s; start the gateway (yakos serve, gateway flag) or claude will fail to reach the API\n", addr)
+		return
+	}
+	_ = c.Close()
 }

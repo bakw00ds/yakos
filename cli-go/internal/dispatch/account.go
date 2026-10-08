@@ -142,6 +142,21 @@ func (a *Account) Refuse(class, reason string) {
 	}
 }
 
+// Gateway writes the gateway_request event (K-151), once. A second call is a
+// no-op. The line is built by gatewayLineJSON from bounded identifiers and
+// numbers only (gateway_event.go).
+func (a *Account) Gateway(ev GatewayEvent) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.finished {
+		return
+	}
+	a.finished, a.opened = true, true
+	if b, ok := gatewayLineJSON(ev, a.started, time.Now()); ok {
+		_ = appendEvent(a.path, b)
+	}
+}
+
 // noteRefused writes the route_refused event when err is a RouteRefusedError.
 func noteRefused(req Request, err error) {
 	if e, ok := AsRouteRefused(err); ok {

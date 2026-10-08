@@ -247,6 +247,16 @@ type Config struct {
 	// Empty means the real state dir. For tests.
 	OpenAIPolicyDir string
 
+	// Gateway turns on the Anthropic pass-through gateway (K-151), as
+	// `yakos serve --gateway` does; `anthropic_gateway: true` in the trusted
+	// policy does too. GatewayPassthroughSubscription lets sk-ant-oat* tokens
+	// through (default: refused). GatewayAddr overrides 127.0.0.1:7897 (loopback
+	// only); GatewayPolicyDir overrides where the policy is read from (tests).
+	Gateway                        bool
+	GatewayPassthroughSubscription bool
+	GatewayAddr                    string
+	GatewayPolicyDir               string
+
 	// TerminalManager, when non-nil, is the active PTY session manager.
 	// Populated by Run() when ShareTerminal is true; also injectable for tests.
 	// When nil and ShareTerminal is true, Run() constructs one from termmanager.New.
@@ -954,6 +964,16 @@ func Run(ctx context.Context, cfg Config) error {
 		close(openAIErrCh)
 	}
 
+	// Anthropic pass-through gateway (K-151): off unless asked for.
+	anthropicErrCh := make(chan error, 1)
+	if anthropicGatewayEnabled(cfg.Gateway, cfg.GatewayPolicyDir) {
+		if err := startAnthropicGateway(ctx, cfg, anthropicErrCh); err != nil {
+			return err
+		}
+	} else {
+		close(anthropicErrCh)
+	}
+
 	// Build the JSON-RPC server and register handlers (bus is passed via cfg).
 	cfgWithBus := cfg
 	cfgWithBus.Bus = bus
@@ -1021,6 +1041,13 @@ func Run(ctx context.Context, cfg Config) error {
 	case openAIErr := <-openAIErrCh:
 		if openAIErr != nil && rpcErr == nil {
 			rpcErr = openAIErr
+		}
+	case <-time.After(drainTimeout):
+	}
+	select {
+	case gwErr := <-anthropicErrCh:
+		if gwErr != nil && rpcErr == nil {
+			rpcErr = gwErr
 		}
 	case <-time.After(drainTimeout):
 	}

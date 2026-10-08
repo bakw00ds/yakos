@@ -192,6 +192,10 @@ type Config struct {
 	// environments without a running daemon or who prefer zero-daemon terminal.
 	Direct bool
 
+	// Routed (--routed, K-151) points the claude child at the local Anthropic
+	// gateway: ANTHROPIC_BASE_URL and the hint-header switch, nothing else.
+	Routed bool
+
 	// DaemonAutoSpawn, when true, tells the banner that runStart has already
 	// (or will imminently) spawn a background daemon before calling start.Run.
 	// The preflight banner suppresses the "run 'yakos serve' to start" hint and
@@ -1146,6 +1150,16 @@ func buildExecArgs(runtime, projectRepo, permMode string, agentCount int, cfg Co
 		// same helper the dispatch builders use. The operator's own variable wins.
 		execEnv, _ = runtimeenv.ApplyGatewayAliases(gatewayStateDir(cfg, env), execEnv)
 	}
+	if cfg.Routed {
+		var note string
+		var err error
+		if execEnv, note, err = applyRouted(runtime, execEnv); err != nil {
+			return "", nil, nil, err
+		}
+		if note != "" && cfg.ErrWriter != nil {
+			fmt.Fprintln(cfg.ErrWriter, "start: "+note)
+		}
+	}
 
 	return argv0, argv, execEnv, nil
 }
@@ -1321,6 +1335,13 @@ Terminal sharing (ADR-0008 Phase 1):
     --direct              Force the legacy in-process exec path regardless of
                           --share-terminal.  Escape hatch for environments where
                           daemon PTY ownership is unavailable.
+
+Routing:
+    --routed              Point claude at the local Anthropic gateway
+                          (http://127.0.0.1:7897) and turn on its request-class
+                          hint headers. Sets ANTHROPIC_BASE_URL and
+                          CLAUDE_CODE_GATEWAY_HINT_HEADERS=1 in the child only.
+                          Needs the gateway running (see 'yakos serve --help'). claude only.
 
 Inspection:
     --dry-run             Print what would be exec'd; exit 0.
