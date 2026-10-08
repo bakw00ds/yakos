@@ -36,6 +36,7 @@ func TestWantREPL(t *testing.T) {
 		{"--strict-mcp", replGate{strictMCP: true}, true, false},
 		{"passthrough after --", replGate{passthrough: []string{"-p"}}, true, false},
 		{"networked flags", replGate{daemonFlags: true}, true, false},
+		{"--routed launches the vendor TUI through the gateway", replGate{routed: true}, true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

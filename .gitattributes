@@ -81,3 +81,6 @@ cli-go/cmd/yakos/testdata/router-policy/*.golden text eol=lf
 # REPL stream golden is compared byte for byte; keep LF on Windows checkouts.
 cli-go/internal/repl/testdata/*.golden text eol=lf
 cli-go/cmd/yakos/testdata/start_native_*.argv.golden text eol=lf
+
+# K-151 gateway fixtures: replayed byte for byte, so no EOL conversion.
+cli-go/internal/gateway/anthropic/testdata/* -text

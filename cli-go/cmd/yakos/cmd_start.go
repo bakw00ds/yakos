@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/mtls"
 	"github.com/bakw00ds/yakos/internal/start"
+	"github.com/bakw00ds/yakos/internal/statepath"
 	"github.com/bakw00ds/yakos/internal/version"
 )
 
@@ -33,6 +35,16 @@ func networkedFromFlags(networkedFlag bool, consoleBind string) bool {
 		return false
 	}
 	return mtls.IsNonLoopback(consoleBind)
+}
+
+// validateRoutedStartMode refuses --routed with --no-repl: that path starts the
+// daemon and execs no Claude Code child, so there is nothing to hand the
+// gateway token to and the flag would be silently ignored.
+func validateRoutedStartMode(routed, noREPL bool) error {
+	if routed && noREPL {
+		return fmt.Errorf("start: --routed cannot be combined with --no-repl (--web): no Claude Code is launched to route; drop one of the flags")
+	}
+	return nil
 }
 
 // validateNetworkedStartMode is retained for reference but is no longer called
@@ -223,6 +235,7 @@ func runStart(yakosRoot string, args []string) {
 	noProjectIDE := false
 	shareTerminal := false
 	direct := false
+	routed := false
 	native := ""
 	var passthrough []string
 
@@ -275,6 +288,7 @@ func runStart(yakosRoot string, args []string) {
 		{Name: "--model", Kind: cliflag.String, Str: &model, ValueDesc: "an alias"},
 		{Name: "--share-terminal", Kind: cliflag.Bool, Bool: &shareTerminal},
 		{Name: "--direct", Kind: cliflag.Bool, Bool: &direct},
+		{Name: "--routed", Kind: cliflag.Bool, Bool: &routed},
 		{Name: "--native", Kind: cliflag.String, Str: &native, ValueDesc: "a runtime id"},
 	}}
 	head, tail := splitStartTerminator(args, fs)
@@ -286,6 +300,10 @@ func runStart(yakosRoot string, args []string) {
 	if help {
 		start.PrintHelp(os.Stdout)
 		os.Exit(0)
+	}
+	if err := validateRoutedStartMode(routed, noREPL); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 	passthrough = append(passthrough, tail...)
 	for _, arg := range rest {
@@ -314,7 +332,7 @@ func runStart(yakosRoot string, args []string) {
 	}
 	if wantREPL(replGate{
 		native: native, runtime: runtime, noREPL: noREPL, dryRun: dryRun, printAgents: printAgents,
-		printEnv: printEnv, shareTerminal: shareTerminal, direct: direct, cont: continueSession,
+		printEnv: printEnv, routed: routed, shareTerminal: shareTerminal, direct: direct, cont: continueSession,
 		fork: fork, ide: ide, bare: bare, strictMCP: strictMCP, resume: resume, passthrough: passthrough,
 		daemonFlags: networkedFromFlags(networked, consoleBind) || consoleBindProvided || consoleExternalHostProvided,
 	}, stdinIsTerminal()) {
@@ -576,12 +594,26 @@ func runStart(yakosRoot string, args []string) {
 		ConsoleToken:        consoleTok,
 		ShareTerminal:       shareTerminal,
 		Direct:              direct,
+		Routed:              routed,
 		DaemonAutoSpawn:     spawnDaemon,
 		ExecFn:              startExecFnOverride, // nil in production; injectable for tests
 		Writer:              os.Stdout,
 		ErrWriter:           os.Stderr,
 	}
 
+	if routed && !dryRun && !printAgents && !printEnv && !noREPL {
+		wd, werr := os.Getwd()
+		if werr != nil {
+			fmt.Fprintln(os.Stderr, "start: --routed refused: could not resolve the working directory")
+			os.Exit(1)
+		}
+		tok, verr := verifyRoutedGateway(context.Background(), wd, statepath.Dir())
+		if verr != nil {
+			fmt.Fprintf(os.Stderr, "start: --routed refused: %v\n", verr)
+			os.Exit(1)
+		}
+		cfg.RoutedToken = tok
+	}
 	banner, err := start.Run(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "start: %v\n", err)

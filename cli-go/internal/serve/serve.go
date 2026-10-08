@@ -150,6 +150,9 @@ type Config struct {
 	// bound ("" when the console is off or failed to bind).
 	instance     string
 	boundConsole string
+	// boundGateway is the Anthropic gateway's bound address, "" when it is off
+	// or could not bind. Reported through yakos.version.
+	boundGateway string
 
 	// ConsoleExternalHosts is the list of host[:port] values that browsers use to
 	// reach the console when ConsoleBind is a wildcard or non-loopback address.
@@ -261,6 +264,16 @@ type Config struct {
 	// OpenAIPolicyDir overrides the directory the trusted policy is read from.
 	// Empty means the real state dir. For tests.
 	OpenAIPolicyDir string
+
+	// Gateway turns on the Anthropic pass-through gateway (K-151), as
+	// `yakos serve --gateway` does; `anthropic_gateway: true` in the trusted
+	// policy does too. GatewayPassthroughSubscription lets sk-ant-oat* tokens
+	// through (default: refused). GatewayAddr overrides 127.0.0.1:7897 (loopback
+	// only); GatewayPolicyDir overrides where the policy is read from (tests).
+	Gateway                        bool
+	GatewayPassthroughSubscription bool
+	GatewayAddr                    string
+	GatewayPolicyDir               string
 
 	// TerminalManager, when non-nil, is the active PTY session manager.
 	// Populated by Run() when ShareTerminal is true; also injectable for tests.
@@ -992,6 +1005,18 @@ func Run(ctx context.Context, cfg Config) error {
 		close(openAIErrCh)
 	}
 
+	// Anthropic pass-through gateway (K-151): off unless asked for.
+	anthropicErrCh := make(chan error, 1)
+	if anthropicGatewayEnabled(cfg.Gateway, cfg.GatewayPolicyDir) {
+		addr, err := startAnthropicGateway(ctx, cfg, anthropicErrCh)
+		if err != nil {
+			return err
+		}
+		cfg.boundGateway = addr
+	} else {
+		close(anthropicErrCh)
+	}
+
 	// Build the JSON-RPC server and register handlers (bus is passed via cfg).
 	cfgWithBus := cfg
 	cfgWithBus.Bus = bus
@@ -1059,6 +1084,13 @@ func Run(ctx context.Context, cfg Config) error {
 	case openAIErr := <-openAIErrCh:
 		if openAIErr != nil && rpcErr == nil {
 			rpcErr = openAIErr
+		}
+	case <-time.After(drainTimeout):
+	}
+	select {
+	case gwErr := <-anthropicErrCh:
+		if gwErr != nil && rpcErr == nil {
+			rpcErr = gwErr
 		}
 	case <-time.After(drainTimeout):
 	}

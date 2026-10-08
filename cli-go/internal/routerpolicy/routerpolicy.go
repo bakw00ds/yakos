@@ -76,6 +76,18 @@ type File struct {
 	// RawOpenAIEndpoint is the raw openai_endpoint key (K-150), kept as a node so
 	// a wrong type never fails the whole file. Read it through OpenAIEndpoint.
 	RawOpenAIEndpoint yaml.Node `yaml:"openai_endpoint,omitempty"`
+
+	// RawAnthropicGateway is the raw anthropic_gateway key (K-151), read through
+	// AnthropicGateway.
+	RawAnthropicGateway yaml.Node `yaml:"anthropic_gateway,omitempty"`
+}
+
+// AnthropicGateway reports whether the trusted user policy turns the Anthropic
+// pass-through gateway on (`anthropic_gateway: true`). Only the YAML boolean
+// true counts. A project .yakos.yml has no such key and cannot enable it.
+func (f File) AnthropicGateway() bool {
+	n := f.RawAnthropicGateway
+	return n.Kind == yaml.ScalarNode && n.Tag == "!!bool" && n.Value == "true"
 }
 
 // OpenAIEndpoint reports whether the trusted user policy turns the OpenAI-

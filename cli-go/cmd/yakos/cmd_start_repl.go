@@ -28,6 +28,7 @@ type replGate struct {
 	native                                string // --native <runtime>
 	runtime                               string // --runtime <id>
 	noREPL, dryRun, printAgents, printEnv bool
+	routed                                bool // --routed launches the vendor TUI through the gateway
 	shareTerminal, direct                 bool
 	cont, fork, ide, bare, strictMCP      bool
 	resume                                string
@@ -44,7 +45,7 @@ var replHarnesses = map[string]bool{"claude": true, "codex": true, "agy": true}
 // exec path understands keeps that path, and so does a non-terminal stdin.
 func wantREPL(g replGate, tty bool) bool {
 	switch {
-	case g.native != "", g.noREPL, g.dryRun, g.printAgents, g.printEnv,
+	case g.native != "", g.routed, g.noREPL, g.dryRun, g.printAgents, g.printEnv,
 		g.shareTerminal, g.direct, g.cont, g.fork, g.ide, g.bare, g.strictMCP,
 		g.resume != "", len(g.passthrough) > 0, g.daemonFlags:
 		return false

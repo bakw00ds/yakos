@@ -171,4 +171,7 @@ const (
 
 	// SurfaceOpenAICompat is the OpenAI-compatible endpoint (K-150).
 	SurfaceOpenAICompat = "openai-compat"
+
+	// SurfaceAnthropicGateway is the Anthropic pass-through gateway (K-151).
+	SurfaceAnthropicGateway = "anthropic-gateway"
 )

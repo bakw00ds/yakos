@@ -389,7 +389,8 @@ var commandRegistry = []commandEntry{
 			"--console-bind", "--console-external-host", "--rotate-ws-token", "--rotate-perf-token",
 			"--rotate-console-token", "--no-perf", "--no-console", "--console-bootstrap-cert",
 			"--no-bootstrap-cert", "--console-allow-bash", "--console-structured-questions",
-			"--share-terminal", "--openai-endpoint", "--ide-root", "--detach", "--require-console"),
+			"--share-terminal", "--openai-endpoint", "--gateway", "--gateway-passthrough-subscription",
+			"--ide-root", "--detach", "--require-console"),
 		HelpFn: printServeHelp,
 		AllowUndocumented: []flagAllow{
 			{Flag: "--console-bootstrap-cert", Reason: "cmd_serve.go is off-limits for this PR (owned concurrently, per the dispatch brief); printServeHelp never mentions this real flag"},
@@ -430,7 +431,7 @@ var commandRegistry = []commandEntry{
 			"--print-agents", "--print-env", "--continue", "--fork-session", "--ide", "--bare", "--strict-mcp",
 			"--no-repl", "--web", "--console-addr", "--ws-addr", "--perf-addr", "--networked",
 			"--console-bind", "--console-external-host", "--ide-root", "--no-project-ide",
-			"--resume", "--model", "--share-terminal", "--direct", "--native"),
+			"--resume", "--model", "--share-terminal", "--direct", "--native", "--routed"),
 		HelpFn: internalstart.PrintHelp,
 		AllowUnparsed: []flagAllow{
 			{Flag: "--dangerously-bypass-approvals-and-sandbox", Reason: "start.PrintHelp prose describing CODEX's own bypass flag, not a yakos start flag; cmd_start.go / internal/start are off-limits for this PR"},

@@ -188,3 +188,26 @@ func TestOpenAIEndpointKey(t *testing.T) {
 		t.Error("the zero File enables the endpoint")
 	}
 }
+
+func TestAnthropicGatewayKey(t *testing.T) {
+	for _, c := range []struct {
+		body string
+		want bool
+	}{
+		{"anthropic_gateway: true\n", true},
+		{"anthropic_gateway: false\n", false},
+		{"anthropic_gateway: \"true\"\n", false},
+		{"anthropic_gateway: 1\n", false},
+		{"anthropic_gateway: [true]\n", false},
+		{"openai_endpoint: true\n", false},
+		{"", false},
+	} {
+		var f File
+		if err := yaml.Unmarshal([]byte(c.body), &f); err != nil {
+			t.Fatal(err)
+		}
+		if got := f.AnthropicGateway(); got != c.want {
+			t.Errorf("%q: AnthropicGateway() = %v, want %v", c.body, got, c.want)
+		}
+	}
+}

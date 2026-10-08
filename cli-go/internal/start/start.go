@@ -192,6 +192,15 @@ type Config struct {
 	// environments without a running daemon or who prefer zero-daemon terminal.
 	Direct bool
 
+	// Routed (--routed, K-151) points the claude child at the local Anthropic
+	// gateway: ANTHROPIC_BASE_URL, the hint-header switch and the gateway token
+	// (as ANTHROPIC_AUTH_TOKEN); the operator's ANTHROPIC_API_KEY is removed.
+	Routed bool
+	// RoutedToken is the gateway token handed to the child as
+	// ANTHROPIC_AUTH_TOKEN. The caller reads it from the state dir after it has
+	// verified the gateway; it is never printed or logged.
+	RoutedToken string
+
 	// DaemonAutoSpawn, when true, tells the banner that runStart has already
 	// (or will imminently) spawn a background daemon before calling start.Run.
 	// The preflight banner suppresses the "run 'yakos serve' to start" hint and
@@ -1146,6 +1155,16 @@ func buildExecArgs(runtime, projectRepo, permMode string, agentCount int, cfg Co
 		// same helper the dispatch builders use. The operator's own variable wins.
 		execEnv, _ = runtimeenv.ApplyGatewayAliases(gatewayStateDir(cfg, env), execEnv)
 	}
+	if cfg.Routed {
+		var note string
+		var err error
+		if execEnv, note, err = applyRouted(runtime, execEnv, cfg.RoutedToken); err != nil {
+			return "", nil, nil, err
+		}
+		if note != "" && cfg.ErrWriter != nil {
+			fmt.Fprintln(cfg.ErrWriter, "start: "+note)
+		}
+	}
 
 	return argv0, argv, execEnv, nil
 }
@@ -1332,6 +1351,20 @@ Terminal sharing (ADR-0008 Phase 1):
     --direct              Force the legacy in-process exec path regardless of
                           --share-terminal.  Escape hatch for environments where
                           daemon PTY ownership is unavailable.
+
+Routing:
+    --routed              Point claude at the local Anthropic gateway
+                          (http://127.0.0.1:7897) and turn on its request-class
+                          hint headers. In the child only: sets ANTHROPIC_BASE_URL,
+                          CLAUDE_CODE_GATEWAY_HINT_HEADERS=1 and ANTHROPIC_AUTH_TOKEN
+                          (the gateway token) and removes ANTHROPIC_API_KEY.
+                          Refuses to launch unless this directory's daemon runs the
+                          gateway on that address (see 'yakos serve --help').
+                          The gateway token rotates whenever the daemon restarts: a
+                          running routed session then gets 401 ("gateway token
+                          rotated"); quit and run 'yakos start --routed' again.
+                          Not valid with --no-repl.
+                          Uses the vendor TUI, not the REPL. claude only.
 
 Inspection:
     --dry-run             Print what would be exec'd; exit 0.
