@@ -1,0 +1,7 @@
+policy_sha: ec2d674ab85d75d8105967b561a559970cc5b9f816cbe49ba04a9e1e1de9b60a
+allow_unsandboxed_runtimes: [codex]
+hooks_endpoint: true
+openai_endpoint: false
+R1: when domain=code-review -> runtime=codex model=gpt-5.5 fallbacks=claude
+R2: when agent=backend -> runtime=codex model=gpt-5.6-terra (overrides pins)
+pin: backend -> codex/gpt-5.6-terra

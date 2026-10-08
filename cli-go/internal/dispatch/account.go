@@ -25,7 +25,10 @@ package dispatch
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"math"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +37,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/cost"
 	"github.com/bakw00ds/yakos/internal/runtime"
+	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
 // costSourceHarness marks a dollar figure the harness itself reported. No price
@@ -432,3 +436,98 @@ func logText(s string, max int) string {
 	}
 	return clean
 }
+
+// ConfigChange is one write to an owner-only policy file, for the audit trail.
+type ConfigChange struct {
+	// File is the file's base name; only the three policy files are accepted.
+	File string
+	// Action is a fixed-vocabulary verb such as "models.enable" or
+	// "router.policy.set".
+	Action string
+	// SHABefore and SHAAfter are the hex SHA-256 of the file's bytes around the
+	// write ("" for a file that did not exist).
+	SHABefore, SHAAfter string
+	// Surface is "cli" or "console".
+	Surface string
+}
+
+// auditFiles are the files a ConfigChange may name: the router policy, the model
+// registry overlay and the budget policy. The event carries the base name only,
+// never a path.
+var auditFiles = map[string]bool{"router-policy.yml": true, "model-registry.yml": true, "budget-policy.yml": true}
+
+type configChangedEvent struct {
+	Type       string `json:"type"`
+	Ts         string `json:"ts"`
+	OperatorID string `json:"operator_id"`
+	File       string `json:"file"`
+	Action     string `json:"action"`
+	SHABefore  string `json:"policy_sha_before"`
+	SHAAfter   string `json:"policy_sha_after"`
+	Surface    string `json:"surface"`
+}
+
+// ConfigChanged appends a config_changed event: who (the request's OperatorID),
+// which policy file, what was done and the file's sha before and after. It is the
+// audit line of every policy write (K-153). It refuses to record a change to a
+// file that is not one of the three, and returns the error when the log cannot be
+// written, so the caller can tell the operator the write went unaudited.
+func (a *Account) ConfigChanged(c ConfigChange) error {
+	line, err := a.configChangedLine(c)
+	if err != nil {
+		return err
+	}
+	return appendEvent(a.path, line)
+}
+
+func (a *Account) configChangedLine(c ConfigChange) ([]byte, error) {
+	if !auditFiles[c.File] {
+		return nil, fmt.Errorf("dispatch: %q is not an auditable policy file", c.File)
+	}
+	op := logIdent(a.req.OperatorID, 128)
+	if op == "" {
+		op = "unknown"
+	}
+	ev := configChangedEvent{
+		Type: "config_changed", Ts: a.started.UTC().Format(time.RFC3339), OperatorID: op,
+		File: c.File, Action: logIdent(c.Action, 64), SHABefore: logHex(c.SHABefore, 64), SHAAfter: logHex(c.SHAAfter, 64),
+		Surface: logSurface(c.Surface),
+	}
+	return json.Marshal(ev)
+}
+
+// ConfigAudit is the home dispatch log opened and flock-held for one policy
+// write. Open it BEFORE the write so a write that cannot be audited is refused
+// (K-153 sec-356 M2); Record the change through the same descriptor; Close it.
+type ConfigAudit struct {
+	a *Account
+	f *os.File
+}
+
+// OpenConfigAudit opens the dispatch log inside stateDir (the trusted
+// $HOME/.yakos-state, never the YAKOS_DISPATCH_LOG override: a project can set
+// that, and a policy write must not be recordable somewhere the operator does
+// not read). It fails when the log cannot be opened.
+func OpenConfigAudit(req Request, stateDir string) (*ConfigAudit, error) {
+	if stateDir == "" {
+		return nil, errors.New("dispatch: no state directory for the audit log")
+	}
+	path := statepath.DispatchLogIn(stateDir)
+	f, err := openLogLocked(path)
+	if err != nil {
+		return nil, err
+	}
+	return &ConfigAudit{a: newAccountAt(req, path, time.Now()), f: f}, nil
+}
+
+// Record appends the config_changed line through the held descriptor.
+func (c *ConfigAudit) Record(ch ConfigChange) error {
+	line, err := c.a.configChangedLine(ch)
+	if err != nil {
+		return err
+	}
+	return writeLine(c.f, line)
+}
+
+// Close releases the lock and the descriptor.
+func (c *ConfigAudit) Close() { closeLogLocked(c.f) }

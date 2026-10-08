@@ -484,6 +484,8 @@
     { id: 'chat',      label: 'Chat',         src: null,       phase: null },
     { id: 'ide',       label: 'IDE',          src: null,       phase: null },
     { id: 'flows',     label: 'Flows',        src: null,       phase: null },
+    // Models & Providers (K-153): read-only; the view is built by models.js.
+    { id: 'models',    label: 'Models',       src: null,       phase: null },
     // terminal tab: only shown when the server has a TerminalManager wired
     // (i.e. --share-terminal was passed).  Detected via GET /api/term on
     // first open; hidden by default so it only appears when the feature is
@@ -595,6 +597,12 @@
     // On first switch to flows tab, initialize it.
     if (id === 'flows') {
       initFlowsTab();
+    }
+
+    // On every switch to the models tab, reload the overview (providers sign in
+    // and the policy files change outside the browser).
+    if (id === 'models' && window.YakModels) {
+      window.YakModels.open(document.getElementById('models-root'), apiFetch);
     }
 
     // On every switch to users tab, refresh the table (data may have changed).
@@ -9584,6 +9592,9 @@
           <div class="flows-loading">
             <p class="empty-state">Initializing Flows…</p>
           </div>
+        </div>
+        <div id="panel-models" class="tab-panel">
+          <div id="models-root" class="models-root" role="region" aria-label="Models and providers"></div>
         </div>
         <div id="panel-terminal" class="tab-panel">
           <div class="term-toolbar" role="toolbar" aria-label="Terminal controls">

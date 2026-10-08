@@ -178,9 +178,19 @@ func Load(stateDir string) (File, error) {
 	if len(data) > maxPolicyBytes {
 		return File{}, fmt.Errorf("%w: %s is larger than %d bytes", ErrUntrusted, path, maxPolicyBytes)
 	}
+	p, err := Parse(data)
+	if err != nil {
+		return File{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+	return p, nil
+}
+
+// Parse decodes policy bytes and stamps File.SHA. Load reads a trusted file and
+// calls it; the writer (Edit) calls it to check what it is about to write.
+func Parse(data []byte) (File, error) {
 	var p File
 	if err := yaml.Unmarshal(data, &p); err != nil {
-		return File{}, fmt.Errorf("parse %s: %w", path, err)
+		return File{}, err
 	}
 	sum := sha256.Sum256(data)
 	p.SHA = hex.EncodeToString(sum[:])

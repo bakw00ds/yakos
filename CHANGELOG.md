@@ -93,6 +93,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (≤3k added lines), review fan-out, and agent lifetime per round, from the
   P0 sprint retrospective.
 
+- **`yakos models enable|disable|alias|pin|pricing` and `yakos router policy
+  get|set` (K-153).** Write the model registry overlay and the router policy
+  through one trust-checked, owner-only, atomic writer (a symlinked, foreign or
+  group-writable file is refused, never overwritten; keys and comments the edit
+  did not touch are kept; the result is checked as the reader will read it) and
+  append a `config_changed` line (operator, file, sha before and after) to the
+  dispatch log. The privileged router keys are never written by these commands:
+  `router policy set` refuses YAML anchors, aliases and merge keys in the rules
+  input, and every write is refused unless each top-level key other than `rules:`
+  means the same (aliases resolved) before and after. The audit line always goes
+  to the log in the home state directory (never the `YAKOS_DISPATCH_LOG` a
+  project can set); that log is opened and locked before the write, and a write
+  whose log cannot be opened is refused. `models pricing` validates the whole
+  command before its first write. A stale edit lock is broken by rename, so
+  only one waiter wins.
+
+- **Read-only Models & Providers console tab (K-153).** Providers (installed,
+  signed in, cooldown, next step), the catalog with 30-day tokens per model, tier
+  aliases, pins and router rules, budgets, eval results, the sensitive class and
+  an explain playground, over `GET /api/models/overview`, `/api/models/explain`
+  and `/api/router/policy`. Browser writes are held for K-153b; see
+  `docs/routing.md`.
+
 ## [0.62.0.0] — 2026-10-06
 
 Minor release: the multi-harness routing wave. Go dispatch honors agent
