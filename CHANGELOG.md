@@ -121,6 +121,13 @@ never holds a login: ADR-0010. Detailed entries follow.
   no body, header or credential). `yakos.version` gained an additive
   `gateway_addr` field.
 
+### Fixed
+
+- **Windows: `statepath` edit locks no longer fail on a delete-pending lock
+  (K-163).** Creating the lock while the previous holder's file was still
+  delete-pending failed with "cannot take the edit lock"; `lockEdit` now waits
+  it out, bounded by the 2 s edit-lock wait.
+
 ### Changed
 
 - **`yakos start` opens a yakOS REPL by default (K-154, ADR-0012).** Under
