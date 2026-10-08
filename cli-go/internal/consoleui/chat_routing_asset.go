@@ -1,0 +1,22 @@
+package consoleui
+
+import (
+	_ "embed"
+	"net/http"
+)
+
+// chatRoutingJS is the console's routing UI module (K-148): @prefix parsing, the
+// registry-driven selects, the route chip and the handoff banner. app.js stays
+// small and calls into it through window.YakChatRouting.
+//
+//go:embed dist/chat-routing.js
+var chatRoutingJS []byte
+
+// handleChatRoutingJS serves GET /chat-routing.js. Token-exempt like /app.js
+// (listed in isStaticAsset): it carries no secret and loads before the token.
+func (s *Server) handleChatRoutingJS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	_, _ = w.Write(chatRoutingJS)
+}

@@ -108,8 +108,25 @@ const toolOutputTruncationMarker = "\n[...tool output truncated...]"
 // glance whether it was the input or the output that was truncated.
 const toolInputTruncationMarker = "\n[...tool input truncated...]"
 
+// RouteInfo is the router's decision for one streamed turn, as a console chip
+// shows it. It carries no prompt text and no path; Reason is built by the router
+// from rule ids and runtime names.
+type RouteInfo struct {
+	Runtime      string
+	Provider     string
+	Model        string // "" = the harness default
+	RuleID       string
+	Reason       string
+	Class        string
+	FallbackFrom string
+}
+
 // StreamChunk is one incremental unit of streaming output.
 type StreamChunk struct {
+	// Route is set only on Type=="route", the first chunk of a turn whose Params
+	// asked for it (Params.EmitRoute).
+	Route *RouteInfo
+
 	// Type is "token" for incremental text, "summary" for the terminal record,
 	// "tool_use" when the agent invoked a tool, "tool_result" when the tool
 	// returned a result, "thinking" for an incremental extended-thinking delta,
@@ -411,6 +428,15 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		}, wsbus.EventMeta{OwnerOperatorID: operatorID})
 	}
 
+	// --- Route chunk (K-148): first thing a console turn sees ---
+	if p.EmitRoute && onChunk != nil {
+		d := rr.Decision
+		onChunk(StreamChunk{Type: "route", Route: &RouteInfo{
+			Runtime: d.Runtime, Provider: d.Provider, Model: d.ModelID, RuleID: d.RuleID,
+			Reason: d.Reason, Class: d.RouteClass, FallbackFrom: d.FallbackFrom,
+		}})
+	}
+
 	// --- Execute (streaming) ---
 	result, execErr := streamRunFn(ctx, req, adapter, chatReq, onChunk)
 
@@ -451,6 +477,7 @@ func execWithStreaming(
 	tsStart := acct.Started()
 
 	cp, hasChatCmd := adapter.(chatCmdProvider)
+	var tap *feedScanner
 
 	var (
 		allText        []byte
@@ -470,6 +497,10 @@ func execWithStreaming(
 
 	if hasChatCmd {
 		// Use the unframed chat exec path (every harness streams its events).
+		// K-146: detect-and-report scan of the normalized events (nil for claude).
+		ctx, cancelRun := context.WithCancel(ctx)
+		defer cancelRun()
+		tap = newFeedScanner(adapter.Name(), req.SessionID, req.Project, cancelRun)
 		cmd := cp.ChatExecCmd(ctx, chatReq)
 		runtime.ConfigureGroupKill(cmd) // ctx cancel kills the whole group; Wait is bounded
 
@@ -556,6 +587,7 @@ func execWithStreaming(
 					bufferedInputBytes += len(line) + 1
 					for _, ev := range bufParser.Feed(line) {
 						emitNativeEvent(ev, &streamedText, onChunk)
+						tap.observe(ev)
 					}
 				}
 			}
@@ -639,6 +671,9 @@ func execWithStreaming(
 	}
 
 	noteRun(ctx, req.Project, req.Runtime, exitCode, execErr)
+	if tap != nil && tap.cancelled != "" {
+		onChunk(StreamChunk{Type: "error", Text: "dispatch cancelled: critical finding in the run's output (kill_on_critical)"})
+	}
 
 	tsEnd := time.Now()
 	durationS := tsEnd.Sub(tsStart).Seconds()
@@ -684,6 +719,10 @@ func execWithStreaming(
 		result.SessionID = nativeSession
 		// and the concrete model id (K-136: the ledger records it).
 		result.ModelID = streamModelID
+	}
+
+	if tap != nil {
+		result.ScanFindings, result.CancelReason, result.ScanOffReason = tap.findings, tap.cancelled, tap.offReason
 	}
 
 	// Finish the ledger entry identically to Run (parity invariant).

@@ -78,6 +78,10 @@ const (
 	// of {questionText: chosenOptionLabel}.  Persisted after successful delivery
 	// to the engine so the conversation record reflects the answer.
 	RoleQuestionAnswer TranscriptRole = "question_answer"
+	// RoleRoute records where the router sent a turn and why (K-148). Runtime and
+	// Model say where, Text is the reason, RuleID the rule. An older reader that
+	// does not know the role skips the line.
+	RoleRoute TranscriptRole = "route"
 )
 
 // TranscriptEntry is one NDJSON line in a chat transcript file.
@@ -126,6 +130,15 @@ type TranscriptEntry struct {
 
 	// TotalCostUSD is set on summary turns.
 	TotalCostUSD float64 `json:"total_cost_usd,omitempty"`
+
+	// RuleID, FallbackFrom and Pinned are set on route turns (K-148): the router
+	// rule, the runtime a fallback skipped, and who fixed the runtime (override,
+	// pane or router).
+	RuleID       string `json:"rule_id,omitempty"`
+	FallbackFrom string `json:"fallback_from,omitempty"`
+	Pinned       string `json:"pinned,omitempty"`
+	// OverrideRefused: the runtime an @prefix asked for that the router refused.
+	OverrideRefused string `json:"override_refused,omitempty"`
 }
 
 // Transcripts manages per-conversation NDJSON transcript files.

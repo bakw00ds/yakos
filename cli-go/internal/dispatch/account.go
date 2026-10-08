@@ -311,6 +311,13 @@ func applyLedger(ev *finishedEvent, req Request, res Result) {
 	ev.RouteReason = logText(req.RouteReason, 256)
 	ev.RouteClass = logIdent(req.RouteClass, 64)
 	ev.PolicySHA = logHex(req.PolicySHA, 64)
+	if res.ScanFindings > 0 {
+		ev.ScanFindings = res.ScanFindings
+	}
+	ev.CancelReason = logText(res.CancelReason, 96)
+	if res.ScanOffReason == "budget" || res.ScanOffReason == "deadline" {
+		ev.ScanOffReason = res.ScanOffReason // fixed strings only
+	}
 }
 
 // nonNegative returns v, or 0 when v is negative.

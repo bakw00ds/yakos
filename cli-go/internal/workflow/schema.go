@@ -21,6 +21,8 @@
 package workflow
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"os"
@@ -115,6 +117,10 @@ type Workflow struct {
 	// Nodes is the ordered list of workflow nodes. Order has no semantic
 	// significance; the engine derives execution order from the Needs edges.
 	Nodes []Node `yaml:"nodes"`
+
+	// Triggers (K-152) declares cron and webhook starts. A declaration never
+	// fires by itself: the operator enables it in the user-level schedules file.
+	Triggers *Triggers `yaml:"triggers,omitempty"`
 }
 
 // maxWorkflowYAMLBytes caps how much of a workflow YAML file we read.
@@ -129,24 +135,49 @@ const maxWorkflowNodes = 512
 // Returns a parsed and structurally valid Workflow (but NOT semantically
 // validated — call Validate separately to check acyclicity, refs, etc.).
 // M2: read is capped at maxWorkflowYAMLBytes to prevent OOM on large files.
+// The path must name a regular file (after following symlinks): a FIFO or
+// device is refused at once instead of blocking the caller (K-152).
 func Load(path string) (*Workflow, error) {
-	f, err := os.Open(path) //nolint:gosec
+	wf, _, err := LoadFile(path)
+	return wf, err
+}
+
+// LoadFile is Load that also returns the hex SHA-256 of the exact bytes that
+// were parsed (the value an operator pins as workflow_sha when enabling a
+// trigger; `shasum -a 256 <file>` prints the same digest). Hash and parse come
+// from one read, so there is no window between "what was checked" and "what
+// runs".
+func LoadFile(path string) (*Workflow, string, error) {
+	fi, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("workflow: load %s: %w", path, err)
+		return nil, "", fmt.Errorf("workflow: load %s: %w", path, err)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, "", fmt.Errorf("workflow: load %s: not a regular file", path)
+	}
+	// O_NONBLOCK: if the path is swapped for a FIFO after the Stat, the open
+	// still returns at once and the post-open check below refuses it.
+	f, err := os.OpenFile(path, os.O_RDONLY|oNonblock, 0) //nolint:gosec
+	if err != nil {
+		return nil, "", fmt.Errorf("workflow: load %s: %w", path, err)
 	}
 	defer f.Close()
+	if opened, err := f.Stat(); err != nil || !opened.Mode().IsRegular() {
+		return nil, "", fmt.Errorf("workflow: load %s: not a regular file", path)
+	}
 	data, err := io.ReadAll(io.LimitReader(f, maxWorkflowYAMLBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("workflow: read %s: %w", path, err)
+		return nil, "", fmt.Errorf("workflow: read %s: %w", path, err)
 	}
 	if len(data) > maxWorkflowYAMLBytes {
-		return nil, fmt.Errorf("workflow: %s exceeds size limit (%d bytes)", path, maxWorkflowYAMLBytes)
+		return nil, "", fmt.Errorf("workflow: %s exceeds size limit (%d bytes)", path, maxWorkflowYAMLBytes)
 	}
 	var wf Workflow
 	if err := yaml.Unmarshal(data, &wf); err != nil {
-		return nil, fmt.Errorf("workflow: parse %s: %w", path, err)
+		return nil, "", fmt.Errorf("workflow: parse %s: %w", path, err)
 	}
-	return &wf, nil
+	sum := sha256.Sum256(data)
+	return &wf, hex.EncodeToString(sum[:]), nil
 }
 
 // Save writes the Workflow to path using an atomic temp-rename,

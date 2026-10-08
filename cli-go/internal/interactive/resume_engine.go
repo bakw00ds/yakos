@@ -114,6 +114,9 @@ func NewResumeEngine(p ResumeEngineParams) (*ResumeEngine, error) {
 // turn, so a caller must not account these turns a second time.
 func (e *ResumeEngine) AccountsOwnTurns() bool { return true }
 
+// Runtime is the runtime this pane's engine is pinned to (the Base request's).
+func (e *ResumeEngine) Runtime() string { return e.p.Base.Runtime }
+
 // Start marks the engine live. ctx cancellation closes the engine.
 func (e *ResumeEngine) Start(ctx context.Context) error {
 	e.mu.Lock()

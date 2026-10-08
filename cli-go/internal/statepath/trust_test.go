@@ -247,3 +247,39 @@ func TestOwnedByDefaultsToTheRealPredicate(t *testing.T) {
 		t.Error("ownedBy is not ownedByCurrentUser: the trust checks would not apply the real owner test")
 	}
 }
+
+func TestReadTrustedPrivate_AcceptsOwnerOnly(t *testing.T) {
+	_, path := trustedState(t, "schedules.yaml", "version: 1\n")
+	got, err := ReadTrustedPrivate(path, 256)
+	if err != nil || string(got) != "version: 1\n" {
+		t.Fatalf("ReadTrustedPrivate = %q, %v", got, err)
+	}
+}
+
+// ReadTrusted tolerates a file others can read; the private variant must not.
+func TestReadTrustedPrivate_RefusesGroupOrOtherAccess(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mode bits")
+	}
+	for _, mode := range []os.FileMode{0o640, 0o604, 0o644, 0o660, 0o601, 0o666} {
+		_, path := trustedState(t, "schedules.yaml", "x")
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+		_, err := ReadTrustedPrivate(path, 256)
+		if !IsUntrusted(err) {
+			t.Errorf("mode %o: err = %v, want untrusted", mode, err)
+		}
+		if _, err := ReadTrusted(path, 256); mode&0o022 == 0 && err != nil {
+			t.Errorf("mode %o: plain ReadTrusted must still accept: %v", mode, err)
+		}
+	}
+}
+
+func TestReadTrustedPrivate_MissingIsNotUntrusted(t *testing.T) {
+	dir, _ := trustedState(t, "other", "x")
+	_, err := ReadTrustedPrivate(filepath.Join(dir, "absent.yaml"), 256)
+	if !errors.Is(err, fs.ErrNotExist) || IsUntrusted(err) {
+		t.Fatalf("err = %v, want not-exist and not untrusted", err)
+	}
+}

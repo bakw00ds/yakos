@@ -132,6 +132,9 @@ type Result struct {
 
 	// PendingCount is the number of unacknowledged escalation findings.
 	PendingCount int
+	// DetectedCount is the number of detect-only output-scan findings listed
+	// (K-146); they need no acknowledgement and are not in PendingCount.
+	DetectedCount int
 
 	// ClearedCount is the number of files removed by clear.
 	ClearedCount int
@@ -833,9 +836,24 @@ func runPending(cfg Config, home, acRoot string) (*Result, error) {
 
 	_, _ = fmt.Fprintf(cfg.Writer, "yakos supervise pending — project: %s\n\n", proj)
 
+	// K-146: detect-only output-scan findings never need an ack and are not
+	// counted as pending; they are listed apart so the operator still sees them.
+	detected := listDetectedFindings(paths.findings)
+	printDetected := func() {
+		if len(detected) == 0 {
+			return
+		}
+		_, _ = fmt.Fprintf(cfg.Writer, "  Detected (no ack needed) - output-scan findings, latest %d:\n\n", len(detected))
+		for _, f := range detected {
+			_, _ = fmt.Fprintf(cfg.Writer, "    %s  %s\n", f.TS, f.Rationale)
+		}
+		_, _ = fmt.Fprintf(cfg.Writer, "\n")
+	}
+
 	if len(pending) == 0 {
-		_, _ = fmt.Fprintf(cfg.Writer, "  No unacknowledged escalation findings.\n")
-		return &Result{Subcommand: "pending", Project: proj, PendingCount: 0}, nil
+		_, _ = fmt.Fprintf(cfg.Writer, "  No unacknowledged escalation findings.\n\n")
+		printDetected()
+		return &Result{Subcommand: "pending", Project: proj, PendingCount: 0, DetectedCount: len(detected)}, nil
 	}
 
 	_, _ = fmt.Fprintf(cfg.Writer, "  Unacknowledged escalation findings (surface_to_operator+):\n\n")
@@ -849,9 +867,10 @@ func runPending(cfg Config, home, acRoot string) (*Result, error) {
 	_, _ = fmt.Fprintf(cfg.Writer, "Acknowledge with:\n")
 	firstFID := deriveFindingID(pending[0].TS, proj, pending[0].LineNum)
 	_, _ = fmt.Fprintf(cfg.Writer, "  yakos supervise ack %s [--note \"...\"]\n", firstFID)
-	_, _ = fmt.Fprintf(cfg.Writer, "  yakos supervise ack-all [--note \"...\"]\n")
+	_, _ = fmt.Fprintf(cfg.Writer, "  yakos supervise ack-all [--note \"...\"]\n\n")
+	printDetected()
 
-	return &Result{Subcommand: "pending", Project: proj, PendingCount: len(pending)}, nil
+	return &Result{Subcommand: "pending", Project: proj, PendingCount: len(pending), DetectedCount: len(detected)}, nil
 }
 
 // ---- ack --------------------------------------------------------------------
@@ -1056,6 +1075,42 @@ func listPendingFindings(findingsFile, project, ackFile string) ([]Finding, erro
 		return nil, fmt.Errorf("scan %s: %w", findingsFile, err)
 	}
 	return result, nil
+}
+
+// detectedListMax bounds how many detect-only findings `supervise pending` prints.
+const detectedListMax = 20
+
+// listDetectedFindings returns the latest detect-only output-scan findings
+// (source event-scan, recommended_action review). They never gate the lead and
+// carry no finding ID. Read errors yield none.
+func listDetectedFindings(findingsFile string) []Finding {
+	data, err := os.ReadFile(findingsFile) //nolint:gosec
+	if err != nil {
+		return nil
+	}
+	var all []Finding
+	lineNum := 0
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	for scanner.Scan() {
+		lineNum++
+		var rec map[string]interface{}
+		if json.Unmarshal([]byte(strings.TrimSpace(scanner.Text())), &rec) != nil {
+			continue
+		}
+		if src, _ := rec["source"].(string); src != "event-scan" {
+			continue
+		}
+		if act, _ := rec["recommended_action"].(string); act != "review" {
+			continue
+		}
+		ts, _ := rec["ts"].(string)
+		why, _ := rec["rationale"].(string)
+		all = append(all, Finding{TS: ts, RecommendedAction: "review", Rationale: why, LineNum: lineNum})
+	}
+	if len(all) > detectedListMax {
+		all = all[len(all)-detectedListMax:]
+	}
+	return all
 }
 
 // loadAckedSet returns a set of finding IDs that have been acknowledged for project.
