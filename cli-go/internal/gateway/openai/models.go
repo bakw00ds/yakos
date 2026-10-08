@@ -34,6 +34,7 @@ var agentIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // target is what a model id resolves to.
 type target struct {
+	id      string // the catalog id this target answers to
 	agent   string
 	runtime string // "" = the router decides
 	model   string // "" = the harness or rule decides
@@ -133,6 +134,8 @@ func (s *Server) resolve(ctx context.Context, model string) (target, bool) {
 	// and a stale one would offer a model whose harness has since signed out.
 	_, targets := s.catalog(ctx)
 	t, ok := targets[model]
+	// The catalog id, not the client's string, is what the response names.
+	t.id = model
 	return t, ok
 }
 
