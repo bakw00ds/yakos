@@ -80,12 +80,12 @@ var verifyRetries = 15
 // to this user. The daemon reports its workspace root, build id, the console
 // address it actually bound, and a per-boot instance nonce; all must match,
 // and the same nonce must be served by the TCP listener (GET /api/instance,
-// no token) before any token is read, so the process behind the port is the
-// process behind the socket. Windows has no peer credential: the nonce and
+// no token) before any token is read, so the process behind the bound address is
+// the process behind the socket (the REPL dials only that bound IP literal). Windows has no peer credential: the nonce and
 // build id are the whole proof there (see jsonrpc.DialTrusted).
-func verifyWorkspaceDaemon(ctx context.Context, workspace, addr string) error {
+func verifyWorkspaceDaemon(ctx context.Context, workspace, addr string) (string, error) {
 	if !daemonAliveOwned(jsonrpc.PIDPath(workspace)) {
-		return repl.ErrDaemonForeign
+		return "", repl.ErrDaemonForeign
 	}
 	// A daemon that was just spawned writes its pidfile before it listens on
 	// the socket, so a refused dial is retried briefly.
@@ -97,21 +97,28 @@ func verifyWorkspaceDaemon(ctx context.Context, workspace, addr string) error {
 			break
 		}
 		if errors.Is(err, jsonrpc.ErrUntrustedSocket) || i >= verifyRetries || ctx.Err() != nil {
-			return repl.ErrDaemonForeign
+			return "", repl.ErrDaemonForeign
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
 	if err := checkDaemonIdentity(info, workspace, addr, buildinfo.BuildID()); err != nil {
-		return err
+		return "", err
 	}
 	if info.Instance == "" {
-		return repl.ErrDaemonForeign
+		return "", repl.ErrDaemonForeign
 	}
-	got, ferr := fetchInstance(ctx, addr)
+	// Dial exactly the address the daemon reports it bound (an IP literal this
+	// process holds exclusively), never the configured spelling: "localhost"
+	// may resolve to another address family that a different listener holds.
+	bound, ok := boundLoopbackAddr(info.ConsoleAddr, addr)
+	if !ok {
+		return "", repl.ErrDaemonForeign
+	}
+	got, ferr := fetchInstance(ctx, bound)
 	if ferr != nil || !repl.SameInstance(info.Instance, got) {
-		return repl.ErrDaemonForeign
+		return "", repl.ErrDaemonForeign
 	}
-	return nil
+	return bound, nil
 }
 
 // checkDaemonIdentity is the pure decision behind verifyWorkspaceDaemon.
@@ -150,6 +157,25 @@ func sameConsolePort(bind, dial string) bool {
 	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
 }
 
+// boundLoopbackAddr returns the daemon-reported bind address when it is a
+// loopback IP literal on the same port as dial; wildcard binds and hostnames
+// are refused (the token must go to a literal address the daemon holds).
+func boundLoopbackAddr(bind, dial string) (string, bool) {
+	bh, bp, err := net.SplitHostPort(bind)
+	if err != nil {
+		return "", false
+	}
+	_, dp, err := net.SplitHostPort(dial)
+	if err != nil || bp != dp {
+		return "", false
+	}
+	ip := net.ParseIP(bh)
+	if ip == nil || !ip.IsLoopback() {
+		return "", false
+	}
+	return net.JoinHostPort(ip.String(), bp), true
+}
+
 // runStartREPL runs the REPL and returns the process exit code.
 func runStartREPL(home, project, harness, model, consoleAddr string) int {
 	stateDir := filepath.Join(home, ".yakos-state")
@@ -172,7 +198,7 @@ func runStartREPL(home, project, harness, model, consoleAddr string) int {
 
 	cl, err := repl.Connect(ctx, repl.Boot{
 		Addr: addr, StateDir: stateDir, Out: os.Stderr,
-		Verify:      func(vctx context.Context, a string) error { return verifyWorkspaceDaemon(vctx, workspace, a) },
+		Verify:      func(vctx context.Context, a string) (string, error) { return verifyWorkspaceDaemon(vctx, workspace, a) },
 		StartDaemon: func() error { return spawnDaemonFn(spawnArgs) },
 		WaitUp:      func(a string) bool { return pollConsolePort(a, 10*time.Second, 200*time.Millisecond) },
 	})

@@ -138,7 +138,7 @@ func TestOperatorIDIsStableAcrossConnects(t *testing.T) {
 	}
 }
 
-func okVerify(context.Context, string) error { return nil }
+func okVerify(_ context.Context, a string) (string, error) { return a, nil }
 
 // A daemon that fails the ownership check must never see the bearer token:
 // the listener below records every request it gets.
@@ -149,12 +149,12 @@ func TestConnectRefusesUnverifiedDaemonBeforeSendingToken(t *testing.T) {
 	addr := strings.TrimPrefix(srv.URL, "http://")
 	cases := []struct {
 		name   string
-		verify func(context.Context, string) error
+		verify func(context.Context, string) (string, error)
 		want   error
 	}{
-		{"foreign project", func(context.Context, string) error { return ErrDaemonForeign }, ErrDaemonForeign},
-		{"stale build", func(context.Context, string) error { return ErrDaemonStale }, ErrDaemonStale},
-		{"unexpected verify error", func(context.Context, string) error { return errors.New("dial /tmp/x.sock: refused") }, ErrDaemonForeign},
+		{"foreign project", func(context.Context, string) (string, error) { return "", ErrDaemonForeign }, ErrDaemonForeign},
+		{"stale build", func(context.Context, string) (string, error) { return "", ErrDaemonStale }, ErrDaemonStale},
+		{"unexpected verify error", func(context.Context, string) (string, error) { return "", errors.New("dial /tmp/x.sock: refused") }, ErrDaemonForeign},
 		{"no verifier", nil, ErrDaemonForeign},
 	}
 	for _, tc := range cases {

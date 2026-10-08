@@ -104,9 +104,12 @@ type Boot struct {
 
 	// Verify proves, over the owner-only unix socket and before the token is
 	// read, that the daemon on addr is this workspace's daemon, built from this
-	// binary. It returns nil, ErrDaemonForeign or ErrDaemonStale. Nil Verify
-	// fails closed (ErrDaemonForeign): the token is never sent unverified.
-	Verify func(ctx context.Context, addr string) error
+	// binary. On success it returns the daemon-reported bound address (an
+	// ip:port loopback literal, never a hostname): the only address the nonce
+	// and the token are then sent to. Failures are ErrDaemonForeign or
+	// ErrDaemonStale. Nil Verify fails closed (ErrDaemonForeign): the token is
+	// never sent unverified.
+	Verify func(ctx context.Context, addr string) (string, error)
 
 	Out io.Writer // progress line ("starting the yakOS daemon...")
 }
@@ -147,7 +150,7 @@ func Connect(ctx context.Context, b Boot) (*Client, error) {
 		return nil, ErrDaemonForeign
 	}
 	vctx, vcancel := context.WithTimeout(ctx, 5*time.Second)
-	verr := b.Verify(vctx, addr)
+	bound, verr := b.Verify(vctx, addr)
 	vcancel()
 	if verr != nil {
 		if errors.Is(verr, ErrDaemonStale) {
@@ -159,12 +162,15 @@ func Connect(ctx context.Context, b Boot) (*Client, error) {
 		}
 		return nil, ErrDaemonForeign
 	}
+	if !isLoopbackIPAddr(bound) {
+		return nil, ErrDaemonForeign
+	}
 	tok, err := readToken(b.StateDir)
 	if err != nil {
 		return nil, err
 	}
 	c := &Client{
-		Base:       "http://" + addr,
+		Base:       "http://" + bound,
 		Token:      tok,
 		OperatorID: loopbackowner.LoadOrCreate(b.StateDir),
 		HTTP:       newHTTP(),
@@ -205,6 +211,17 @@ func isLoopbackAddr(addr string) bool {
 	}
 	if host == "localhost" {
 		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// isLoopbackIPAddr reports whether addr is host:port with host a loopback IP
+// literal (no hostname, no wildcard).
+func isLoopbackIPAddr(addr string) bool {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || port == "" {
+		return false
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()

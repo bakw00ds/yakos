@@ -67,22 +67,22 @@ func TestVerifyWorkspaceDaemon(t *testing.T) {
 	fakeWorkspaceDaemon(t, projC, stale)
 
 	ctx := context.Background()
-	if err := verifyWorkspaceDaemon(ctx, projA, addr); err != nil {
+	if _, err := verifyWorkspaceDaemon(ctx, projA, addr); err != nil {
 		t.Fatalf("healthy daemon refused: %v", err)
 	}
-	if err := verifyWorkspaceDaemon(ctx, projA, "localhost:7890"); err != nil {
+	if _, err := verifyWorkspaceDaemon(ctx, projA, "localhost:7890"); err != nil {
 		t.Fatalf("same port on localhost refused: %v", err)
 	}
 	// projA's daemon holds the console port; a start from projB has no daemon of
 	// its own and must not reuse A's.
-	if err := verifyWorkspaceDaemon(ctx, projB, addr); !errors.Is(err, repl.ErrDaemonForeign) {
+	if _, err := verifyWorkspaceDaemon(ctx, projB, addr); !errors.Is(err, repl.ErrDaemonForeign) {
 		t.Fatalf("projB against projA's daemon: %v, want ErrDaemonForeign", err)
 	}
-	if err := verifyWorkspaceDaemon(ctx, projC, addr); !errors.Is(err, repl.ErrDaemonStale) {
+	if _, err := verifyWorkspaceDaemon(ctx, projC, addr); !errors.Is(err, repl.ErrDaemonStale) {
 		t.Fatalf("stale build: %v, want ErrDaemonStale", err)
 	}
 	// Daemon bound to another port than the one dialed.
-	if err := verifyWorkspaceDaemon(ctx, projA, "127.0.0.1:7999"); !errors.Is(err, repl.ErrDaemonForeign) {
+	if _, err := verifyWorkspaceDaemon(ctx, projA, "127.0.0.1:7999"); !errors.Is(err, repl.ErrDaemonForeign) {
 		t.Fatalf("other port: %v", err)
 	}
 }

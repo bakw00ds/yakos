@@ -119,7 +119,7 @@ func TestVerifyInstance_ImpostorOnPortGetsNoToken(t *testing.T) {
 				BuildID: buildinfo.BuildID(), Workspace: ws, ConsoleAddr: addr, Instance: "the-real-nonce"})
 			_, err := repl.Connect(context.Background(), repl.Boot{
 				Addr: addr, StateDir: stateDir,
-				Verify: func(c context.Context, a string) error { return verifyWorkspaceDaemon(c, ws, a) },
+				Verify: func(c context.Context, a string) (string, error) { return verifyWorkspaceDaemon(c, ws, a) },
 			})
 			if !errors.Is(err, repl.ErrDaemonForeign) {
 				t.Fatalf("Connect = %v, want ErrDaemonForeign", err)
@@ -142,7 +142,7 @@ func TestVerifyInstance_MatchingNonceConnects(t *testing.T) {
 	addr := spy.ln.Addr().String()
 	fakeWorkspaceDaemon(t, ws, daemonclient.VersionInfo{
 		BuildID: buildinfo.BuildID(), Workspace: ws, ConsoleAddr: addr, Instance: "the-real-nonce"})
-	if err := verifyWorkspaceDaemon(context.Background(), ws, addr); err != nil {
+	if _, err := verifyWorkspaceDaemon(context.Background(), ws, addr); err != nil {
 		t.Fatalf("healthy daemon refused: %v", err)
 	}
 	if got := spy.received(); strings.Contains(strings.ToLower(got), "authorization") {
@@ -166,7 +166,7 @@ func TestVerifyInstance_ConsoleUnboundNamesThePort(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(stateDir, "console-token"), []byte("tok-projA\n"), 0o600)
 	_, err := repl.Connect(context.Background(), repl.Boot{
 		Addr: addr, StateDir: stateDir,
-		Verify: func(c context.Context, a string) error { return verifyWorkspaceDaemon(c, projB, a) },
+		Verify: func(c context.Context, a string) (string, error) { return verifyWorkspaceDaemon(c, projB, a) },
 	})
 	var cu *repl.ErrConsoleUnbound
 	if !errors.As(err, &cu) || !errors.Is(err, repl.ErrDaemonForeign) {
@@ -221,7 +221,7 @@ func TestVerifySocketTrust_ForgedSocketRefused(t *testing.T) {
 	}
 	expectRefused := func(label string) {
 		t.Helper()
-		if err := verifyWorkspaceDaemon(context.Background(), ws, addr); !errors.Is(err, repl.ErrDaemonForeign) {
+		if _, err := verifyWorkspaceDaemon(context.Background(), ws, addr); !errors.Is(err, repl.ErrDaemonForeign) {
 			t.Fatalf("%s: %v, want ErrDaemonForeign", label, err)
 		}
 		if got := spy.received(); got != "" {
@@ -240,7 +240,7 @@ func TestVerifySocketTrust_ForgedSocketRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Control: everything private and owned, the same daemon is accepted.
-	if err := verifyWorkspaceDaemon(context.Background(), ws, addr); err != nil {
+	if _, err := verifyWorkspaceDaemon(context.Background(), ws, addr); err != nil {
 		t.Fatalf("private socket refused: %v", err)
 	}
 }
@@ -269,5 +269,77 @@ func TestDaemonAliveOwned(t *testing.T) {
 	}
 	if daemonAliveOwned(filepath.Join(d, "absent.pid")) {
 		t.Error("absent pidfile is not alive")
+	}
+}
+
+// sec-353c M1: the daemon is bound to 127.0.0.1:P and the REPL is configured
+// with "localhost:P". An impostor on [::1]:P relays the real nonce. The REPL
+// must dial only the daemon-reported bound IP literal, so the impostor gets
+// zero bytes of any request, token included.
+func TestVerifyInstance_ImpostorOnOtherFamilyGetsNothing(t *testing.T) {
+	shortRuntimeDir(t)
+	verifyRetries = 0
+	t.Cleanup(func() { verifyRetries = 15 })
+	const token = "SECRET-console-token-0123456789"
+	stateDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(stateDir, "console-token"), []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ws := t.TempDir()
+	real := newTCPSpy(t, instanceJSON("the-real-nonce"))
+	bound := real.ln.Addr().String() // 127.0.0.1:P
+	_, port, _ := net.SplitHostPort(bound)
+	iln, err := net.Listen("tcp", net.JoinHostPort("::1", port))
+	if err != nil {
+		t.Skipf("no IPv6 loopback listener on port %s: %v", port, err)
+	}
+	imp := &tcpSpy{ln: iln, reply: instanceJSON("the-real-nonce")} // relays the nonce
+	t.Cleanup(func() { _ = iln.Close() })
+	go func() {
+		for {
+			c, err := iln.Accept()
+			if err != nil {
+				return
+			}
+			go imp.serve(c)
+		}
+	}()
+	fakeWorkspaceDaemon(t, ws, daemonclient.VersionInfo{
+		BuildID: buildinfo.BuildID(), Workspace: ws, ConsoleAddr: bound, Instance: "the-real-nonce"})
+
+	got, err := verifyWorkspaceDaemon(context.Background(), ws, "localhost:"+port)
+	if err != nil || got != bound {
+		t.Fatalf("verify = %q, %v; want the bound address %q", got, err, bound)
+	}
+	_, _ = repl.Connect(context.Background(), repl.Boot{
+		Addr: "localhost:" + port, StateDir: stateDir,
+		Verify: func(c context.Context, a string) (string, error) { return verifyWorkspaceDaemon(c, ws, a) },
+	})
+	if r := imp.received(); r != "" {
+		t.Fatalf("the impostor on [::1] received bytes:\n%s", r)
+	}
+	if r := real.received(); !strings.Contains(r, "Bearer "+token) {
+		t.Fatalf("the bound listener never got the token request:\n%s", r)
+	}
+}
+
+func TestBoundLoopbackAddr(t *testing.T) {
+	for _, c := range []struct {
+		bind, dial, want string
+		ok               bool
+	}{
+		{"127.0.0.1:7890", "127.0.0.1:7890", "127.0.0.1:7890", true},
+		{"127.0.0.1:7890", "localhost:7890", "127.0.0.1:7890", true},
+		{"[::1]:7890", "localhost:7890", "[::1]:7890", true},
+		{"localhost:7890", "localhost:7890", "", false},
+		{"0.0.0.0:7890", "127.0.0.1:7890", "", false},
+		{":7890", "127.0.0.1:7890", "", false},
+		{"192.0.2.1:7890", "127.0.0.1:7890", "", false},
+		{"127.0.0.1:7891", "127.0.0.1:7890", "", false},
+	} {
+		got, ok := boundLoopbackAddr(c.bind, c.dial)
+		if got != c.want || ok != c.ok {
+			t.Errorf("boundLoopbackAddr(%q,%q) = %q,%v want %q,%v", c.bind, c.dial, got, ok, c.want, c.ok)
+		}
 	}
 }
