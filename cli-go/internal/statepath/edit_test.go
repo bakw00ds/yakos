@@ -3,6 +3,7 @@ package statepath
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -281,5 +282,59 @@ func TestBreakStale_GivesBackALiveLockAndRemovesAStaleOne(t *testing.T) {
 	}
 	if es, _ := os.ReadDir(dir); len(es) != 0 {
 		t.Errorf("debris left: %v", es)
+	}
+}
+
+// A lock its holder has just removed can refuse the next creation for a moment
+// (Windows: the name is delete-pending, so the open fails with access denied, not
+// "exists"). That is the holder letting go, not a failure: the waiter must retry,
+// where it used to give up at once with "cannot take the edit lock" (the
+// TestEditYAML_ConcurrentEditsAreAllKept flake on windows-latest, K-163).
+func TestEditYAML_ReleasePendingLockIsWaitedOut(t *testing.T) {
+	oldOpen, oldPending := openLockFile, lockReleasePending
+	defer func() { openLockFile, lockReleasePending = oldOpen, oldPending }()
+	refusals := 3
+	openLockFile = func(lock string) (*os.File, error) {
+		if refusals > 0 {
+			refusals--
+			return nil, &fs.PathError{Op: "open", Path: lock, Err: fs.ErrPermission}
+		}
+		return oldOpen(lock)
+	}
+	lockReleasePending = func(err error) bool { return errors.Is(err, fs.ErrPermission) }
+
+	_, file := newState(t)
+	if err := SecureDir(filepath.Dir(file)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := EditYAML(file, 1<<16, setKey("a", "1"), nil); err != nil {
+		t.Fatalf("a release-pending refusal was not waited out: %v", err)
+	}
+	if refusals != 0 {
+		t.Errorf("the refusals were not retried: %d left", refusals)
+	}
+
+	// A refusal that never clears is still a failure, after the wait.
+	oldWait := editLockWait
+	editLockWait = 50 * time.Millisecond
+	defer func() { editLockWait = oldWait }()
+	openLockFile = func(lock string) (*os.File, error) {
+		return nil, &fs.PathError{Op: "open", Path: lock, Err: fs.ErrPermission}
+	}
+	if _, err := EditYAML(file, 1<<16, setKey("b", "1"), nil); err == nil || !strings.Contains(err.Error(), "cannot take the edit lock") {
+		t.Fatalf("a permanent refusal: err = %v, want cannot take the edit lock", err)
+	}
+
+	// Off Windows nothing is release-pending, so the same refusal fails at once.
+	lockReleasePending = oldPending
+	if runtime.GOOS != "windows" {
+		start := time.Now()
+		editLockWait = 5 * time.Second
+		if _, err := EditYAML(file, 1<<16, setKey("c", "1"), nil); err == nil {
+			t.Fatal("expected a failure")
+		}
+		if time.Since(start) > time.Second {
+			t.Error("a refusal that is not release-pending was waited on")
+		}
 	}
 }

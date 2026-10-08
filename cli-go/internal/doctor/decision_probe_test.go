@@ -246,3 +246,58 @@ func TestDecisionProbe_ProjectProviderIsIgnoredWithWarning(t *testing.T) {
 		t.Errorf("the environment must enable it:\n%s", out)
 	}
 }
+
+// K-177: the routing shadow is silent in a plain doctor run while it is off, is
+// always stated by --probe-decision, and is a warning in both once the user
+// opts in.
+func TestDoctor_RoutingShadowState(t *testing.T) {
+	lib, proj, home := probeFixture(t, probeSet, "")
+	cfg := Config{HomeDir: home, YakosLib: lib, Getwd: func() (string, error) { return proj, nil }}
+
+	out, _ := runProbe(t, cfg, nil)
+	if !strings.Contains(out, "routing shadow: off (default)") {
+		t.Errorf("probe does not say it is off:\n%s", out)
+	}
+	var plain bytes.Buffer
+	plainCfg := cfg
+	plainCfg.Writer, plainCfg.LookPath, plainCfg.Environ = &plain, noLookPath, func(string) string { return "" }
+	if _, err := Run(plainCfg); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(plain.String(), "routing shadow") {
+		t.Errorf("a plain run prints the shadow while it is off:\n%s", plain.String())
+	}
+
+	writeFile(t, filepath.Join(home, ".yakos-state", "decision-policy.yml"), "routing_shadow: true\n")
+	if err := os.Chmod(filepath.Join(home, ".yakos-state", "decision-policy.yml"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out, rep := runProbe(t, cfg, nil)
+	if !strings.Contains(out, "routing shadow: on:") || rep.Warnings == 0 {
+		t.Errorf("probe with the opt-in (warnings %d):\n%s", rep.Warnings, out)
+	}
+	plain.Reset()
+	if _, err := Run(plainCfg); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plain.String(), "Jev routing shadow") || !strings.Contains(plain.String(), "TYPESAFE_API_KEY is not set") {
+		t.Errorf("a plain run hides an enabled shadow:\n%s", plain.String())
+	}
+}
+
+// sec-370 HIGH: the doctor reads the opt-in from the home state dir only. A
+// policy planted behind YAKOS_DISPATCH_LOG must not read as on.
+func TestDoctor_RoutingShadowIgnoresDispatchLogEnv(t *testing.T) {
+	lib, proj, home := probeFixture(t, probeSet, "")
+	planted := t.TempDir()
+	writeFile(t, filepath.Join(planted, "decision-policy.yml"), "routing_shadow: true\n")
+	if err := os.Chmod(filepath.Join(planted, "decision-policy.yml"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{HomeDir: home, YakosLib: lib, Getwd: func() (string, error) { return proj, nil }}
+	out, rep := runProbe(t, cfg, map[string]string{"YAKOS_DISPATCH_LOG": planted})
+	if !strings.Contains(out, "routing shadow: off (default)") || strings.Contains(out, "routing shadow: on") {
+		t.Errorf("a planted policy turned the shadow on:\n%s", out)
+	}
+	_ = rep
+}

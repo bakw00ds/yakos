@@ -10,5 +10,6 @@ reason: default chain: runtime claude by default
 fallback_from: -
 route_class: subagent
 policy_sha: 3f4135ea62d49d5ac61c14051d709ac1dc84442814bc2d268d3e4d3abcc09a72
+jev_shadow: off
 env_class: subagent
 env: CLAUDE_CODE_SUBAGENT_MODEL=haiku

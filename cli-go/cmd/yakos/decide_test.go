@@ -417,24 +417,38 @@ func TestDecide_BinaryReachesGoRouterWithImplUnset(t *testing.T) {
 }
 
 // Review F7: shadow no longer blocks for 10 s by default.
+//
+// The time is read where the cap acts: the server notes when the request arrived
+// and when the client gave up on it, so process start-up and the runner's scheduling
+// (windows-latest took 5.1 s end to end for a 1.5 s cap, K-163) are not counted. The
+// old default was the 10 s maximum, so anything under 6 s is the cap at work.
 func TestDecide_ShadowDefaultDeadlineIsCapped(t *testing.T) {
+	type held struct{ d time.Duration }
+	heldCh := make(chan held, 4)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		arrived := time.Now()
+		_, _ = io.Copy(io.Discard, r.Body) // the server notices a closed connection only once the body is read
 		select {
 		case <-r.Context().Done():
-		case <-time.After(8 * time.Second):
+		case <-time.After(30 * time.Second):
 		}
+		heldCh <- held{time.Since(arrived)}
 	}))
 	defer srv.Close()
 	f := newDecideFixture(t)
 	f.env[decision.KeyEnv] = "k"
 	f.env[decision.BaseURLEnv] = srv.URL
-	start := time.Now()
 	code, out, _ := f.run(`{"tool":"x"}`, "demo", "--provider", "jev", "--shadow")
 	if code != 0 || nullReason(t, out) != "timeout" {
 		t.Fatalf("code=%d out=%s", code, out)
 	}
-	if d := time.Since(start); d > 2500*time.Millisecond {
-		t.Errorf("shadow default blocked for %v (want ~1.5 s)", d)
+	select {
+	case h := <-heldCh:
+		if h.d < time.Second || h.d > 6*time.Second {
+			t.Errorf("the client gave up on the request after %v (want ~1.5 s, far under the 10 s maximum)", h.d)
+		}
+	case <-time.After(time.Minute):
+		t.Fatal("the server never saw the client give up")
 	}
 }
 

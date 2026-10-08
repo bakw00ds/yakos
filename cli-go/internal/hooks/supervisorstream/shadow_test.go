@@ -249,8 +249,14 @@ func TestShadow_HugeStateNeverBlocksTheHook(t *testing.T) {
 	work, proj := t.TempDir(), t.TempDir()
 	writeYAML(t, proj, ssYML+"decisions:\n  provider: mock\n")
 	script := filepath.Join(t.TempDir(), "yakos")
-	// A child that never reads anything and never exits within the test.
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 30\n"), 0o755); err != nil {
+	// A child that never reads anything and does not exit until the test lets it:
+	// the hook returning before that is the proof it did not wait for the child, so
+	// the proof needs no stopwatch (the old 3 s limit failed on a loaded runner,
+	// where building and writing the huge state alone can take that long).
+	release := filepath.Join(t.TempDir(), "release")
+	t.Cleanup(func() { _ = os.WriteFile(release, nil, 0o600) }) // a failing test leaves no child waiting
+	body := "#!/bin/sh\nwhile [ ! -e '" + release + "' ]; do sleep 0.05; done\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	h := supervisorstream.New(work, proj)
@@ -267,8 +273,11 @@ func TestShadow_HugeStateNeverBlocksTheHook(t *testing.T) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(3 * time.Second):
+	case <-time.After(2 * time.Minute): // a hang guard, not a timing assertion
 		t.Fatal("the hook blocked on the shadow launch")
+	}
+	if _, err := os.Stat(release); err == nil {
+		t.Fatal("the release file exists before the hook returned")
 	}
 	files, _ := filepath.Glob(filepath.Join(home, ".yakos-state", "shadow-state-*.json"))
 	if len(files) != 1 {
