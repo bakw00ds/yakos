@@ -288,7 +288,15 @@ func TestFeedScan_OversizeEventBounded(t *testing.T) {
 	// head+tail window (documented bound); one at the head is found.
 	// -race makes the regexes ~20x slower; this test is about the window, not time.
 	oldNew := newFeedScannerHook
-	newFeedScannerHook = func(f *feedScanner) { f.deadline = 30 * time.Second }
+	var scannedBytes atomic.Int64 // what the scanner is actually asked to look at
+	newFeedScannerHook = func(f *feedScanner) {
+		f.deadline = 30 * time.Second
+		inner := f.scan
+		f.scan = func(chunk string) []string {
+			scannedBytes.Add(int64(len(chunk)))
+			return inner(chunk)
+		}
+	}
 	t.Cleanup(func() { newFeedScannerHook = oldNew })
 	pad := strings.Repeat("lorem ipsum ", 40*1024)
 	// The middle payload sits ~120 KB in: inside the parser's own 256 KB cap, so
@@ -303,7 +311,6 @@ func TestFeedScan_OversizeEventBounded(t *testing.T) {
 		}
 		return "cat '" + p + "'\n"
 	}
-	start := time.Now()
 	res, err := feedStream(t, &scriptAdapter{"codex", catFile(mid)}, func(StreamChunk) {})
 	if err != nil || res.ExitCode != 0 {
 		t.Fatal(err, res.ExitCode)
@@ -318,8 +325,12 @@ func TestFeedScan_OversizeEventBounded(t *testing.T) {
 	if n := len(findings(t, work)); n != 1 {
 		t.Errorf("head of an oversize event not scanned: %d findings", n)
 	}
-	if d := time.Since(start); d > 10*time.Second {
-		t.Errorf("oversize events took %v", d)
+	// Bounded by what is scanned, not by the wall clock: each ~900 KB event
+	// reaches the scanner as at most its head+tail window (feedScanEventBytes) cut
+	// into overlapping chunks, so two events cost a few tens of KB, not 1.8 MB.
+	perEvent := int64(feedScanEventBytes + 2*feedScanOverlap*(feedScanEventBytes/feedScanChunkBytes+1))
+	if got := scannedBytes.Load(); got > 2*perEvent {
+		t.Errorf("oversize events: %d bytes scanned, want at most %d", got, 2*perEvent)
 	}
 }
 

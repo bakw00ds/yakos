@@ -304,9 +304,14 @@ type Policy struct {
 	// Provider is the user-level switch that turns a provider on ("jev", "mock").
 	// It lives here, outside any repository, because a cloned project must not
 	// be able to start sending data to a third party by itself.
-	Provider string       `yaml:"provider"`
-	Budget   BudgetConfig `yaml:"budget"`
-	Egress   EgressConfig `yaml:"egress"`
+	Provider string `yaml:"provider"`
+	// RoutingShadow turns on the K-177 routing shadow: after a dispatch is
+	// routed, a bounded slice of the task text is sent to Jev and the suggested
+	// tier is written to the ledger. It never changes a route. Default false;
+	// like Provider it can only be set here, in the trusted user-level file.
+	RoutingShadow bool         `yaml:"routing_shadow"`
+	Budget        BudgetConfig `yaml:"budget"`
+	Egress        EgressConfig `yaml:"egress"`
 }
 
 // DefaultPolicy is the documented ceiling: 2000 calls, $1/day, strict egress.
@@ -362,6 +367,7 @@ func LoadPolicy(path string) (Policy, error) {
 	}
 	p.Egress.NeverPaths = got.Egress.NeverPaths
 	p.Provider = strings.TrimSpace(got.Provider)
+	p.RoutingShadow = got.RoutingShadow
 	return p, nil
 }
 
@@ -426,11 +432,15 @@ func Tighten(cfg Config, p Policy) Config {
 // ---- state-dir files --------------------------------------------------------
 
 const (
-	LogFileName      = "decision-log.ndjson"
-	BreakerFileName  = "decision-breaker.json"
-	BudgetFileName   = "decision-budget.json"
-	PromotionsName   = "decision-promotions.ndjson"
-	killSwitchEnvVar = "YAKOS_DECISION_DISABLE"
+	LogFileName     = "decision-log.ndjson"
+	BreakerFileName = "decision-breaker.json"
+	BudgetFileName  = "decision-budget.json"
+	// The routing shadow (K-177) keeps its own breaker and budget so it can
+	// never push the supervisor pre-filter onto its fallback.
+	ShadowBreakerFileName = "decision-shadow-breaker.json"
+	ShadowBudgetFileName  = "decision-shadow-budget.json"
+	PromotionsName        = "decision-promotions.ndjson"
+	killSwitchEnvVar      = "YAKOS_DECISION_DISABLE"
 	// EnvMock selects the mock provider's fixture (file or directory).
 	EnvMock = "YAKOS_DECISION_MOCK"
 	// EnvProvider overrides decisions.provider.
@@ -447,11 +457,15 @@ func (s StatePaths) dir() string {
 	}
 	return statepath.Dir()
 }
-func (s StatePaths) Log() string        { return filepath.Join(s.dir(), LogFileName) }
-func (s StatePaths) Breaker() string    { return filepath.Join(s.dir(), BreakerFileName) }
-func (s StatePaths) Budget() string     { return filepath.Join(s.dir(), BudgetFileName) }
-func (s StatePaths) Promotions() string { return filepath.Join(s.dir(), PromotionsName) }
-func (s StatePaths) Policy() string     { return filepath.Join(s.dir(), PolicyFileName) }
+func (s StatePaths) Log() string     { return filepath.Join(s.dir(), LogFileName) }
+func (s StatePaths) Breaker() string { return filepath.Join(s.dir(), BreakerFileName) }
+func (s StatePaths) Budget() string  { return filepath.Join(s.dir(), BudgetFileName) }
+func (s StatePaths) ShadowBreaker() string {
+	return filepath.Join(s.dir(), ShadowBreakerFileName)
+}
+func (s StatePaths) ShadowBudget() string { return filepath.Join(s.dir(), ShadowBudgetFileName) }
+func (s StatePaths) Promotions() string   { return filepath.Join(s.dir(), PromotionsName) }
+func (s StatePaths) Policy() string       { return filepath.Join(s.dir(), PolicyFileName) }
 
 // KillSwitch reports whether YAKOS_DECISION_DISABLE=1 (checked before
 // anything else).
@@ -521,7 +535,7 @@ func (e *Engine) Execute(ctx context.Context, set *QuestionSet, state any, mode,
 			rec.Status = rec.ErrorClass
 		} else {
 			rec.Status = "ok"
-			rec.Model = res.Model
+			rec.Model = loggedModel(res.Model, set.Model)
 			rec.InputTokens, rec.OutputTokens = res.Usage.InputTokens, res.Usage.OutputTokens
 			rec.CostUSD = res.CostUSD
 			rec.Answers = SummarizeAnswers(res.Answers)
@@ -585,4 +599,26 @@ func newID() string {
 		return "0000000000000000"
 	}
 	return hex.EncodeToString(b[:])
+}
+
+// maxLoggedModel bounds the model string written to the decision log.
+const maxLoggedModel = 64
+
+// loggedModel is the model name that reaches decision-log.ndjson. The provider
+// reports it, so a hostile endpoint controls it: it is kept only when it is the
+// pinned model, otherwise it is reduced to at most 64 bytes of [a-z0-9.-]
+// (anything else is dropped), so a response cannot write a large or
+// secret-shaped line into the log.
+func loggedModel(got, pinned string) string {
+	if got == pinned {
+		return got
+	}
+	b := make([]byte, 0, maxLoggedModel)
+	for i := 0; i < len(got) && len(b) < maxLoggedModel; i++ {
+		c := got[i]
+		if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '.' || c == '-' {
+			b = append(b, c)
+		}
+	}
+	return string(b)
 }

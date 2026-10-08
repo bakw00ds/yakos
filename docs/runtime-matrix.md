@@ -896,8 +896,8 @@ against a redacted state and returns probabilities. yakOS integrates it as a
 named in `runtime:` or `runtime-fallback:` frontmatter, or offered in the
 console chat runtime list. `yakos validate` and `yakos agent lint` reject
 `runtime: jev` with a hard error. A shadow-only `routing` question (a tier
-suggestion recorded on the ledger, never acted on) is decided but not built; see
-[routing.md](routing.md#jev-and-routing-shadow-only-not-built).
+suggestion recorded on the ledger, never acted on) is built and opt-in (K-177); see
+[routing.md](routing.md#jev-and-routing-shadow-only-opt-in).
 
 ## Adding a new runtime
 

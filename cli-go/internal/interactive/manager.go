@@ -89,6 +89,7 @@ type Manager struct {
 
 	cap            int
 	idleTimeout    time.Duration
+	now            func() time.Time
 	reaperInterval time.Duration
 
 	// onError is called when a session's readLoop exits unexpectedly.
@@ -120,6 +121,10 @@ type ManagerConfig struct {
 	// Callers should route an error SSEEvent to the browser via hub.Route.
 	// May be nil (no error callback).
 	OnError func(conversationID, sessionID, operatorID, msg string)
+
+	// Now is the clock the idle reaper reads; nil means time.Now. Tests step it
+	// instead of racing a short IdleTimeout against the scheduler.
+	Now func() time.Time
 }
 
 // NewManager creates a SessionManager and starts the idle-reaper goroutine.
@@ -143,7 +148,11 @@ func NewManager(ctx context.Context, cfg ManagerConfig) *Manager {
 		idleTimeout:    idleTimeout,
 		reaperInterval: reaperInterval,
 		onError:        cfg.OnError,
+		now:            cfg.Now,
 		stop:           make(chan struct{}),
+	}
+	if m.now == nil {
+		m.now = time.Now
 	}
 	go m.reaper(ctx)
 	return m
@@ -557,7 +566,7 @@ func (m *Manager) reaper(ctx context.Context) {
 
 // reapOnce closes all sessions whose lastActivity is older than m.idleTimeout.
 func (m *Manager) reapOnce() {
-	cutoff := time.Now().Add(-m.idleTimeout)
+	cutoff := m.now().Add(-m.idleTimeout)
 
 	// Collect stale entries under the lock; close them outside.
 	m.mu.Lock()

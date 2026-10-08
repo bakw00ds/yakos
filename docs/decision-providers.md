@@ -364,9 +364,15 @@ The client is written against the published API at
 https://docs.typesafe.ai/api and tested against local servers and the mock
 provider. CI has no key; live calls happen only on an operator machine.
 
-### Routing surface: planned, shadow-only
+### Routing surface: `routing-tier`, shadow-only, opt-in
 
-The tier-selection surface (k111 design section 2.5) is decided as shadow-only and
-is not built. See [routing.md](routing.md#jev-and-routing-shadow-only-not-built):
-the suggestion would be recorded as `tier_suggested_by_jev` on the ledger row and
-would never change a route.
+K-177 built the tier-selection surface (k111 design section 2.5) as shadow-only.
+It is the one automatic caller outside the supervisor hook, and the only one that
+sends task text. It is off by default and enabled only by `routing_shadow: true`
+in `~/.yakos-state/decision-policy.yml`; a project file cannot enable it. The
+question set is `lib/decisions/routing-tier.yaml` (one `choice` question,
+`haiku`, `sonnet` or `opus`). The suggestion is recorded as `tier_suggested_by_jev`
+on the ledger row and never changes a route. The payload (agent name, route class,
+first 2 KiB of the task), the sensitive-task skip, the 3 second no-retry bound and
+the off-critical-path design are in
+[routing.md](routing.md#jev-and-routing-shadow-only-opt-in).

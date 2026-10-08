@@ -59,6 +59,7 @@ type Account struct {
 	started  time.Time
 	opened   bool
 	finished bool
+	shadow   *jevShadow // K-177; nil unless the user opted in
 }
 
 // NewAccount creates the ledger entry for req, begun now. It writes nothing.
@@ -84,7 +85,13 @@ func (a *Account) Started() time.Time { return a.started }
 func (a *Account) Start() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	first := !a.opened
 	a.startLocked()
+	if first {
+		// Only an explicit Start begins the shadow, never the implicit start
+		// inside Finish: that dispatch has already run.
+		a.shadow = startJevShadow(a.req)
+	}
 }
 
 func (a *Account) startLocked() {
@@ -117,7 +124,7 @@ func (a *Account) FinishAt(res Result, end time.Time) {
 			res.DurationS = d
 		}
 	}
-	writeFinished(a.req, res, end, a.path)
+	writeFinishedWith(a.req, res, end, a.path, a.shadow.collect())
 }
 
 // Refuse writes a route_refused event: a sensitive request that no permitted
@@ -210,7 +217,14 @@ func writeStarted(req Request, ts time.Time, logPath string) {
 // writeFinished writes a dispatch_finished event to the dispatch-log, applying
 // the accounting rules (ledgerFields). Only Account calls it.
 func writeFinished(req Request, res Result, ts time.Time, logPath string) {
-	line, err := json.Marshal(buildFinished(req, res, ts))
+	writeFinishedWith(req, res, ts, logPath, jevOutcome{})
+}
+
+// writeFinishedWith is writeFinished plus the K-177 shadow outcome.
+func writeFinishedWith(req Request, res Result, ts time.Time, logPath string, jev jevOutcome) {
+	ev := buildFinished(req, res, ts)
+	ev.TierSuggestedByJev, ev.JevShadow = jev.Tier, jev.Status
+	line, err := json.Marshal(ev)
 	if err != nil {
 		return // not fatal
 	}

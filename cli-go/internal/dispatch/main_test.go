@@ -39,8 +39,9 @@ func TestMain(m *testing.M) {
 	}
 	runtimeProbe = func(context.Context, string) probeResult { return probeResult{OK: true} }
 	stateDefaultRuntime = func() (string, string) { return "", "" }
-	routerPolicyDir = func() string { return "" } // never the operator's real policy
-	probeTTL = 0                                  // no answer is reused between tests
+	routerPolicyDir = func() string { return "" }   // never the operator's real policy
+	jevShadowStateDir = func() string { return "" } // K-177: the shadow is off, never the operator's real policy
+	probeTTL = 0                                    // no answer is reused between tests
 	rt.SetAliasTableForTest(testAliasTable())
 	os.Exit(m.Run())
 }

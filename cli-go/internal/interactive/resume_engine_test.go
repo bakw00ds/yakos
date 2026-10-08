@@ -288,7 +288,18 @@ func engineFactory(t *testing.T) interactive.EngineFactory {
 func TestManager_EnsureEngine_CapOwnerReuseAndReap(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m := interactive.NewManager(ctx, interactive.ManagerConfig{Cap: 2, IdleTimeout: 150 * time.Millisecond, ReaperInterval: 30 * time.Millisecond})
+	// The reaper's clock is the test's: with a 150 ms IdleTimeout and a ticker, a
+	// scheduler stall between two steps below reaped the engines before the cap and
+	// owner checks ran (2 of 20 runs, K-163). The ticker never fires; the test runs
+	// the scan itself, after stepping the clock past the idle time.
+	var mu sync.Mutex
+	offset := time.Duration(0)
+	now := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return time.Now().Add(offset)
+	}
+	m := interactive.NewManager(ctx, interactive.ManagerConfig{Cap: 2, IdleTimeout: time.Hour, ReaperInterval: time.Hour, Now: now})
 	defer m.Stop()
 	f := engineFactory(t)
 
@@ -311,19 +322,20 @@ func TestManager_EnsureEngine_CapOwnerReuseAndReap(t *testing.T) {
 	if !m.AccountsOwnTurns("a", "alice") || m.AccountsOwnTurns("a", "mallory") || m.AccountsOwnTurns("zz", "alice") {
 		t.Error("AccountsOwnTurns must be true only for the owner of a live resume engine")
 	}
-	// Idle reaper closes them; the slot frees up.
-	deadline := time.Now().Add(5 * time.Second)
-	for m.ActiveCount() != 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("idle engines not reaped")
-		}
-		time.Sleep(20 * time.Millisecond)
+	// A scan before the idle time reaps nothing.
+	m.ReapOnce()
+	if n := m.ActiveCount(); n != 2 {
+		t.Fatalf("a scan inside the idle time reaped: %d engines left, want 2", n)
 	}
-	// The reaper drops the entry and then closes the engine: the count reaches
-	// zero a moment before the close finishes.
-	for closeBy := time.Now().Add(5 * time.Second); !e1.IsClosed() && time.Now().Before(closeBy); {
-		time.Sleep(20 * time.Millisecond)
+	// Past the idle time the scan closes them; the slot frees up.
+	mu.Lock()
+	offset = 2 * time.Hour
+	mu.Unlock()
+	m.ReapOnce()
+	if n := m.ActiveCount(); n != 0 {
+		t.Fatalf("idle engines not reaped: %d left", n)
 	}
+	// ReapOnce closes the engine before it returns.
 	if !e1.IsClosed() {
 		t.Error("reaped engine not closed")
 	}
