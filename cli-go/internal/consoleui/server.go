@@ -283,6 +283,11 @@ type Config struct {
 	// banner when this flag is set and the console is in networked mode.
 	AllowNetworkedBash bool
 
+	// HooksEndpoint, when non-nil, mounts POST /api/hooks/run/{name} (K-145).
+	// serve.go sets it only when hooks_endpoint: true is in the trusted router
+	// policy; nil (the default) leaves the route unregistered (404).
+	HooksEndpoint *HooksEndpoint
+
 	// WorktreeManager, when non-nil, enables the IDE diff-review mode.
 	// When nil, review-mode dispatch is unavailable (the endpoints return 503).
 	//
@@ -1215,6 +1220,15 @@ func (s *Server) registerRoutes() {
 	// and cannot be made retry-safe. Callers must not retry without human review.
 	bashH := newBashHandlers(s.cfg)
 	s.mux.HandleFunc("/api/console/bash", requireRoleFunc(netid.RoleAdmin, bashH.handleBash))
+
+	// ---- K-145: hooks-as-a-service (loopback, nonce-gated, off by default) ----
+	if s.cfg.HooksEndpoint != nil {
+		if hh, err := newHooksHandler(s.cfg.HooksEndpoint, s.cfg.addr()); err != nil {
+			slog.Warn("consoleui: hooks endpoint disabled", "err", err)
+		} else {
+			s.mux.Handle(hooksRoutePrefix, requireRole(netid.RoleDispatch, hh))
+		}
+	}
 
 	// ---- ADR-0008 Phase 1: PTY terminal session endpoints -------------------
 	// Mounted ONLY when TerminalManager is non-nil (i.e. --share-terminal was

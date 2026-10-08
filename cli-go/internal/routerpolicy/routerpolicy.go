@@ -55,6 +55,11 @@ type File struct {
 	// case-insensitively; there are no wildcards.
 	AllowUnsandboxedRuntimes []string `yaml:"allow_unsandboxed_runtimes,omitempty"`
 
+	// HooksEndpoint, when true, turns on the loopback POST /api/hooks/run/{name}
+	// endpoint of `yakos serve` (K-145). Off by default; like every key here it
+	// is honoured only from this owner-only file, never from a project.
+	HooksEndpoint bool `yaml:"hooks_endpoint,omitempty"`
+
 	// Rules is the raw `rules:` node, decoded and validated rule by rule by the
 	// router. Zero when the key is absent.
 	Rules yaml.Node `yaml:"rules,omitempty"`
@@ -167,6 +172,13 @@ func FileSHA(stateDir string) string {
 		return ""
 	}
 	return f.SHA
+}
+
+// HooksEndpointEnabled reports whether the trusted policy in stateDir sets
+// hooks_endpoint: true. A missing, untrusted or unparsable file is false.
+func HooksEndpointEnabled(stateDir string) bool {
+	p, err := Load(stateDir)
+	return err == nil && p.HooksEndpoint
 }
 
 // AllowsUnsandboxed reports whether the trusted policy in stateDir lists

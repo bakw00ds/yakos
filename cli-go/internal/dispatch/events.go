@@ -239,6 +239,9 @@ type finishedEvent struct {
 	PolicySHA        string  `json:"policy_sha,omitempty"`
 	Surface          string  `json:"surface,omitempty"`
 	NativeSessionID  string  `json:"native_session_id,omitempty"`
+	// HooksUntrusted marks a codex run whose yakOS profile hooks.json was not the
+	// file yakos installs, so the hook gate was off (K-145). Additive-optional.
+	HooksUntrusted bool `json:"hooks_untrusted,omitempty"`
 	// K-146 event-scan fields: finding count and the reason the scan cancelled
 	// the run (a fixed "kill_on_critical:<label>" string). Omitted when empty.
 	ScanFindings int    `json:"scan_findings,omitempty"`

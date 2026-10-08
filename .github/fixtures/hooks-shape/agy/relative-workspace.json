@@ -1,0 +1,24 @@
+{
+  "envelope": {
+    "conversationId": "c1",
+    "modelName": "m",
+    "toolCall": {
+      "args": {},
+      "name": "run_command"
+    },
+    "transcriptPath": "/t",
+    "workspacePaths": [
+      "rel"
+    ]
+  },
+  "want": {
+    "inputs": [
+      {
+        "event": "PreToolUse",
+        "tool": "Bash",
+        "tool_input": {},
+        "work_dir": ""
+      }
+    ]
+  }
+}

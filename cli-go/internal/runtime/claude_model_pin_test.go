@@ -130,3 +130,15 @@ func TestClaudeExecCmd_ModelAliasNeverAbstract(t *testing.T) {
 		t.Errorf("supervisor haiku -> %q", got)
 	}
 }
+
+// B1 touches codex and agy only: the claude chat command is byte-identical
+// whatever AgentName says.
+func TestClaudeChatExecCmd_IgnoresAgentName(t *testing.T) {
+	a := &ClaudeAdapter{}
+	proj := t.TempDir()
+	base := a.ChatExecCmd(context.Background(), ChatDispatchRequest{Project: proj, UserText: "hi"})
+	named := a.ChatExecCmd(context.Background(), ChatDispatchRequest{Project: proj, UserText: "hi", AgentName: "backend"})
+	if strings.Join(base.Args, "\x00") != strings.Join(named.Args, "\x00") || strings.Join(base.Env, "\x00") != strings.Join(named.Env, "\x00") {
+		t.Error("claude chat command changed with AgentName")
+	}
+}
