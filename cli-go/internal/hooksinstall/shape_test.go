@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -23,7 +24,17 @@ func fakeBin(t *testing.T) string {
 	return r
 }
 
-const renderBin = "/opt/yakos/bin/yakos"
+// renderBin is an absolute path on the host OS (filepath.IsAbs is false for a
+// POSIX literal on Windows).
+var renderBin = func() string {
+	if runtime.GOOS == "windows" {
+		return `C:\opt\yakos\bin\yakos.exe`
+	}
+	return "/opt/yakos/bin/yakos"
+}()
+
+// jsonText is s as it appears inside a JSON string (backslashes doubled).
+func jsonText(s string) string { return strings.ReplaceAll(s, `\`, `\\`) }
 
 func TestRenderShapeFileGoldenCommands(t *testing.T) {
 	for _, h := range []string{HarnessCodex, HarnessAgy} {
@@ -36,7 +47,7 @@ func TestRenderShapeFileGoldenCommands(t *testing.T) {
 			t.Fatalf("%s: not byte-stable", h)
 		}
 		for _, name := range []string{"budget-guard", "path-allowlist", "secret-scan", "supervisor-stream"} {
-			want := `"command": "` + renderBin + ` hook run --shape ` + h + ` ` + name + `"`
+			want := `"command": "` + jsonText(renderBin) + ` hook run --shape ` + h + ` ` + name + `"`
 			if !strings.Contains(string(b), want) {
 				t.Errorf("%s: missing %s", h, want)
 			}
@@ -243,7 +254,7 @@ func TestInstallShapeWritesAbsoluteBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(p)
-	if !strings.Contains(string(got), `"command": "`+bin+` hook run --shape codex budget-guard"`) {
+	if !strings.Contains(string(got), `"command": "`+jsonText(bin)+` hook run --shape codex budget-guard"`) {
 		t.Errorf("absolute path missing:\n%s", got)
 	}
 	for _, bad := range []string{"yakos", "./yakos", "bin/yakos", "../yakos"} {
