@@ -40,27 +40,27 @@ var (
 // Match is what a rule selects on. Every key that is set must hold (AND); a key
 // left out matches anything.
 type Match struct {
-	Class       string   // route class, e.g. "default" or "chat"
-	Agent       string   // exact agent name
-	Domain      string   // exact agent domain
-	TaskBytesGT int64    // task is longer than this many bytes; 0 = off
-	Tags        []string // every listed tag is present
+	Class       string   `json:"class,omitempty"`         // route class, e.g. "default" or "chat"
+	Agent       string   `json:"agent,omitempty"`         // exact agent name
+	Domain      string   `json:"domain,omitempty"`        // exact agent domain
+	TaskBytesGT int64    `json:"task_bytes_gt,omitempty"` // task is longer than this many bytes; 0 = off
+	Tags        []string `json:"tags,omitempty"`          // every listed tag is present
 }
 
 // Action is what a matching rule does. Unset keys leave the default chain's
 // choice alone.
 type Action struct {
-	Runtime   string   // runtime to prefer
-	Model     string   // model alias or id, validated per runtime at dispatch
-	Fallbacks []string // runtimes to try after Runtime, replacing the default's
+	Runtime   string   `json:"runtime,omitempty"`   // runtime to prefer
+	Model     string   `json:"model,omitempty"`     // model alias or id, validated per runtime at dispatch
+	Fallbacks []string `json:"fallbacks,omitempty"` // runtimes to try after Runtime, replacing the default's
 }
 
 // Rule is one validated policy rule.
 type Rule struct {
-	ID           string // R1..R6, by position among the rules that were read
-	Match        Match
-	Action       Action
-	OverridePins bool // outrank the agent's frontmatter runtime: and model:
+	ID           string `json:"id"` // R1..R6, by position among the rules that were read
+	Match        Match  `json:"match"`
+	Action       Action `json:"action"`
+	OverridePins bool   `json:"override_pins"` // outrank the agent's frontmatter runtime: and model:
 }
 
 // Policy is the router's view of the policy file.
@@ -156,6 +156,16 @@ func BuildPolicy(f routerpolicy.File) Policy {
 		p.SHA = f.SHA
 	}
 	return p
+}
+
+// CheckPolicy is the policy writer's gate (routerpolicy.Edit): nil only when
+// every rule in f is read as written, so a write never produces a file in which
+// the router would silently drop a rule. The message names no path.
+func CheckPolicy(f routerpolicy.File) error {
+	if w := BuildPolicy(f).Warnings; len(w) > 0 {
+		return errors.New(w[0])
+	}
+	return nil
 }
 
 // validate checks one rule. why is "" when the rule is good.

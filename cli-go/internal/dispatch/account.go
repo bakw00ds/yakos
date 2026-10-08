@@ -25,6 +25,7 @@ package dispatch
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"strings"
 	"sync"
@@ -416,4 +417,59 @@ func logText(s string, max int) string {
 		clean = clean[:cut]
 	}
 	return clean
+}
+
+// ConfigChange is one write to an owner-only policy file, for the audit trail.
+type ConfigChange struct {
+	// File is the file's base name; only the three policy files are accepted.
+	File string
+	// Action is a fixed-vocabulary verb such as "models.enable" or
+	// "router.policy.set".
+	Action string
+	// SHABefore and SHAAfter are the hex SHA-256 of the file's bytes around the
+	// write ("" for a file that did not exist).
+	SHABefore, SHAAfter string
+	// Surface is "cli" or "console".
+	Surface string
+}
+
+// auditFiles are the files a ConfigChange may name: the router policy, the model
+// registry overlay and the budget policy. The event carries the base name only,
+// never a path.
+var auditFiles = map[string]bool{"router-policy.yml": true, "model-registry.yml": true, "budget-policy.yml": true}
+
+type configChangedEvent struct {
+	Type       string `json:"type"`
+	Ts         string `json:"ts"`
+	OperatorID string `json:"operator_id"`
+	File       string `json:"file"`
+	Action     string `json:"action"`
+	SHABefore  string `json:"policy_sha_before"`
+	SHAAfter   string `json:"policy_sha_after"`
+	Surface    string `json:"surface"`
+}
+
+// ConfigChanged appends a config_changed event: who (the request's OperatorID),
+// which policy file, what was done and the file's sha before and after. It is the
+// audit line of every policy write (K-153). It refuses to record a change to a
+// file that is not one of the three, and returns the error when the log cannot be
+// written, so the caller can tell the operator the write went unaudited.
+func (a *Account) ConfigChanged(c ConfigChange) error {
+	if !auditFiles[c.File] {
+		return fmt.Errorf("dispatch: %q is not an auditable policy file", c.File)
+	}
+	op := logIdent(a.req.OperatorID, 128)
+	if op == "" {
+		op = "unknown"
+	}
+	ev := configChangedEvent{
+		Type: "config_changed", Ts: a.started.UTC().Format(time.RFC3339), OperatorID: op,
+		File: c.File, Action: logIdent(c.Action, 64), SHABefore: logHex(c.SHABefore, 64), SHAAfter: logHex(c.SHAAfter, 64),
+		Surface: logSurface(c.Surface),
+	}
+	line, err := json.Marshal(ev)
+	if err != nil {
+		return err
+	}
+	return appendEvent(a.path, line)
 }

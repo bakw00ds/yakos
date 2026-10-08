@@ -44,7 +44,9 @@ const (
 )
 
 func printRouterHelp(w io.Writer) {
-	_, _ = fmt.Fprint(w, `yakos router explain <agent> [flags] — show how the router would route a dispatch
+	_, _ = fmt.Fprint(w, `yakos router <explain|policy> — show how the router would route a dispatch, and its policy
+
+yakos router explain <agent> [flags]
 
 Subcommands:
     explain <agent> [--task-file F] [--class C] [--project DIR] [--json]
@@ -56,7 +58,17 @@ Subcommands:
                           started, no ledger row is written and no conversation is
                           pinned.
 
+    policy get [--json]   Show the router policy: its sha, the rules (R1..R6), the per-agent
+                          pins, and whether running a harness without its sandbox and the
+                          hooks and OpenAI endpoints are allowed.
+    policy set --rules-file <file|->
+                          Replace the rules: list from a YAML list (at most 6 rules, each
+                          checked as the router reads it). Nothing else in the file is
+                          touched; the privileged keys are edited by hand. The write is
+                          atomic, owner-only and recorded in the dispatch log.
+
 Flags:
+    --rules-file <file|-> policy set: the YAML list of rules.
     --task-file F         Use the size of this regular file as the task size (for
                           task_bytes_gt rules). The file is not read.
     --class C             Route class to match rules against. A Claude Code request
@@ -102,8 +114,11 @@ func routerMain(yakosRoot string, args []string, stdout, stderr io.Writer, env e
 		}
 		return 0
 	}
+	if args[0] == "policy" {
+		return routerPolicy(stdout, stderr, env, args[1:])
+	}
 	if args[0] != "explain" {
-		_, _ = fmt.Fprintf(stderr, "router: unknown subcommand %q (explain)\n", sanitizeForTerminal(args[0]))
+		_, _ = fmt.Fprintf(stderr, "router: unknown subcommand %q (explain | policy)\n", sanitizeForTerminal(args[0]))
 		return explainExitUsage
 	}
 	var (
@@ -303,26 +318,8 @@ func gatewayEnvFor(env explainEnv, class string) []router.EnvAlias {
 	return out
 }
 
-// knownExplainClasses lists, sorted, the classes `--class` accepts: the router's
-// built-in ones, the Claude Code request classes and every class a policy rule
-// matches on.
-func knownExplainClasses(stateDir string) []string {
-	set := map[string]bool{router.ClassDefault: true}
-	for _, c := range routerpolicy.ClassNames() {
-		set[c] = true
-	}
-	for _, r := range router.LoadPolicy(stateDir).Rules {
-		if r.Match.Class != "" {
-			set[r.Match.Class] = true
-		}
-	}
-	out := make([]string, 0, len(set))
-	for c := range set {
-		out = append(out, c)
-	}
-	sort.Strings(out)
-	return out
-}
+// knownExplainClasses lists, sorted, the classes `--class` accepts.
+func knownExplainClasses(stateDir string) []string { return router.KnownClasses(stateDir) }
 
 func containsString(list []string, s string) bool {
 	for _, x := range list {

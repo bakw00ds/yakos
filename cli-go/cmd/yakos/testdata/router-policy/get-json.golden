@@ -1,0 +1,51 @@
+{
+  "present": true,
+  "sha": "ec2d674ab85d75d8105967b561a559970cc5b9f816cbe49ba04a9e1e1de9b60a",
+  "rules": [
+    {
+      "id": "R1",
+      "match": {
+        "domain": "code-review"
+      },
+      "action": {
+        "runtime": "codex",
+        "model": "gpt-5.5",
+        "fallbacks": [
+          "claude"
+        ]
+      },
+      "override_pins": false
+    },
+    {
+      "id": "R2",
+      "match": {
+        "agent": "backend"
+      },
+      "action": {
+        "runtime": "codex",
+        "model": "gpt-5.6-terra"
+      },
+      "override_pins": true
+    }
+  ],
+  "pins": [
+    {
+      "agent": "backend",
+      "runtime": "codex",
+      "model": "gpt-5.6-terra"
+    }
+  ],
+  "allow_unsandboxed_runtimes": [
+    "codex"
+  ],
+  "hooks_endpoint": true,
+  "openai_endpoint": false,
+  "gateway_classes": [
+    {
+      "class": "opus",
+      "env": "ANTHROPIC_DEFAULT_OPUS_MODEL",
+      "model": "claude-opus-4-1-20250805"
+    }
+  ],
+  "warnings": []
+}

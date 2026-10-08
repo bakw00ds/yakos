@@ -337,7 +337,7 @@ var commandRegistry = []commandEntry{
 	},
 	{
 		Name:   "models",
-		Specs:  specSet("models", "--json", "--harness", "--project", "--timeout"),
+		Specs:  specSet("models", "--json", "--harness", "--project", "--timeout", "--runtime", "--input", "--output", "--cache-read", "--cache-write", "--billing", "--clear"),
 		HelpFn: printModelsHelp,
 	},
 	{
@@ -377,7 +377,7 @@ var commandRegistry = []commandEntry{
 	},
 	{
 		Name:   "router",
-		Specs:  specSet("router", "--json", "--task-file", "--class", "--project"),
+		Specs:  specSet("router", "--json", "--task-file", "--class", "--project", "--rules-file"),
 		HelpFn: printRouterHelp,
 		AllowUnparsed: []flagAllow{
 			{Flag: "--explain", Reason: "printRouterHelp points at `yakos dispatch --explain`, dispatch's flag"},
