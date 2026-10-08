@@ -31,9 +31,14 @@ carries on without the endpoint.
 
 The bearer token is the REST write token, `~/.yakos-state/rest-write-token`. It is
 the same token that guards `yakos.dispatch` over REST and MCP, so the endpoint adds
-no new credential and no new privilege: whoever holds it can already run agents.
-Agents behind the endpoint run with the console's permissions (they can use tools in
-the workspace); the OpenAI `tools` field is refused because the agent brings its own.
+no new credential, but it is a powerful one: **the bearer grants runs with
+`--permission-mode bypassPermissions` as the lead agent**, so whoever holds it can
+have an agent read and write the workspace and run commands without any prompt. The
+token is the REST write token, not a gateway-specific one: it also authorizes every
+other REST and MCP write the console exposes (dispatch, kanban and other state
+writes). Treat it like a shell on the host, and never put it in a client that is
+reachable from another machine. The OpenAI `tools` field is refused because the
+agent brings its own.
 
 ```
 TOKEN=$(cat ~/.yakos-state/rest-write-token)
@@ -123,9 +128,20 @@ An error after a stream has started is an `error` frame followed by `[DONE]`.
 
 Admin settings, Connections, OpenAI API: URL `http://127.0.0.1:7898/v1`, key = the
 write token. Open WebUI's backend makes the calls, so Host and Origin checks pass.
-When Open WebUI runs in Docker, `127.0.0.1` is the container, not the host: the
-endpoint is loopback-only by design, so run Open WebUI with host networking, or
-use a pip install of it. There is no non-loopback mode.
+This setup has not been verified against a live Open WebUI.
+
+Anyone who can log in to Open WebUI can spend that token's power, so keep Open WebUI
+itself on loopback:
+
+- Docker: publish only on loopback, `-p 127.0.0.1:8080:8080`. Do not use host
+  networking and do not publish on `0.0.0.0`. Inside a container `127.0.0.1` is the
+  container, not the host, so the loopback-only endpoint is not reachable from a
+  default Docker network; use the pip install instead, or a deliberate loopback
+  forward you control.
+- pip: `open-webui serve --host 127.0.0.1`.
+- Create the admin account first, then set `ENABLE_SIGNUP=false` and restart, so no
+  one else can register.
+- No LAN exposure without the ADR-0005 mTLS path. There is no non-loopback mode.
 
 ## Not in this version
 

@@ -3,6 +3,7 @@ package openai
 import (
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/bakw00ds/yakos/internal/budget"
@@ -102,4 +103,15 @@ func repeatA(n int) string {
 		b[i] = 'a'
 	}
 	return string(b)
+}
+
+func TestEchoModel(t *testing.T) {
+	for in, want := range map[string]string{
+		"  yakos/auto ": "yakos/auto", "yakos/lead": "yakos/lead",
+		"bad\nmodel": "yakos/auto", "<script>": "yakos/auto", strings.Repeat("a", 200): "yakos/auto",
+	} {
+		if got := echoModel(in); got != want {
+			t.Errorf("echoModel(%q) = %q, want %q", in, got, want)
+		}
+	}
 }

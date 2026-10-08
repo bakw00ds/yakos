@@ -527,3 +527,21 @@ func TestProtocol_ResumeOnOtherRuntimeCarriesDigest(t *testing.T) {
 		t.Errorf("codex got no digest of the claude turn:\n%.800s", codex)
 	}
 }
+
+func TestProtocol_OwnerlessTranscriptNotAdopted(t *testing.T) {
+	f := newFixture(t)
+	// A transcript whose only entry has no operator id has no recorded owner.
+	must(t, f.store.Append(consoleui.TranscriptEntry{SessionID: "s", ConversationID: "ownerless-1",
+		Role: consoleui.RoleUser, Text: "orphan"}))
+	resp, raw := f.chat("yakos/auto", []map[string]any{user("adopt me")}, nil, map[string]string{"X-Yakos-Conversation": "ownerless-1"})
+	if resp.StatusCode != 403 || !strings.Contains(string(raw), "conversation_forbidden") {
+		t.Fatalf("status %d: %s", resp.StatusCode, raw)
+	}
+	if readFile(f.claudeLog) != "" {
+		t.Errorf("an ownerless resume launched claude")
+	}
+	// A fresh client-chosen id is still fine.
+	if resp, raw := f.chat("yakos/auto", []map[string]any{user("hi")}, nil, map[string]string{"X-Yakos-Conversation": "fresh-conv-9"}); resp.StatusCode != 200 {
+		t.Fatalf("fresh id: %d %s", resp.StatusCode, raw)
+	}
+}

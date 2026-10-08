@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -313,6 +314,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	// ---- conversation ----
 	conv := r.Header.Get(HeaderConversation)
+	clientConv := conv != ""
 	if conv != "" {
 		if err := dispatch.ValidateIdentityField("conversation_id", conv); err != nil {
 			writeError(w, http.StatusBadRequest, "invalid_conversation", HeaderConversation+" is not a valid conversation id")
@@ -331,6 +333,19 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "conversation_forbidden", "the conversation belongs to another operator")
 		return
 	}
+	if owner == "" && clientConv {
+		// A transcript with no recorded owner is not the gateway's to adopt.
+		has, herr := s.cfg.Transcripts.HasTranscript(conv)
+		if herr != nil {
+			slog.Error("openai gateway: cannot stat the conversation", "conversation", conv)
+			writeError(w, http.StatusInternalServerError, "server_error", "internal error")
+			return
+		}
+		if has {
+			writeError(w, http.StatusForbidden, "conversation_forbidden", "the conversation has no recorded owner")
+			return
+		}
+	}
 	existing := owner != ""
 	if !s.acquire(conv) {
 		writeError(w, http.StatusConflict, "conversation_busy", "the conversation already has a turn running")
@@ -339,7 +354,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	defer s.release(conv)
 
 	t := &turn{
-		s: s, conv: conv, sess: "oai-s-" + randHex(8), model: req.Model, id: "chatcmpl-" + randHex(12),
+		s: s, conv: conv, sess: "oai-s-" + randHex(8), model: echoModel(req.Model), id: "chatcmpl-" + randHex(12),
 		created: time.Now().Unix(), pinned: "router",
 	}
 	if tg.runtime != "" {
@@ -412,6 +427,8 @@ func (s *Server) buildParams(t *turn, tg target, in parsed, existing bool) (p di
 	} else if len(in.earlier) > 0 {
 		digest, _, _ = consoleui.BuildHandoffDigest(in.earlier, digestFrom)
 		if len(task)+len(digest) > dispatch.MaxTaskBytes {
+			slog.Info("openai gateway: handoff digest dropped, task plus digest exceeds the limit",
+				"conversation", t.conv, "limit", dispatch.MaxTaskBytes)
 			digest = ""
 		}
 	}
@@ -696,4 +713,18 @@ func (s *sseWriter) fail(code, msg string) {
 	s.write(b)
 	_, _ = fmt.Fprint(s.w, "data: [DONE]\n\n")
 	_ = s.rc.Flush()
+}
+
+// modelEchoRE bounds what is echoed back as the response model.
+var modelEchoRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$`)
+
+// echoModel trims the requested model and echoes it only when it is short and
+// plain; resolve has already matched it against the catalog, so anything else
+// is replaced by a fixed label rather than reflected.
+func echoModel(m string) string {
+	m = strings.TrimSpace(m)
+	if len(m) > 128 || !modelEchoRE.MatchString(m) {
+		return "yakos/auto"
+	}
+	return m
 }
