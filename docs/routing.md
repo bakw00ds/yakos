@@ -601,6 +601,52 @@ Policy is written from a terminal:
   a fixed action word, and the file's sha before and after. If the log cannot be
   written the command says the change went unrecorded and exits 1.
 
+## Models & Providers tab (K-153)
+
+The console has a **Models** tab (RoleRead) that shows, in one page: the three
+providers (CLI installed, signed in, router cooldown, the next step to sign in), the
+catalog (billing and where that was decided, enabled, discovery state, the price of
+an `api` model, tokens over the last 30 days per model), the tier aliases per
+harness, the per-agent pins and the router rules with the policy sha, the budgets
+(tokens first), the latest eval results, the sensitive class, and an **explain
+playground** (a dry run of the router, as `yakos router explain`).
+
+| Endpoint | Role | What |
+|---|---|---|
+| `GET /api/models/overview` | read | the document the tab renders |
+| `GET /api/models/explain?agent=A[&class=C][&task_bytes=N]` | read | the router's decision for an agent (`dispatch.Explain`: nothing starts, no ledger row, no pin) |
+| `GET /api/router/policy` | read | rules, pins, sha, the on/off state of the privileged keys |
+
+All three are idempotent GETs in the default rate-limit class, answer with
+`Cache-Control: no-store`, and carry no path, no credential and no environment
+value: sign-in hints and `gateway_classes` name variables, never their values; the
+budget rows drop the per-project spend. Provider probes are cached for 15 seconds
+and bounded to 3 seconds each. Discovery state is read from the on-disk cache only; the page never runs a harness CLI to list models. A test plants secret values in the environment and the state
+files and fuzzes every one of these responses for them.
+
+**This build has no browser write path.** The tab says so and shows the commands
+(see "Policy writers"); `writes_enabled` is `false`, and a PUT, POST, PATCH or
+DELETE to these paths is a 405.
+
+### K-153b: browser writes (not in this build)
+
+The operator chose a browser-editable page. It is held back for a security-gated
+follow-up with this stack, none of which ships here: `PUT /api/models/*` and `PUT
+/api/router/policy` for RoleAdmin only, through the same writers and audit line,
+plus (1) a per-session CSRF token, double-submitted and bound to the credential
+(session cookie, loopback bearer token or client-certificate fingerprint),
+(2) a `Sec-Fetch-Site` and `Origin` allowlist, (3) the Host check, (4) step-up
+re-authentication within 5 minutes (password on a session, the bearer token typed
+again on loopback, the certificate CN on mTLS), (5) `Content-Type: application/json`.
+Test plan for that review: each of the five absent or wrong in turn (missing token,
+a token of another session, `Origin: https://evil`, `Sec-Fetch-Site: cross-site`
+and `same-site`, a stale or missing step-up, `text/plain` and a form content type,
+`Host: evil.example` and a wrong port, with and without the token) must change
+nothing on disk and write no audit line; a request with all five and a lower role
+must be 403; every accepted write must produce exactly one audit line whose
+`policy_sha_after` equals the file's sha; and the sentinel fuzz above must cover the
+write responses. Until then a write from the browser is a 405.
+
 ## Claude Code request-class aliases (K-141)
 
 The user-level router policy (`~/.yakos-state/router-policy.yml`, the same

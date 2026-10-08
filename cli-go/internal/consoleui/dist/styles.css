@@ -5002,3 +5002,17 @@ html[data-theme="light"] .term-viewport {
 .context-drawer-parts .dropped { opacity: 0.6; }
 .context-drawer-soul { white-space: pre-wrap; word-break: break-word; }
 .chat-route-notice { color: var(--color-warning); }
+
+/* ---- Models & Providers tab (K-153) ------------------------------------- */
+.models-root { padding: 16px 20px; overflow: auto; height: 100%; box-sizing: border-box; }
+.models-banner { padding: 8px 12px; border: 1px solid var(--border, #444); border-radius: 6px; margin: 0 0 16px; font-size: 13px; }
+.models-section { margin: 0 0 22px; }
+.models-section h3 { margin: 0 0 6px; font-size: 15px; }
+.models-note { margin: 0 0 8px; font-size: 12px; opacity: 0.75; }
+.models-warn { margin: 4px 0; font-size: 12px; color: var(--warn, #d9a441); }
+.models-empty { margin: 4px 0; font-size: 13px; opacity: 0.7; }
+.models-table { border-collapse: collapse; width: 100%; font-size: 13px; }
+.models-table th, .models-table td { text-align: left; padding: 4px 10px 4px 0; border-bottom: 1px solid var(--border, #333); vertical-align: top; overflow-wrap: anywhere; }
+.models-table th { font-weight: 600; opacity: 0.8; }
+.models-explain-form { display: flex; gap: 8px; flex-wrap: wrap; margin: 6px 0 10px; }
+.models-explain-form input { min-width: 180px; }

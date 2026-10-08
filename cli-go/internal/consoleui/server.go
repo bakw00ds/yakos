@@ -368,6 +368,7 @@ type Server struct {
 	files        *filesHandlers
 	skills       *skillsHandlers
 	fleet        *fleetHandlers
+	models       *modelsPage        // Models & Providers tab (K-153), read-only
 	diff         *diffHandlers      // IDE Phase 3b diff-review endpoints; nil if WorktreeManager is nil
 	serverCtx    context.Context    // cancelled on Serve shutdown; dispatch goroutines use this
 	serverCancel context.CancelFunc // called by Serve when the server shuts down
@@ -1071,6 +1072,14 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("/api/chat/transcript", requireRoleFunc(netid.RoleRead, s.chat.handleChatTranscript))
 	// GET /api/models — the model registry for the pane selects (K-148). RoleRead.
 	s.mux.HandleFunc("/api/models", requireRoleFunc(netid.RoleRead, s.chat.handleModels))
+	// The Models & Providers tab (K-153): read-only views, RoleRead. Policy files
+	// are written by `yakos models ...` / `yakos router policy set`, not here.
+	mp := newModelsPage(s.cfg.WorkspaceRoot, s.cfg.YakosRoot)
+	s.models = mp
+	s.mux.HandleFunc("/api/models/overview", requireRoleFunc(netid.RoleRead, mp.handleOverview))
+	s.mux.HandleFunc("/api/models/explain", requireRoleFunc(netid.RoleRead, mp.handleExplain))
+	s.mux.HandleFunc("/api/router/policy", requireRoleFunc(netid.RoleRead, mp.handlePolicy))
+	s.mux.HandleFunc("/models.js", s.handleModelsJS)
 	s.mux.HandleFunc("/api/chat/context", requireRoleFunc(netid.RoleRead, s.chat.handleChatContext))
 	// POST /api/chat/share — flip shared flag; owner-gated.
 	s.mux.HandleFunc("/api/chat/share", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatShare))
@@ -1579,7 +1588,7 @@ func isStaticAsset(r *http.Request) bool {
 		return false
 	}
 	switch r.URL.Path {
-	case "/", "/app.js", "/chat-routing.js", "/context-drawer.js", "/styles.css", "/sw.js", "/ide-editor.js", "/flows-gallery.js", "/ide/editor":
+	case "/", "/app.js", "/chat-routing.js", "/models.js", "/context-drawer.js", "/styles.css", "/sw.js", "/ide-editor.js", "/flows-gallery.js", "/ide/editor":
 		return true
 	}
 	// Vendored pinned blobs are same-origin static assets; no token required.

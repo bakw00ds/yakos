@@ -715,3 +715,29 @@ func TestRecentDispatches_DefaultLimit(t *testing.T) {
 		t.Errorf("rows=%d; want 50 (default limit)", len(rows))
 	}
 }
+
+// ---- by-model axis (K-153) --------------------------------------------------
+
+func TestComputeByAxis_Model(t *testing.T) {
+	in := func(n int64) *cost.Usage { return &cost.Usage{InputTokens: n} }
+	evs := []cost.Event{
+		{Type: "dispatch_finished", ModelID: "gpt-5.5", ModelResolved: "ignored", Model: "ignored", Usage: in(100)},
+		{Type: "dispatch_finished", ModelID: "gpt-5.5", Usage: in(50)},
+		{Type: "dispatch_finished", ModelResolved: "sonnet", Model: "ignored", Usage: in(7)},
+		{Type: "dispatch_finished", Model: "haiku", Usage: in(3)},
+		{Type: "dispatch_finished", Usage: in(1)},
+	}
+	got := map[string]int64{}
+	for _, r := range ComputeByAxis(evs, "model") {
+		got[r.Key] = r.Tokens
+	}
+	want := map[string]int64{"gpt-5.5": 150, "sonnet": 7, "haiku": 3, "(unknown)": 1}
+	if len(got) != len(want) {
+		t.Fatalf("rows = %v, want %v", got, want)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %d tokens, want %d", k, got[k], v)
+		}
+	}
+}
