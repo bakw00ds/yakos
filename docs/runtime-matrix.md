@@ -29,6 +29,7 @@ was removed on 2026-09-01 in favor of agy).
 | `yakos dispatch` implementation (K-143) | ✅ Go by default | ✅ Go by default | ✅ Go by default |
 | Sandbox flag (K-133) | n/a (permission mode) | ✅ `--sandbox workspace-write`: an OS sandbox, network off by default | ⚠ `--sandbox` blocks writes outside the workspace by default only; not a containment boundary (K-158, below) |
 | Agent file yakOS writes | (none — JSON injection) | `.codex/agents/yakos-<id>.toml` | `.agents/skills/yakos-<id>/SKILL.md` |
+| Output scan (K-146) | ✅ the `output-injection-scan` PostToolUse hook, in-session; the dispatch stream is not re-scanned | ⚠ detect-and-report: every normalized `tool_result` and text event is scanned in dispatch | ⚠ detect-and-report: every normalized `tool_result` and text event is scanned in dispatch |
 
 ✅ = supported. ❌ = not supported (degrade or workaround). ⚠ = partial or unverified.
 
@@ -368,6 +369,62 @@ read `usage` at all: it totals the chars/4 estimates `est_input_tokens` and
   that reads `usage.total_cost_usd` directly gets the same answer for such a row,
   because the 0 is already there. Tokens are the primary unit; dollars matter only
   for runs billed per API call.
+
+## Output scan over normalized events (K-146)
+
+codex and agy have no PostToolUse hook that fires on tool output, so dispatch
+scans the events its parsers already normalize. Every `tool_result` event and
+every structured text event passes through `outputinjectionscan` and the
+supervisor pre-filter's risk patterns (`dispatch/feedscan.go`), in the streaming
+path (live) and the one-shot path (after the run, report-only).
+
+| | claude | codex | agy |
+|---|---|---|---|
+| Scanned in dispatch | no (its hook scans in-session) | yes | yes |
+| Finding written | by the hook | `supervisor-findings.ndjson` + `.supervisor-pending.<session>` | same |
+| `yakos supervise pending` lists it | n/a | in a "detected (no ack needed)" section | same |
+| `kill_on_critical` | n/a | streaming path only | streaming path only |
+
+- **Detect and report, not a boundary.** The default leaves the run untouched. A
+  finding is `overall: WARN` and `recommended_action: review`, always: model and
+  tool output must never control the lead's ack gates (both ignore `review`), so
+  a hostile page cannot halt dispatch. `severity` is `critical` for the injection
+  family and `warn` otherwise. `yakos supervise pending` lists these records in a
+  separate "detected (no ack needed)" section: they are not counted as pending and
+  have no finding ID. A finding carries static labels only: no event content, tool
+  name or path. At most 3 findings per run are written; further distinct ones are
+  counted in the ledger's `scan_findings` only. Findings are de-duplicated on
+  severity, kind and the label set (a model-chosen count inside a label is
+  ignored).
+- **`kill_on_critical: true`** in the trusted user policy
+  (`~/.yakos-state/supervisor-policy.yml`, same trust bar as the launch-gate
+  limits; a project `.yakos.yml` cannot set it) cancels the dispatch on a
+  critical finding through the process-group kill. The ledger's
+  `dispatch_finished` carries `cancel_reason: kill_on_critical:<label>` and
+  `scan_findings`.
+- **Bounds.** At most 32 KiB per event (head and tail), scanned in 8 KiB chunks
+  with a 500 ms deadline each, and 4 MiB per run. A chunk that overruns skips the
+  rest of that event; the third overrun, or the byte budget, switches the feed off
+  for the rest of the run. The switch-off is recorded: `scan_off_reason`
+  (`budget` or `deadline`) on the ledger's `dispatch_finished` and one `review`
+  finding `event-scan-disabled:<reason>`. Budget exhaustion is attacker-reachable
+  (enough benign output ahead of a payload turns the feed off); that is a
+  documented limit of detect-and-report. Nothing is buffered except the last 256
+  bytes of the previous text event, which lets a phrase split across streaming
+  fragments (agy `text_delta`) match.
+- **Known gaps.** The middle of an event larger than 32 KiB is not scanned, and
+  the parser drops everything past 256 KiB first. There is no encoding
+  normalisation: newline or NBSP between words, homoglyphs, a zero-width
+  character inside a word, short base64 and HTML entities evade the scanner.
+  Prose-only runtimes (`Plain` events) are not scanned. An assistant `text`
+  event is kill-eligible under `kill_on_critical` like a `tool_result`.
+- **Findings need a work directory**, resolved from the dispatch request's
+  project path, not the daemon's environment: `<project>/work/current` with
+  `YAKOS_INPLACE_WORK=1`, else `$HOME/agent-control/<project name>/work/current`
+  (`YAKOS_WORK_DIR` applies only when `YAKOS_PROJECT_NAME` names that same
+  project). Without one the scan still counts findings into the ledger. The
+  pending and findings files are opened without following links and are written
+  only if they are regular files.
 
 ## Soft-degrade rules
 

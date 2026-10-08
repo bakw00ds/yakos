@@ -86,6 +86,8 @@ type Engine struct {
 	// trig counts in-flight runs per workflow for the one-active-run trigger
 	// guard (K-152).
 	trig triggerState
+	// runs tracks live run executions for WaitIdle.
+	runs runTracker
 }
 
 // EngineConfig groups the fields a production caller needs to construct an
@@ -274,6 +276,8 @@ func (e *Engine) run(
 	}
 
 	// Count this run so a trigger sees it as active (K-152).
+	e.runs.begin()
+	defer e.runs.end() // registered first, so it runs last: after every flush and close
 	e.trig.add(wf.Name)
 	defer e.trig.done(wf.Name)
 
