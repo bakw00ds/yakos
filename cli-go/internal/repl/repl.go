@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	mrand "math/rand/v2"
 	"os"
 	"regexp"
 	"strconv"
@@ -53,6 +54,12 @@ type Config struct {
 	Sleep func(time.Duration)        // test seam (409 backoff)
 	// BusyWaits is how many times a turn waits out a 409 (default 20, 500 ms).
 	BusyWaits int
+	// MaxReconnects bounds how many times one turn reopens a dropped event
+	// stream (default 10); ReconnectBase is the first backoff (default 500 ms,
+	// doubling with jitter, capped at ReconnectCap, default 30 s).
+	MaxReconnects int
+	ReconnectBase time.Duration
+	ReconnectCap  time.Duration
 }
 
 // REPL is one interactive session.
@@ -74,6 +81,8 @@ type REPL struct {
 	skills  map[string]string
 	attachd bool
 
+	reconnects int // stream reopen attempts in the current turn
+
 	turns   int
 	costUSD float64
 	lastUSD float64
@@ -92,6 +101,15 @@ func New(cfg Config) *REPL {
 	}
 	if cfg.BusyWaits <= 0 {
 		cfg.BusyWaits = 20
+	}
+	if cfg.MaxReconnects <= 0 {
+		cfg.MaxReconnects = 10
+	}
+	if cfg.ReconnectBase <= 0 {
+		cfg.ReconnectBase = 500 * time.Millisecond
+	}
+	if cfg.ReconnectCap <= 0 {
+		cfg.ReconnectCap = 30 * time.Second
 	}
 	if cfg.Client != nil && cfg.Client.HTTP == nil {
 		cfg.Client.HTTP = newHTTP()
@@ -242,6 +260,7 @@ func (r *REPL) turn(ctx context.Context, text string) {
 		req.OverrideRuntime, req.OverrideModel, req.Task = rt, md, task
 	}
 	r.rd.Reset()
+	r.reconnects = 0
 	if !r.dispatch(ctx, req) {
 		return
 	}
@@ -348,9 +367,46 @@ func (r *REPL) cancelTurn(ctx context.Context) {
 	}
 }
 
-// reconnect reopens the stream once after it dropped mid-turn.
+// reconnectDelay is the wait before reconnect attempt n (1-based): exponential
+// from ReconnectBase, capped at ReconnectCap, with jitter in [d/2, d] so a
+// daemon that drops every client does not see them return in lockstep.
+func (r *REPL) reconnectDelay(n int) time.Duration {
+	d := r.cfg.ReconnectBase
+	for i := 1; i < n && d < r.cfg.ReconnectCap; i++ {
+		d *= 2
+	}
+	if d > r.cfg.ReconnectCap {
+		d = r.cfg.ReconnectCap
+	}
+	half := int64(d / 2)
+	if half <= 0 {
+		return d
+	}
+	return time.Duration(half + mrand.Int64N(half+1))
+}
+
+// reconnect reopens the stream after it dropped mid-turn: at most
+// MaxReconnects attempts per turn, each after an exponential, jittered wait
+// that Ctrl-C and ctx cut short. A listener that accepts and closes at once
+// therefore ends the turn with a clear message instead of spinning the REPL.
 func (r *REPL) reconnect(ctx context.Context) bool {
-	r.say("event stream closed; reconnecting")
+	r.reconnects++
+	if r.reconnects > r.cfg.MaxReconnects {
+		r.say("error: the event stream keeps closing (gave up after %d attempts); the turn may still finish in the console", r.cfg.MaxReconnects)
+		return false
+	}
+	delay := r.reconnectDelay(r.reconnects)
+	r.say("event stream closed; reconnecting in %s (attempt %d of %d)", delay.Round(10*time.Millisecond), r.reconnects, r.cfg.MaxReconnects)
+	t := time.NewTimer(delay)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-r.cfg.Interrupt:
+		r.say("(gave up reconnecting)")
+		return false
+	case <-t.C:
+	}
 	ev, err := r.cl.Stream(ctx)
 	if err != nil {
 		r.say("error: the event stream is gone (%s); the turn may still finish in the console", sanitize(err.Error()))

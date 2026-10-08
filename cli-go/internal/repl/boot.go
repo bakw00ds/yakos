@@ -2,10 +2,13 @@ package repl
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +32,63 @@ var (
 	ErrDaemonStale   = errors.New("the running yakOS daemon is from another build; restart it (`yakos serve stop`, then `yakos serve`) and retry")
 	ErrDaemonAuth    = errors.New("the daemon rejected the console token; restart it (`yakos serve stop`, then `yakos serve`) and retry")
 )
+
+// ErrConsoleUnbound is the verdict for a daemon of this project that is running
+// but holds no console: it could not bind Port because another process has it.
+// It matches ErrDaemonForeign (errors.Is) since the token is not sent either.
+type ErrConsoleUnbound struct{ Port string }
+
+func (e *ErrConsoleUnbound) Error() string {
+	return fmt.Sprintf("this project's yakOS daemon is running but could not bind the console port %s (another process holds it), so the console token was not sent; free the port or choose another with --console-addr, run `yakos serve stop`, then retry", e.Port)
+}
+
+// Is makes the error match ErrDaemonForeign.
+func (e *ErrConsoleUnbound) Is(target error) bool { return target == ErrDaemonForeign }
+
+// InstanceNonceMax bounds the /api/instance response a client will read.
+const InstanceNonceMax = 512
+
+// FetchInstance reads the per-boot instance nonce the console serves, without
+// a token, at GET http://addr/api/instance. It sends nothing secret: no
+// credentials, no cookies, no proxy, no redirects. A hostile listener learns
+// only that a client probed it.
+func FetchInstance(ctx context.Context, addr string) (string, error) {
+	if !isLoopbackAddr(addr) {
+		return "", ErrNotLoopback
+	}
+	hc := &http.Client{
+		Timeout:       3 * time.Second,
+		Transport:     &http.Transport{Proxy: nil, DisableKeepAlives: true},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/api/instance", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := hc.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("instance: status %d", resp.StatusCode)
+	}
+	var out struct {
+		Instance string `json:"instance"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, InstanceNonceMax)).Decode(&out); err != nil {
+		return "", fmt.Errorf("instance: %w", err)
+	}
+	if out.Instance == "" {
+		return "", errors.New("instance: empty")
+	}
+	return out.Instance, nil
+}
+
+// SameInstance compares two nonces in constant time.
+func SameInstance(a, b string) bool {
+	return a != "" && subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
+}
 
 // Boot describes how to reach (and if needed start) the daemon.
 type Boot struct {
@@ -92,6 +152,10 @@ func Connect(ctx context.Context, b Boot) (*Client, error) {
 	if verr != nil {
 		if errors.Is(verr, ErrDaemonStale) {
 			return nil, ErrDaemonStale
+		}
+		var cu *ErrConsoleUnbound
+		if errors.As(verr, &cu) {
+			return nil, cu
 		}
 		return nil, ErrDaemonForeign
 	}

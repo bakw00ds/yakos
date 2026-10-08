@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -391,6 +392,69 @@ func TestInterruptDuringAttachDoesNotCancelNextTurn(t *testing.T) {
 		}, "/attach claude\nhello\n")
 		if len(d.cancels) != 0 || len(d.dispatches) != 1 {
 			t.Fatalf("run %d: cancels=%v dispatches=%d", i, d.cancels, len(d.dispatches))
+		}
+	}
+}
+
+// A listener that answers the stream request and closes at once used to spin
+// the REPL (1M reconnects at 124% CPU); now a turn gives up after a bounded
+// number of backed-off attempts and the prompt comes back.
+func TestReconnectIsBoundedAgainstClosingListener(t *testing.T) {
+	var mu sync.Mutex
+	streams := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/chat/stream":
+			mu.Lock()
+			streams++
+			mu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(200) // and close: no events, no heartbeat
+		case "/api/chat/dispatch":
+			w.WriteHeader(202)
+		default:
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte("{}"))
+		}
+	}))
+	defer srv.Close()
+	var out bytes.Buffer
+	r := New(Config{
+		Client: &Client{Base: srv.URL, Token: testToken, OperatorID: "op", HTTP: srv.Client()},
+		In:     strings.NewReader("hello\n/exit\n"), Out: &out,
+		MaxReconnects: 4, ReconnectBase: time.Millisecond, ReconnectCap: 4 * time.Millisecond,
+	})
+	start := time.Now()
+	done := make(chan struct{})
+	go func() { _ = r.Run(context.Background()); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("REPL still reconnecting after 10s: unbounded")
+	}
+	mu.Lock()
+	n := streams
+	mu.Unlock()
+	// 1 initial open + at most MaxReconnects reopens in the turn.
+	if n < 2 || n > 1+4 {
+		t.Fatalf("stream opened %d times, want between 2 and 5", n)
+	}
+	if !strings.Contains(out.String(), "gave up after 4 attempts") {
+		t.Fatalf("no clear give-up message:\n%s", out.String())
+	}
+	if el := time.Since(start); el > 3*time.Second {
+		t.Fatalf("took %s", el)
+	}
+}
+
+func TestReconnectDelayBackoffAndCap(t *testing.T) {
+	r := New(Config{ReconnectBase: 100 * time.Millisecond, ReconnectCap: 800 * time.Millisecond})
+	for n, max := range map[int]time.Duration{1: 100, 2: 200, 3: 400, 4: 800, 5: 800, 30: 800} {
+		for i := 0; i < 50; i++ {
+			d := r.reconnectDelay(n)
+			if d < max*time.Millisecond/2 || d > max*time.Millisecond {
+				t.Fatalf("attempt %d delay %s outside [%dms, %dms]", n, d, max/2, max)
+			}
 		}
 	}
 }

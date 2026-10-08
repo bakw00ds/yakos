@@ -389,7 +389,7 @@ var commandRegistry = []commandEntry{
 			"--console-bind", "--console-external-host", "--rotate-ws-token", "--rotate-perf-token",
 			"--rotate-console-token", "--no-perf", "--no-console", "--console-bootstrap-cert",
 			"--no-bootstrap-cert", "--console-allow-bash", "--console-structured-questions",
-			"--share-terminal", "--ide-root", "--detach"),
+			"--share-terminal", "--ide-root", "--detach", "--require-console"),
 		HelpFn: printServeHelp,
 		AllowUndocumented: []flagAllow{
 			{Flag: "--console-bootstrap-cert", Reason: "cmd_serve.go is off-limits for this PR (owned concurrently, per the dispatch brief); printServeHelp never mentions this real flag"},

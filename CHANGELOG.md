@@ -22,7 +22,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the console token it checks over the daemon's owner-only unix socket that the
   daemon on the console address belongs to this workspace and this build, and
   refuses with a fixed message otherwise. `yakos.version` on the daemon socket
-  gained additive `workspace` and `console_addr` fields. All daemon text is
+  gained additive `workspace`, `console_addr` and `instance` fields:
+  `console_addr` is the address the daemon actually bound (empty when the bind
+  failed; `yakos serve --require-console` exits instead) and `instance` is a
+  per-boot nonce also served at token-free `GET /api/instance`; the REPL
+  requires both to match, and checks the socket owner, mode and peer uid,
+  before sending the token. A dropped event stream is reopened at most 10
+  times per turn with backoff. All daemon text is
   stripped of terminal control sequences (including OSC 52) before printing, and
   `/attach` saves and restores the terminal mode and drops input the native
   session did not read.

@@ -57,26 +57,34 @@ func wantREPL(g replGate, tty bool) bool {
 // queryWorkspaceDaemon asks the daemon behind socketPath for its identity. It
 // is a seam: tests stand in a daemon without a real process.
 var queryWorkspaceDaemon = func(ctx context.Context, socketPath string) (daemonclient.VersionInfo, error) {
-	c, err := jsonrpc.DialClient(socketPath)
+	conn, err := jsonrpc.DialTrusted(socketPath)
 	if err != nil {
 		return daemonclient.VersionInfo{}, err
 	}
+	c := jsonrpc.NewClient(conn)
 	defer c.Close() //nolint:errcheck
 	return daemonclient.QueryVersion(ctx, c)
 }
+
+// fetchInstance reads the console's unauthenticated instance nonce. A seam.
+var fetchInstance = repl.FetchInstance
 
 // verifyRetries bounds the socket dial retries of verifyWorkspaceDaemon.
 var verifyRetries = 15
 
 // verifyWorkspaceDaemon proves the daemon holding the console address is this
 // workspace's own daemon from this binary's build, before the console token is
-// sent to it. The proof travels over the workspace's owner-only unix socket
-// (jsonrpc.SocketPath, the same one the exec path uses), which only a process
-// of this user can have created: a foreign or hostile listener on the TCP port
-// cannot answer there. The daemon reports its workspace root, build id and
-// console address; all three must match.
+// sent to it. The proof travels over the workspace's unix socket
+// (jsonrpc.SocketPath, the same one the exec path uses), trusted only after
+// DialTrusted proved the directory, the socket and the connected peer belong
+// to this user. The daemon reports its workspace root, build id, the console
+// address it actually bound, and a per-boot instance nonce; all must match,
+// and the same nonce must be served by the TCP listener (GET /api/instance,
+// no token) before any token is read, so the process behind the port is the
+// process behind the socket. Windows has no peer credential: the nonce and
+// build id are the whole proof there (see jsonrpc.DialTrusted).
 func verifyWorkspaceDaemon(ctx context.Context, workspace, addr string) error {
-	if !daemonAlive(jsonrpc.PIDPath(workspace)) {
+	if !daemonAliveOwned(jsonrpc.PIDPath(workspace)) {
 		return repl.ErrDaemonForeign
 	}
 	// A daemon that was just spawned writes its pidfile before it listens on
@@ -88,12 +96,22 @@ func verifyWorkspaceDaemon(ctx context.Context, workspace, addr string) error {
 		if err == nil {
 			break
 		}
-		if i >= verifyRetries || ctx.Err() != nil {
+		if errors.Is(err, jsonrpc.ErrUntrustedSocket) || i >= verifyRetries || ctx.Err() != nil {
 			return repl.ErrDaemonForeign
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	return checkDaemonIdentity(info, workspace, addr, buildinfo.BuildID())
+	if err := checkDaemonIdentity(info, workspace, addr, buildinfo.BuildID()); err != nil {
+		return err
+	}
+	if info.Instance == "" {
+		return repl.ErrDaemonForeign
+	}
+	got, ferr := fetchInstance(ctx, addr)
+	if ferr != nil || !repl.SameInstance(info.Instance, got) {
+		return repl.ErrDaemonForeign
+	}
+	return nil
 }
 
 // checkDaemonIdentity is the pure decision behind verifyWorkspaceDaemon.
@@ -103,6 +121,10 @@ func checkDaemonIdentity(info daemonclient.VersionInfo, workspace, addr, wantBui
 	}
 	if info.Workspace == "" || filepath.Clean(info.Workspace) != filepath.Clean(workspace) {
 		return repl.ErrDaemonForeign
+	}
+	if info.ConsoleAddr == "" {
+		_, port, _ := net.SplitHostPort(addr)
+		return &repl.ErrConsoleUnbound{Port: port}
 	}
 	if !sameConsolePort(info.ConsoleAddr, addr) {
 		return repl.ErrDaemonForeign
@@ -141,9 +163,11 @@ func runStartREPL(home, project, harness, model, consoleAddr string) int {
 		fmt.Fprintln(os.Stderr, "start: could not resolve the working directory")
 		return 1
 	}
-	var spawnArgs []string
+	// --require-console: a daemon this launcher spawns must hold its console or
+	// exit, never run without it while looking healthy.
+	spawnArgs := []string{"--require-console"}
 	if consoleAddr != "" {
-		spawnArgs = []string{"--console-addr", consoleAddr}
+		spawnArgs = append(spawnArgs, "--console-addr", consoleAddr)
 	}
 
 	cl, err := repl.Connect(ctx, repl.Boot{

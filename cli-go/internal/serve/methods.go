@@ -94,6 +94,9 @@ type versionResult struct {
 	// bearer token to. Additive: older clients ignore them.
 	Workspace   string `json:"workspace,omitempty"`
 	ConsoleAddr string `json:"console_addr,omitempty"`
+	// Instance is the per-boot nonce; the console serves the same value at
+	// GET /api/instance so a client can tie the TCP port to this process.
+	Instance string `json:"instance,omitempty"`
 }
 
 // handleVersion returns a handler that reads the VERSION file and returns
@@ -116,7 +119,8 @@ func handleVersion(cfg Config) jsonrpc.Handler {
 			BuildID: buildinfo.BuildID(),
 
 			Workspace:   cfg.WorkspaceRoot,
-			ConsoleAddr: cfg.consoleBind(),
+			ConsoleAddr: cfg.boundConsole,
+			Instance:    cfg.instance,
 		}, nil
 	}
 }

@@ -56,10 +56,11 @@ func shortRuntimeDir(t *testing.T) {
 func TestVerifyWorkspaceDaemon(t *testing.T) {
 	shortRuntimeDir(t)
 	verifyRetries = 0
-	t.Cleanup(func() { verifyRetries = 15 })
+	fetchInstance = func(context.Context, string) (string, error) { return "nonce-test", nil }
+	t.Cleanup(func() { verifyRetries = 15; fetchInstance = repl.FetchInstance })
 	projA, projB, projC := t.TempDir(), t.TempDir(), t.TempDir()
 	addr := "127.0.0.1:7890"
-	good := daemonclient.VersionInfo{BuildID: buildinfo.BuildID(), Workspace: projA, ConsoleAddr: addr}
+	good := daemonclient.VersionInfo{BuildID: buildinfo.BuildID(), Workspace: projA, ConsoleAddr: addr, Instance: "nonce-test"}
 	fakeWorkspaceDaemon(t, projA, good)
 	stale := good
 	stale.BuildID, stale.Workspace = "old-build", projC

@@ -27,6 +27,21 @@ func daemonAlive(pidPath string) bool {
 	return err == nil || err == syscall.EPERM
 }
 
+// daemonAliveOwned is daemonAlive for a caller that is about to trust the
+// daemon (the REPL): pid 1 and a process this user cannot signal (EPERM, i.e.
+// another uid's) are not "alive". A forged pidfile naming init must not pass.
+func daemonAliveOwned(pidPath string) bool {
+	data, err := os.ReadFile(pidPath) //nolint:gosec
+	if err != nil {
+		return false
+	}
+	pid, err := parsePID(data)
+	if err != nil || pid <= 1 {
+		return false
+	}
+	return syscall.Kill(pid, 0) == nil
+}
+
 // spawnDetachedDaemon starts `yakos serve <serveArgs>` as a detached child
 // process (new session, not waited on).  The child inherits the parent's
 // stdout/stderr so the setup token and banner URL appear on the terminal.

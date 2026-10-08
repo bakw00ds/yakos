@@ -34,6 +34,8 @@ type VersionInfo struct {
 	// root and the console address it binds. Empty from an older daemon.
 	Workspace   string `json:"workspace,omitempty"`
 	ConsoleAddr string `json:"console_addr,omitempty"`
+	// Instance is the daemon's per-boot nonce (see serve.versionResult).
+	Instance string `json:"instance,omitempty"`
 }
 
 // ErrStaleDaemon is returned by Check when the connected daemon's build id
