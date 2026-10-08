@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`yakos start` opens a yakOS REPL by default (K-154, ADR-0012).** Under
+  `YAKOS_IMPL=go`, on a terminal, `yakos start` is now a line-oriented client
+  of the console daemon: one routed conversation shared with the browser Chat
+  pane, `@claude`/`@codex`/`@agy` overrides, route chips, handoff banners and
+  `/attach <runtime>` for the native TUI. Behavior change: it used to exec the
+  vendor TUI. `yakos start --native <runtime>` (same as `--runtime`) keeps that
+  path with an unchanged argv, and so do `--no-repl`, `--dry-run`,
+  `--print-agents`, `--print-env`, `--share-terminal`, `--direct`, the session
+  flags, networked-console flags and a non-terminal stdin. The REPL starts the
+  daemon if it is not running and leaves it running on exit. Before it sends
+  the console token it checks over the daemon's owner-only unix socket that the
+  daemon on the console address belongs to this workspace and this build, and
+  refuses with a fixed message otherwise. `yakos.version` on the daemon socket
+  gained additive `workspace`, `console_addr` and `instance` fields:
+  `console_addr` is the address the daemon actually bound (empty when the bind
+  failed; `yakos serve --require-console` exits instead) and `instance` is a
+  per-boot nonce also served at token-free `GET /api/instance`; the REPL
+  requires both to match, and checks the socket owner, mode and peer uid,
+  before sending the token. A dropped event stream is reopened at most 10
+  times per turn with backoff. All daemon text is
+  stripped of terminal control sequences (including OSC 52) before printing, and
+  `/attach` saves and restores the terminal mode and drops input the native
+  session did not read.
+
 - **`yakos dispatch` runs the Go dispatcher by default (K-143).** With
   `YAKOS_IMPL` unset it used to be proxied to the bash `dispatch.sh` whenever
   the bash tree was installed. Now only `YAKOS_IMPL=bash` does that. Behavior

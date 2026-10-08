@@ -1,0 +1,17 @@
+yakOS REPL - conversation conv-1 - router chooses - /help for commands, /exit to leave
+yakos [auto]> [route] codex / gpt-x - set by @prefix - asked with @codex [r-1]
+Context reset (cache): moved from claude to codex. The new runtime starts without the earlier prompt cache; a digest of 3 earlier turns (812 bytes, 1 secret-like value redacted) was added to this message.
+thinking: weighing options
+Looking at it.
+[tool] Bash  {"command":"ls -la"}
+[result] Bash
+    a
+    b
+    c
+[tool] Read  x
+[result: error] Read
+    denied
+Done red done
+-- exit 0 | 2.2s | $0.0123 | gpt-x (codex)
+yakos [auto]> 
+
