@@ -27,21 +27,26 @@ Every transport reaches the same step in `dispatch.Service` (`Run` and
 `RunStream`). The order, highest first, is:
 
 1. **The operator's explicit choice**: `--runtime`/`--model`, `Params.Runtime`,
-   a console pane set to a runtime or model, an `@runtime[:model]` prefix. It is
-   never moved to another vendor by a fallback unless the CLI is given
-   `--runtime-fallback`.
-2. **The sensitive class** (K-140): a request classified sensitive may go only to
-   the primary provider or a local one; this applies over rules, pins and
-   overrides, and it fails closed.
+   a console pane set to a runtime or model, an `@runtime[:model]` prefix, or a
+   bare runtime name as the agent. It is never moved to another vendor by a
+   fallback unless the CLI is given `--runtime-fallback`.
+2. **Sticky conversation** (only with a trusted `router-policy.yml`): a
+   conversation keeps the runtime and model its first turn was routed to. An
+   explicit choice above moves it and re-pins it.
 3. **The agent's pins** (`runtime:`, `model:`), unless a rule sets
-   `override_pins: true`.
+   `override_pins: true`, which ranks the rule's runtime above the pins.
 4. **Router rules** R1 to R6 in `~/.yakos-state/router-policy.yml`.
 5. **Defaults**: `.yakos.yml` `per-domain`, `default-runtime`, `YAKOS_RUNTIME`
    (one-shot CLI only), `~/.yakos-state/default-runtime`, then `claude` (R0).
 6. **Fallbacks and the cooldown**: the agent's `runtime-fallback`, then the
    project's `default-fallback`, filtered by the sign-in probe and, when a
    trusted `router-policy.yml` exists, by the cooldown (three failures in a row
-   skip a runtime for 60 seconds).
+   skip a runtime for 60 seconds, tracked per project root).
+
+**The sensitive class** (K-140) is not a rank in this list. It is a filter on
+the finished candidate chain: a request classified sensitive may go only to the
+primary provider or a local one, whatever step above chose the runtime (explicit
+choice, sticky, pins, rules and fallbacks included). It fails closed.
 
 Then the model ceiling (`max_model`) and `router.disable_*` are applied, and the
 route is recorded on the ledger row (`route_rule`, `route_reason`, `route_class`,

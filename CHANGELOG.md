@@ -44,7 +44,7 @@ never holds a login: ADR-0010. Detailed entries follow.
   and the native session id reach the console, the REPL and the scans. A version
   of codex or agy that differs from the recorded one is flagged by
   `yakos doctor --policy`.
-- **Hooks for codex and agy (K-145).** `yakos hooks install --harness codex|agy`
+- **Hooks for codex and agy (K-145).** `YAKOS_IMPL=go yakos hooks install --harness codex|agy`
   writes a hooks file that runs the Go `budget-guard`, `path-allowlist`,
   `secret-scan` and `supervisor-stream` through `yakos hook run --shape`. The
   command path is absolute and the trust flag is added only for a file whose bytes
@@ -78,7 +78,7 @@ never holds a login: ADR-0010. Detailed entries follow.
 - **Flows triggers (K-152).** `cron` and `webhook` triggers fire only when
   enabled in `~/.yakos-state/schedules/<slug>-<hash>.yaml`, pinned to the
   workflow file's sha256. See `docs/flows.md`.
-- **OpenAI-compatible endpoint (K-150).** `yakos serve --openai-endpoint` (or
+- **OpenAI-compatible endpoint (K-150).** `YAKOS_IMPL=go yakos serve --openai-endpoint` (or
   `openai_endpoint: true` in the trusted policy) serves `/v1/models` and
   `/v1/chat/completions` on `127.0.0.1:7898`, authenticated by the REST write
   token; models are `yakos/auto`, `yakos/agent/<id>` and `<runtime>/<model>`.
@@ -86,10 +86,10 @@ never holds a login: ADR-0010. Detailed entries follow.
   `docs/openai-compatible-endpoint.md`.
 
 - **Anthropic pass-through gateway on 127.0.0.1:7897 (K-151, ADR-0011).** Off
-  by default. `yakos serve --gateway` (or `anthropic_gateway: true` in the
+  by default. `YAKOS_IMPL=go yakos serve --gateway` (or `anthropic_gateway: true` in the
   trusted `~/.yakos-state/router-policy.yml`) serves `/v1/messages`,
   `/v1/messages/count_tokens` and `/v1/models` and forwards them to
-  `api.anthropic.com` only, streaming SSE as it arrives. `yakos start --routed`
+  `api.anthropic.com` only, streaming SSE as it arrives. `YAKOS_IMPL=go yakos start --routed`
   (claude only) launches Claude Code with `ANTHROPIC_BASE_URL`,
   `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` and `ANTHROPIC_AUTH_TOKEN` set and
   `ANTHROPIC_API_KEY` removed from the child. Every gateway request must carry

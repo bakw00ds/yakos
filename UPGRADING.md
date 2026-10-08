@@ -15,17 +15,21 @@ Read this first; the sections below have the detail. Everything marked
 |---|---|---|
 | `yakos dispatch` runs the Go dispatcher (K-143) | **behavior change** | Nothing, or `YAKOS_IMPL=bash` to go back. |
 | `yakos start` opens the REPL under `YAKOS_IMPL=go` (K-154) | **behavior change** | `yakos start --native <runtime>` for the vendor TUI. |
-| A codex or agy agent pin runs on that runtime, in its sandbox (K-132, K-133, v0.62.0.0) | **behavior change** | `--runtime claude` per run, or `allow_unsandboxed_runtimes` in the trusted policy. |
+| A codex or agy agent pin runs on that runtime, in its sandbox (K-132, K-133; already released in v0.62.0.0) | **behavior change** | `--runtime claude` per run, or `allow_unsandboxed_runtimes` in the trusted policy. |
 | `max_model` ceilings govern every runtime; a codex agent under a ceiling is refused until aliases are mapped (K-139c) | **behavior change** | Map codex aliases in `model-registry.yml`, or pin a model. |
 | A request holding a secret or a never-path is kept on claude, or refused (K-140) | **behavior change** | None; project `never_paths` only adds. Not an egress guarantee. |
 | Router rules, cooldown, sticky conversations, `gateway_classes` (K-139, K-141) | opt-in | Create `~/.yakos-state/router-policy.yml` (0600, owned by you). |
-| Hooks for codex and agy (K-145) | opt-in | `yakos hooks install --harness codex` (or `agy`); re-run after moving the `yakos` binary. |
+| Hooks for codex and agy (K-145) | opt-in | `YAKOS_IMPL=go yakos hooks install --harness codex` (or `agy`); re-run after moving the `yakos` binary. |
 | Scans of codex and agy events, `kill_on_critical` (K-146) | on (report only); kill is opt-in | `kill_on_critical: true` in `supervisor-policy.yml`. |
 | Knowledge pack for codex and agy panes (K-149) | on for those panes | None. |
 | Flows `runtime: auto`, cron and webhook triggers (K-142, K-152) | opt-in | Triggers fire only once enabled in `~/.yakos-state/schedules/`. |
-| OpenAI-compatible endpoint on 7898 (K-150) | opt-in | `yakos serve --openai-endpoint`. |
-| Anthropic gateway on 7897 (K-151) | opt-in | `yakos serve --gateway`; see ADR-0011. |
+| OpenAI-compatible endpoint on 7898 (K-150) | opt-in | `YAKOS_IMPL=go yakos serve --openai-endpoint`. |
+| Anthropic gateway on 7897 (K-151) | opt-in | `YAKOS_IMPL=go yakos serve --gateway`, then `YAKOS_IMPL=go yakos start --routed`; see ADR-0011. |
 | Models & Providers tab, `yakos models` and `yakos router policy` writers (K-153) | on (read-only tab) | None. |
+
+The opt-in commands above (`hooks install --harness`, `serve --gateway`,
+`serve --openai-endpoint`, `start --routed`) exist only on the Go path: run them
+with `YAKOS_IMPL=go`.
 
 After upgrading, run `yakos doctor --policy`. It reports the sandbox bypass, a
 codex or agy whose version differs from the one the parsers were recorded
@@ -37,7 +41,8 @@ OAuth proxying, and the Jev tier-suggestion shadow. Rationale: ADR-0010.
 
 ## Unreleased: the Anthropic gateway and `yakos start --routed` (K-151)
 
-New and optional; nothing changes until you turn it on.
+New and optional; nothing changes until you turn it on. Every command in this
+section (`yakos serve --gateway`, `yakos start --routed`) needs `YAKOS_IMPL=go`.
 
 - `yakos serve --gateway` serves the pass-through gateway on `127.0.0.1:7897`
   (flag `--gateway-passthrough-subscription` lets a subscription OAuth token
