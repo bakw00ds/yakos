@@ -1,8 +1,58 @@
 # Routing
 
-This file will hold the routing documentation (rules, fallbacks, the sensitive
-routing class) as those pieces land. Today it covers the model registry (K-138),
-the first piece of routing phase P1.
+How yakOS decides which harness and which model run a task, and where the
+related surfaces are documented. The decision to route between harnesses, by
+spawning each vendor's own binary, is [ADR-0010](adr/ADR-0010.md).
+
+## Map
+
+| Question | Section or document |
+|---|---|
+| Which models exist, how are they billed, who may use them? | [Model registry](#model-registry) |
+| Which runtime and model does a dispatch get, and why? | [Router rules](#router-rules-rules-in-router-policyyml), [Explaining a route](#explaining-a-route) |
+| What happens to a request that mentions secrets or sensitive paths? | [Sensitive class](#sensitive-class-k-140) |
+| How does the console Chat pane route, and what is a handoff? | [Console chat routing](#console-chat-routing-k-148) |
+| How do I edit the registry or policy? | [Policy writers](#policy-writers-yakos-models-and-yakos-router-policy-k-153), [Models & Providers tab](#models--providers-tab-k-153) |
+| How do I send Claude Code sub-agents to a cheaper Claude model? | [Claude Code request-class aliases](#claude-code-request-class-aliases-k-141) (env aliases), or the gateway ([ADR-0011](adr/ADR-0011.md)) |
+| How do Flows choose? | [flows-auto-routing.md](flows-auto-routing.md) (`runtime: auto`), [flows.md](flows.md) (triggers) |
+| How do I expose yakOS to Open WebUI or an OpenAI SDK? | [openai-compatible-endpoint.md](openai-compatible-endpoint.md) |
+| What does each harness support (sandbox, hooks, resume, parsers, scans, accounting)? | [runtime-matrix.md](runtime-matrix.md) |
+| How does the terminal REPL route? | [ADR-0012](adr/ADR-0012.md), [repl.md](repl.md) |
+| Can a local model server be a provider? | [Local providers: a documented slot](#local-providers-a-documented-slot) |
+| Does Jev (TypeSafe) pick models? | [Jev and routing](#jev-and-routing-shadow-only-not-built) |
+
+## One decision, in order
+
+Every transport reaches the same step in `dispatch.Service` (`Run` and
+`RunStream`). The order, highest first, is:
+
+1. **The operator's explicit choice**: `--runtime`/`--model`, `Params.Runtime`,
+   a console pane set to a runtime or model, an `@runtime[:model]` prefix. It is
+   never moved to another vendor by a fallback unless the CLI is given
+   `--runtime-fallback`.
+2. **The sensitive class** (K-140): a request classified sensitive may go only to
+   the primary provider or a local one; this applies over rules, pins and
+   overrides, and it fails closed.
+3. **The agent's pins** (`runtime:`, `model:`), unless a rule sets
+   `override_pins: true`.
+4. **Router rules** R1 to R6 in `~/.yakos-state/router-policy.yml`.
+5. **Defaults**: `.yakos.yml` `per-domain`, `default-runtime`, `YAKOS_RUNTIME`
+   (one-shot CLI only), `~/.yakos-state/default-runtime`, then `claude` (R0).
+6. **Fallbacks and the cooldown**: the agent's `runtime-fallback`, then the
+   project's `default-fallback`, filtered by the sign-in probe and, when a
+   trusted `router-policy.yml` exists, by the cooldown (three failures in a row
+   skip a runtime for 60 seconds).
+
+Then the model ceiling (`max_model`) and `router.disable_*` are applied, and the
+route is recorded on the ledger row (`route_rule`, `route_reason`, `route_class`,
+`fallback_from`, `policy_sha`). With a trusted policy file a conversation is
+sticky: the router never switches a running conversation by itself; the operator
+does, and a switch is shown as a prompt-cache reset. Route metadata is event, ledger and tail-turn data,
+never part of a system prompt (`rule:cache-stability`).
+
+Loosening anything (rules, egress, sandbox bypass, listeners, gateway classes)
+happens only in owner-only, non-symlink files under `~/.yakos-state`. A project
+`.yakos.yml` can tighten and never loosen.
 
 ## Model registry
 
@@ -298,13 +348,11 @@ dearer alias as well counts as the dearer one and is skipped, and the walk goes 
 to the next candidate down (loading an overlay that does this warns, naming both
 aliases).
 
-One gap to close before the clamp serves a harness other than claude: a model that
-no alias maps to has no class, so it passes any ceiling. On claude all four tiers
-have one; on agy only the five models the aliases name do, and a sibling such as
-`claude-opus-5-5-low` passes a `cheap` ceiling. Whoever wires Clamp to agy or codex
-(K-139, K-142) must decide what an unranked model under a ceiling means, and
-`Registry.ClassOf` tells the two cases apart. `TestClamp_UnrankedModelsPassThroughByDesign`
-pins today's behaviour so changing it is deliberate.
+`Clamp` itself still passes a model with no class through (pinned by
+`TestClamp_UnrankedModelsPassThroughByDesign`); the caller decides. Dispatch
+decides through `EnforceCeiling`: an unranked model under a ceiling is refused
+(K-139c), so a sibling such as `claude-opus-5-5-low` on agy does not slip past a
+`cheap` ceiling.
 
 ### What this does not change
 
@@ -734,3 +782,48 @@ environment aliases.
   with the routing decision (see "Explaining a route").
 - `yakos doctor --policy` lists the active classes and the ones the operator's
   environment overrides.
+
+## Local providers: a documented slot
+
+Not built in this release: no code reads this shape, and nothing is tested
+against a local model server. It is written down so the next step does not
+reopen the design. [ADR-0010](adr/ADR-0010.md) has the reasoning.
+
+A local provider is an entry with `kind: local` and an `api` that names the wire
+the server speaks. The registry already carries `billing: local` (tokens counted,
+dollars never) and a provider label; the missing part is a provider table and a
+launcher per `api`.
+
+| `api` | Meant for | Harness that would talk to it | Server needs |
+|---|---|---|---|
+| `anthropic-messages` | A server that answers `POST /v1/messages` in Anthropic's format: Ollama 0.14 or later, LM Studio, llama.cpp's server | Claude Code, with `ANTHROPIC_BASE_URL` pointed at the server (the way ADR-0011's gateway does) | Anthropic Messages, streaming SSE, tool use |
+| `openai-responses` | A server that answers the OpenAI Responses API | Codex with `--oss --local-provider <name>`, and the OpenAI-compatible endpoint | Responses API (Codex requires it for custom providers) |
+
+Rules for whoever builds it:
+
+- A local provider is always opt-in, in a trusted user-level file; a project
+  `.yakos.yml` cannot add one. The server address must be loopback unless the
+  operator names another host in that file.
+- It satisfies the sensitive class, since the request does not leave the host.
+- It is never a default and never a fallback for a named runtime.
+- Claude Code against a non-Claude model behind `anthropic-messages` is not
+  supported by Anthropic; yakOS would label it as such and would not route to it
+  from a class alias.
+- Accounting is `billing: local`: tokens only.
+- Nothing about the provider (address, model id, route) goes into a system prompt.
+
+## Jev and routing (shadow-only, not built)
+
+The `routing` surface of the Jev decision provider
+([decision-providers.md](decision-providers.md), [ADR-0009](adr/ADR-0009.md)) is
+decided as **shadow-only**: a question over `{agent, task_preview, touches_code}`
+would suggest a tier, the suggestion would be written to the ledger as
+`tier_suggested_by_jev`, and it would never change the route, the model ceiling or
+the sensitive class. Reason: a live per-task downgrade picks the model that writes
+the code and would bypass the offline Wilson-interval promotion gate
+(`internal/routing`). The shadow field exists to compare Jev's suggestion against
+that eval later. It is not implemented yet: the ledger has no such field, no
+decision file for it exists in `lib/decisions/`, and `yakos decide` has no routing
+subcommand. When it lands it will follow ADR-0009: off by default, enabled only
+from a trusted file, task text redacted before it leaves the host, a 1.5-second
+deadline, and failure leaves routing exactly as it is.

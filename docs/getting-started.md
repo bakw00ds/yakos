@@ -525,7 +525,7 @@ another machine.
 | Tab | What it shows |
 |---|---|
 | **Overview** | Live activity feed of dispatches, workflow events, and operator presence. |
-| **Chat** | Per-model REPL panes — pick runtime (claude/codex/agy/gemini) and model tier (haiku/sonnet/opus/fable) per pane. Claude streams token-by-token; others arrive buffered. Multi-turn with persisted transcripts. |
+| **Chat** | Per-model REPL panes — pick a routing mode (auto, or a runtime: claude/codex/agy) and a model and model tier (haiku/sonnet/opus/fable) per pane. claude streams token by token, agy by text fragment, codex message by message, all with tool cards. Multi-turn with persisted transcripts. |
 | **Flows** | YAML workflow builder. Author, run, and watch a live SVG DAG canvas with per-run cost. |
 | **Kanban** | The project kanban board with the same drag-and-drop UI as `yakos kanban serve`. |
 | **Cost** | Token spending over time (same data as `yakos metrics report`). |

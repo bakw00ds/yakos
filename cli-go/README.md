@@ -12,8 +12,8 @@ commands not yet ported.
 `validate`, `cost`, `status`, `doctor`, `refresh`, `kanban`, `dispatch`, `team`, `archive`, `init`, `install`, `uninstall`, `start`, `update`, `quickstart`, `auth`, `memory`, `agent`,
 `session`, `migrate`, `plugin`, `teach`, `soul`, `retro`, `skill`, `compact`, `checkpoint`, `env`, `standards`, `peer`, `mcp`, `completion`, `git-hooks`, `supervise`, `plan score`, `work close`, `model-routing`, and `hooks` subcommands are implemented natively in Go (ranks 2–41 in `docs/go-port-plan.md`). Worktree cleanup at archive time is explicitly NOT in scope (same
 caveat as bash; manual in v0.1). Hook script installation in `init` prints an advisory directing to
-`yakos refresh` (bash handles hook copies in Phase 1). `yakos start` exec's the runtime CLI replacing
-the current process (Unix syscall.Exec); workspace hook wiring (jq-based settings.json merge) is
+`yakos refresh` (bash handles hook copies in Phase 1). `yakos start --native <runtime>` exec's the runtime CLI replacing
+the current process (Unix syscall.Exec), and under `YAKOS_IMPL=go` plain `yakos start` on a terminal opens the REPL instead (K-154); workspace hook wiring (jq-based settings.json merge) is
 handled by the bash wrapper in Phase 1. `yakos session export` is deferred (tar/gzip plumbing out of
 scope for Phase 1); use `YAKOS_IMPL=bash yakos session export` for that path. `yakos migrate down`
 is deferred to Phase 1.5; use `YAKOS_IMPL=bash yakos migrate` for rollback. `yakos peer propose-mode`
@@ -136,8 +136,12 @@ is safe.
 
 ## Shadow-mode commands
 
-The table below describes behavior when `YAKOS_IMPL=go`. When `YAKOS_IMPL` is
-unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
+The table below describes behavior when `YAKOS_IMPL=go`. With `YAKOS_IMPL` unset,
+only `dispatch` and `doctor` run Go (K-143), plus `hook`, `decide`, `budget`,
+`models` and `router`, which are always Go; every other row is proxied to bash
+yakos when the bash tree is installed. With `YAKOS_IMPL=bash` everything is
+proxied, `dispatch` and `doctor` included. `yakos start` opens the REPL (K-154) only
+under `YAKOS_IMPL=go`; otherwise it launches the vendor TUI as before.
 
 | Command | Handled by (YAKOS_IMPL=go) |
 |---|---|
@@ -172,6 +176,9 @@ unset or `bash`, ALL commands are proxied to bash yakos regardless of the row.
 | `yakos supervise <sub> [args]` | Go (full feature parity with `cli/lib/supervise.sh`; enable/disable/status/tail/clear/set/pending/ack/ack-all subcommands; gate-on-CRITICAL, ack tracking, finding IDs; atomic YAML writes; YAKOS_SUPERVISOR_DISABLE bypass) |
 | `yakos plan score <sub> [args]` | Go (full feature parity with `cli/lib/plan-score.sh`; show/history/override/correlate subcommands; reads plan-quality-log.ndjson; Pearson r + quartile + threshold→outcome report; .plan-blocked marker removal on override) |
 | `yakos work close [args]` | Go (full feature parity with `cli/lib/work-close.sh`; appends plan_outcome record; git diff stats, dispatch-log sums, rework cycles, first_try_pass, scope_creep_ratio; non-blocking on missing data; injectable GitFn+PromptFn) |
+| `yakos models [args]`, `yakos router <sub> [args]` | Go only (K-138, K-139b, K-153): model registry, route explanation, trusted policy writers; no bash twin |
+| `yakos hook run <name>`, `yakos decide [args]`, `yakos budget <sub>` | Go only (hook runner for claude, codex and agy shapes; decision providers; budgets) |
+| `yakos serve [--gateway] [--openai-endpoint]` | Go only (console daemon; the Anthropic gateway on 7897 and the OpenAI-compatible endpoint on 7898 are off unless asked) |
 | `yakos --help` | Proxied to bash (with transition note) |
 | `yakos <anything>` | Proxied to bash |
 

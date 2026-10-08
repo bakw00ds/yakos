@@ -544,17 +544,15 @@ configured:
   runtime (an alias with no mapping, such as any alias on codex, means the
   harness default).
 
-**Streaming behavior:** claude panes stream tokens as they arrive
-(`--include-partial-messages` unframed mode). codex and agy
-panes receive a single buffered response. The UI labels buffered panes
-so you know to wait for the full response. A buffered response is the
-agent's text, parsed from the runtime's own output (codex JSONL, agy
-stream-json), never the raw stream. A turn the runtime reports as failed adds
-an error chunk, which the pane renders as an error message. The dispatch
-layer's closing summary chunk now also carries the token usage (`input_tokens`
-is the fresh prompt, cache counts are separate) and the runtime's session id,
-but the chat handler does not forward them to the browser yet, so the pane
-shows neither today; that lands with the P0a and P0d work.
+**Streaming behavior:** every runtime goes through its stream parser (K-144), so
+a pane shows the same kinds of event: text, thinking, tool calls and their
+results, then a closing summary. claude streams token by token
+(`--include-partial-messages` unframed mode); agy streams the text fragments it
+sends; codex delivers each message whole when codex finishes it, with tool cards
+as they happen. A turn the runtime reports as failed adds an error chunk, which
+the pane renders as an error message. The route chip, the handoff banner and
+`@runtime` overrides are in [routing.md](routing.md#console-chat-routing-k-148).
+Tool and thinking cards are live only; the persisted transcript keeps the text.
 
 Each pane is **multi-turn** with a persisted transcript at
 `<work>/current/chats/<conversationID>.ndjson`. Refreshing the browser
