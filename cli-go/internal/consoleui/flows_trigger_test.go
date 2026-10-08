@@ -441,7 +441,6 @@ func TestTrigger_ReplayAndClockWindow(t *testing.T) {
 func TestTrigger_RateLimitedPerWorkflow(t *testing.T) {
 	block := make(chan struct{})
 	env := newTrigEnv(t, block)
-	defer close(block)
 	env.enable(hookEnabled, 0o600)
 	// Unsigned traffic never counts: a token holder cannot lock out the sender.
 	for i := 0; i < 20; i++ {
@@ -452,10 +451,24 @@ func TestTrigger_RateLimitedPerWorkflow(t *testing.T) {
 		r.Body.Close()
 	}
 	codes := map[int]int{}
+	runID := ""
 	for i := 0; i < 8; i++ {
 		r := env.doAs(trigID, secretHdr(trigSecret), "/flows/api/trigger/hooked", `{}`)
 		codes[r.StatusCode]++
-		r.Body.Close()
+		if r.StatusCode == http.StatusAccepted {
+			var started struct {
+				RunID string `json:"run_id"`
+			}
+			_ = json.Unmarshal([]byte(readAll(t, r)), &started)
+			runID = started.RunID
+		} else {
+			r.Body.Close()
+		}
+	}
+	// Release the one accepted run and let it finish before TempDir cleanup.
+	close(block)
+	if runID != "" {
+		waitForRunStatus(t, env.workDir, runID, "completed")
 	}
 	if codes[http.StatusTooManyRequests] != 2 || codes[http.StatusAccepted] != 1 || codes[http.StatusConflict] != 5 {
 		t.Fatalf("status counts %v, want 1x202, 5x409, 2x429", codes)
