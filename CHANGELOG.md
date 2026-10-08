@@ -25,6 +25,21 @@ never holds a login: ADR-0010. Detailed entries follow.
   the Anthropic gateway (K-151), Flows triggers (K-152), the Models & Providers
   tab and policy writers (K-153), the REPL (K-154).
 
+- **fix(dispatch): bash dispatch deadline, model ceiling and `promote` (K-168, K-169).**
+  `dispatch.sh` runs its adapter function under a shell-native deadline instead of
+  GNU `timeout` (which failed with exit 127 on Linux and on macOS with coreutils),
+  and INT, TERM and HUP stop the adapter's whole process group (exit 130). The
+  deadline is stricter: `s`, `m`, `h`, `d` suffixes; leading zeros are decimal;
+  0, negatives, fractions, junk and over 7 days are refused before the job starts.
+  The `max_model` ceiling on the bash path now ranks the effective model of a
+  model-less or `model-policy:` agent, resolves the runtime before ranking,
+  refuses a ceilinged agent that resolves to codex or agy (bash cannot pin their
+  models), switches the runtime-fallback lists off, and always appends `--model`
+  and `--runtime claude` last, so bash cannot run a dearer model or another
+  runtime whatever agent file or argv it reads. `yakos model-routing promote`
+  refuses symlinked agent paths (rechecked before the rename) and keeps the file
+  mode. See UPGRADING.md.
+
 - **fix: agent-file readers use the roster reader, and the feed scan cannot be
   hung by a FIFO (K-167, K-171).** `yakos doctor`, `yakos validate`, `yakos
   refresh` and `yakos install` no longer open an agent file with a plain read: a

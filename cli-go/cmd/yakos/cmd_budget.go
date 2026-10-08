@@ -6,6 +6,8 @@ import (
 	"io"
 	"math"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -14,6 +16,9 @@ import (
 	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/modelreg"
+	"github.com/bakw00ds/yakos/internal/projectcfg"
+	"github.com/bakw00ds/yakos/internal/runtime"
 )
 
 // Exit-code contract of `yakos budget` (docs/budgets.md):
@@ -429,6 +434,9 @@ func budgetGateBeforePassthrough(args []string, yakosRoot string) []string {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(budget.ExitHardStop)
 	}
+	if budget.MaxModel(agent, budget.Options{Project: project}) != "" {
+		_ = os.Setenv(noFallbackEnv, "1")
+	}
 	return out
 }
 
@@ -436,103 +444,155 @@ func budgetGateBeforePassthrough(args []string, yakosRoot string) []string {
 // dispatch's argv: it lowers a model above the ceiling and refuses one the
 // registry cannot rank, as the Go-native dispatch does. The project is passed so
 // an agent the project names as its supervisor keeps the supervisor's ceiling.
+//
+// The bash relay resolves the agent file, the runtime and its own argv itself,
+// so ranking alone cannot bound what it runs (a symlinked agent, an id:
+// collision, `--runtime auto`, a flag value that looks like a flag, a fallback
+// chain naming codex). Under a ceiling the dispatch therefore
+//
+//   - is refused when the runtime it resolves to is not claude: bash cannot pin a
+//     codex or agy model, and the Go-native dispatcher refuses an unranked one;
+//   - gets `--model <ranked>` and then `--runtime claude` appended LAST, whatever
+//     the argv already says, because the bash parser lets the last one win; and
+//   - runs with its runtime-fallback lists switched off (YAKOS_DISPATCH_NO_FALLBACK,
+//     read by dispatch.sh), so an absent claude is an error, not codex.
+//
+// Bash then runs nothing dearer than what was ranked, whatever file it read
+// (K-168).
 func passthroughClamped(args []string, agent, project, yakosRoot string) ([]string, error) {
-	out, err := clampDispatchModel(args, agent, project)
+	ceiling := budget.MaxModel(agent, budget.Options{Project: project})
+	if ceiling == "" {
+		return args, nil
+	}
+	a := rosterAgent(yakosRoot, project, agent)
+	rt := passthroughRuntimeFor(args, a, project)
+	if rt != "claude" {
+		return nil, fmt.Errorf("dispatch: agent %s has max_model %s and resolves to runtime %q; the bash dispatch cannot pin a %s model, so it is refused (use the Go dispatcher, or unset the runtime)", agent, ceiling, rt, rt)
+	}
+	model, _ := argvFlag(args, "--model")
+	if model == "" {
+		model = bashEffectiveModel(a)
+	}
+	pin, note, err := dispatch.EnforceModelCeiling(rt, agent, ceiling, model)
 	if err != nil {
 		return nil, err
 	}
-	if !hasModelFlag(out) {
-		return clampFrontmatterModel(out, agent, project, yakosRoot)
+	if !runtime.ValidateTier(pin) {
+		return nil, fmt.Errorf("dispatch: model %q for agent %s is not a tier the bash dispatch accepts, so max_model %s cannot be pinned and it is refused", pin, agent, ceiling)
 	}
+	if note != "" {
+		fmt.Fprintf(os.Stderr, "yakos budget: %s\n", note)
+	}
+	out := append(append([]string(nil), args...), "--model", pin, "--runtime", "claude")
 	return out, nil
 }
 
-// passthroughRuntime is the harness whose registry column ranks the model: the
-// --runtime the argv names, else claude (the bash dispatch's default).
-func passthroughRuntime(args []string) string {
-	rt := "claude"
-	for i, a := range args {
-		switch {
-		case a == "--runtime" && i+1 < len(args):
-			rt = args[i+1]
-		case strings.HasPrefix(a, "--runtime="):
-			rt = strings.TrimPrefix(a, "--runtime=")
-		}
-	}
-	if rt == "" || rt == "auto" {
-		rt = "claude"
-	}
-	return rt
-}
+// noFallbackEnv is read by cli/lib/dispatch.sh: set to 1, the runtime chain is the
+// one runtime it was given, with no frontmatter or project fallbacks.
+const noFallbackEnv = "YAKOS_DISPATCH_NO_FALLBACK"
 
-func hasModelFlag(args []string) bool {
-	for _, a := range args {
-		if a == "--model" || strings.HasPrefix(a, "--model=") {
-			return true
-		}
-	}
-	return false
-}
-
-// clampFrontmatterModel covers a passthrough dispatch with no --model: the
-// bash dispatch would resolve the agent's frontmatter model and pin the relay
-// to it, bypassing the max_model ceiling. When the composed frontmatter model
-// exceeds the ceiling, an explicit --model <ceiling> is appended (K-116).
-func clampFrontmatterModel(args []string, agent, project, yakosRoot string) ([]string, error) {
+// rosterAgent is the composed agent named id, or the zero agent when the roster
+// cannot be read or has none (the bash dispatch then falls back to its defaults).
+func rosterAgent(yakosRoot, project, id string) agentscompose.ComposedAgent {
 	if yakosRoot == "" {
-		return args, nil
+		return agentscompose.ComposedAgent{}
 	}
 	roster, err := agentscompose.Compose(yakosRoot, project)
 	if err != nil {
-		return args, nil
+		return agentscompose.ComposedAgent{}
 	}
 	for _, a := range roster {
-		if a.ID != agent || a.Model == "" {
-			continue
+		if a.ID == id {
+			return a
 		}
-		ceiling := budget.MaxModel(agent, budget.Options{Project: project})
-		clamped, note, err := dispatch.EnforceModelCeiling(passthroughRuntime(args), agent, ceiling, a.Model)
-		if err != nil {
-			return nil, err
-		}
-		if note == "" {
-			return args, nil
-		}
-		fmt.Fprintf(os.Stderr, "yakos budget: %s\n", note)
-		return append(append([]string(nil), args...), "--model", clamped), nil
 	}
-	return args, nil
+	return agentscompose.ComposedAgent{}
 }
 
-// clampDispatchModel lowers an explicit --model on a passthrough dispatch to
-// the agent's max_model ceiling (the bash dispatch has no ceiling of its own).
-func clampDispatchModel(args []string, agent, project string) ([]string, error) {
-	ceiling := budget.MaxModel(agent, budget.Options{Project: project})
-	rt := passthroughRuntime(args)
-	out := append([]string(nil), args...)
-	for i := 0; i < len(out); i++ {
-		model := ""
+// argvFlag is the value the bash dispatch's parser gives flag (--runtime,
+// --model, ...): it walks the argv as dispatch.sh does, so a flag-looking string
+// that is the VALUE of another flag (`--eval-run-id --runtime=claude`) is not
+// read as a flag, and the last occurrence wins. ok is false when none is given.
+func argvFlag(args []string, flag string) (val string, ok bool) {
+	if len(args) == 0 || args[0] != "dispatch" {
+		return "", false
+	}
+	rest := args[1:]
+	for i := 0; i < len(rest); i++ {
+		a := rest[i]
 		switch {
-		case out[i] == "--model" && i+1 < len(out):
-			model = out[i+1]
-		case strings.HasPrefix(out[i], "--model="):
-			model = strings.TrimPrefix(out[i], "--model=")
-		default:
-			continue
-		}
-		clamped, note, err := dispatch.EnforceModelCeiling(rt, agent, ceiling, model)
-		if err != nil {
-			return nil, err
-		}
-		if note == "" {
-			continue
-		}
-		fmt.Fprintf(os.Stderr, "yakos budget: %s\n", note)
-		if out[i] == "--model" {
-			out[i+1] = clamped
-		} else {
-			out[i] = "--model=" + clamped
+		case dispatchValueFlags[a]:
+			if i+1 < len(rest) {
+				if a == flag {
+					val, ok = rest[i+1], true
+				}
+				i++
+			}
+		case strings.HasPrefix(a, "--") && strings.Contains(a, "="):
+			if k, v, _ := strings.Cut(a, "="); k == flag {
+				val, ok = v, true
+			}
 		}
 	}
-	return out, nil
+	return val, ok
+}
+
+// argvRuntime is the --runtime the bash parser reads from the argv, or "".
+func argvRuntime(args []string) string {
+	v, _ := argvFlag(args, "--runtime")
+	return v
+}
+
+// passthroughRuntimeFor resolves the runtime the bash dispatch would pick, in its
+// order: --runtime, the agent's frontmatter runtime:, .yakos.yml (per-domain, then
+// default-runtime), YAKOS_RUNTIME, the state default, claude. A ceiling ranks the
+// model on that runtime's column, never on claude's for a codex agent (K-168).
+func passthroughRuntimeFor(args []string, a agentscompose.ComposedAgent, project string) string {
+	// "auto" is no runtime to the bash parser; it resolves like an absent one.
+	if rt := argvRuntime(args); rt != "" && rt != "auto" {
+		return rt
+	}
+	if rt := strings.TrimSpace(a.Runtime); rt != "" {
+		return rt
+	}
+	cfg, _ := projectcfg.Load(project)
+	if rt, _ := cfg.RuntimeFor(a.Domain); rt != "" {
+		return rt
+	}
+	if rt := strings.TrimSpace(os.Getenv("YAKOS_RUNTIME")); rt != "" {
+		return rt
+	}
+	if d := modelreg.DefaultStateDir(); d != "" {
+		if data, err := os.ReadFile(filepath.Join(d, "default-runtime")); err == nil {
+			f := strings.Fields(string(data))
+			if len(f) > 0 && runtimeNameRe.MatchString(f[0]) {
+				return f[0]
+			}
+		}
+	}
+	return "claude"
+}
+
+var runtimeNameRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
+
+// bashDefaultModel is the tier cli/lib/dispatch.sh runs when neither the
+// frontmatter nor a promoted policy names one (MODEL_RESOLVED's fallback).
+const bashDefaultModel = "sonnet"
+
+// bashEffectiveModel is the model the bash dispatch would run for a without a
+// --model: model-policy (a promoted tier) over model, each alias-resolved, else
+// the fixed bashDefaultModel. It mirrors dispatch.sh's resolution, so the clamp
+// ranks what the relay will actually use rather than the composed model alone.
+func bashEffectiveModel(a agentscompose.ComposedAgent) string {
+	if p := strings.TrimSpace(a.ModelPolicy); p != "" {
+		return runtime.ResolveAlias(p)
+	}
+	m := strings.TrimSpace(a.ModelRaw)
+	if m == "" {
+		m = a.Model
+	}
+	if m == "" {
+		return bashDefaultModel
+	}
+	return runtime.ResolveAlias(m)
 }
