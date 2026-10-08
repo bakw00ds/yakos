@@ -1,0 +1,38 @@
+# Review a diff with three independent reviewers, then merge their findings.
+version: 1
+name: pr-review-multi-model
+inputs:
+  diff: "Paste the diff or name the branch to review."
+nodes:
+  - id: correctness
+    agent: code-reviewer
+    runtime: auto
+    model: auto
+    prompt: "Review for correctness bugs and missing tests. Subject: ${inputs.diff}"
+    output_limit: 8000
+  - id: security
+    agent: security-reviewer
+    runtime: auto
+    model: auto
+    prompt: "Review for security problems (injection, authz, secrets, unsafe defaults). Subject: ${inputs.diff}"
+    output_limit: 8000
+  - id: maintainability
+    agent: code-reviewer
+    runtime: auto
+    model: auto
+    prompt: "Review for readability, structure and needless complexity. Subject: ${inputs.diff}"
+    output_limit: 8000
+  - id: merge
+    agent: code-reviewer
+    runtime: auto
+    model: auto
+    needs: [correctness, security, maintainability]
+    timeout: 900
+    prompt: |
+      Merge these three reviews into one list, highest severity first. Drop
+      duplicates and say which reviewer raised each finding.
+
+      Correctness: ${nodes.correctness.output}
+      Security: ${nodes.security.output}
+      Maintainability: ${nodes.maintainability.output}
+    output_limit: 24000

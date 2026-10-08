@@ -4974,6 +4974,14 @@ html[data-theme="light"] .term-viewport {
   padding: 4px 8px;
 }
 
+/* Flows template gallery (K-152) */
+.flows-gallery-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
+.flows-gallery-box { background: var(--color-bg-base, var(--bg)); border: 1px solid var(--accent); border-radius: var(--radius-control, 4px); padding: 16px; max-width: 520px; width: 90%; max-height: 80vh; overflow: auto; }
+.flows-gallery-list { list-style: none; margin: 8px 0; padding: 0; }
+.flows-gallery-item { display: flex; gap: 8px; align-items: center; padding: 6px 0; }
+.flows-gallery-desc { flex: 1; font-size: 12px; opacity: 0.8; }
+.flows-gallery-status { min-height: 1.2em; font-size: 12px; }
+
 /* Context drawer (K-149) */
 .context-drawer {
   position: fixed;

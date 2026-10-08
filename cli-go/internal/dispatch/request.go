@@ -137,7 +137,7 @@ type Request struct {
 	// from the harness environment), so no transport can claim a cheaper class.
 
 	// Surface names the entry point that made this dispatch, one of the
-	// Surface* constants: cli, console-chat, mcp, jsonrpc, rest, grpc, flows. The
+	// Surface* constants: cli, console-chat, mcp, jsonrpc, rest, grpc, flows, trigger. The
 	// transport stamps it (Params.Surface; the CLI sets it itself). Empty is
 	// allowed and is simply left out of the event.
 	Surface string
@@ -166,5 +166,6 @@ const (
 	SurfaceREST        = "rest"
 	SurfaceGRPC        = "grpc"
 	SurfaceFlows       = "flows"
+	SurfaceTrigger     = "trigger" // a Flows run started by a cron or webhook trigger
 	SurfaceLibrary     = "library" // pkg/dispatch, the embeddable Go API
 )

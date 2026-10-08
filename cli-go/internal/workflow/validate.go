@@ -39,6 +39,10 @@ func Validate(wf *Workflow) error {
 		return err
 	}
 
+	if err := validateTriggers(wf.Triggers); err != nil {
+		return err
+	}
+
 	// --- M2. Node count cap ---
 	if len(wf.Nodes) > maxWorkflowNodes {
 		return fmt.Errorf("workflow: %q has %d nodes, exceeds limit of %d", wf.Name, len(wf.Nodes), maxWorkflowNodes)

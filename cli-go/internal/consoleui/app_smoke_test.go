@@ -81,3 +81,18 @@ func TestSWJSSmokeTest(t *testing.T) {
 		t.Fatalf("sw-smoke.js exited non-zero: %v\noutput:\n%s", err, out)
 	}
 }
+
+// TestFlowsGallerySmoke runs dist/flows-gallery-smoke.js (K-152): the gallery
+// module against a fake DOM, checking it lists templates, sets server text as
+// text (never HTML), and saves a copy through POST /flows/api/workflow.
+func TestFlowsGallerySmoke(t *testing.T) {
+	nodeBin, err := exec.LookPath("node")
+	if err != nil {
+		t.Skip("node not on PATH")
+	}
+	_, thisFile, _, _ := runtime.Caller(0)
+	script := filepath.Join(filepath.Dir(thisFile), "dist", "flows-gallery-smoke.js")
+	if out, err := exec.Command(nodeBin, script).CombinedOutput(); err != nil {
+		t.Fatalf("flows-gallery-smoke.js: %v\n%s", err, out)
+	}
+}

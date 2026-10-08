@@ -906,10 +906,22 @@ func handleWorkflowStatus(cfg Config) jsonrpc.Handler {
 
 		rs, err := workflow.LoadRunState(runDir)
 		if err != nil {
-			if os.IsNotExist(err) {
-				return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("workflow.status: run %q not found", p.RunID)}
-			}
-			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("workflow.status: %v", err)}
+			// A missing run and a run whose run.json cannot be read or parsed
+			// answer identically ("not found"), so a malformed foreign run is
+			// not distinguishable from a missing one. LoadRunState's error
+			// carries the run.json path; it stays out of the reply. Residual:
+			// the parse makes a foreign run's reply measurably slower than a
+			// missing one's; the socket is 0600 and its caller is the same OS
+			// user, who can read run.json directly, so this is accepted.
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("workflow.status: run %q not found", p.RunID)}
+		}
+		// K-166: a run belongs to the operator who started it. This socket's
+		// caller is the daemon's loopback operator (workflowOwnerID), so a run
+		// owned by anyone else (a networked console user, a webhook caller) is
+		// answered exactly like a missing one: no existence oracle. A run with
+		// no recorded owner predates ownership and stays readable.
+		if rs.OwnerOpID != "" && rs.OwnerOpID != workflowOwnerID(cfg) {
+			return nil, &jsonrpc.RPCError{Code: jsonrpc.CodeInternalError, Message: fmt.Sprintf("workflow.status: run %q not found", p.RunID)}
 		}
 		return rs, nil
 	}
