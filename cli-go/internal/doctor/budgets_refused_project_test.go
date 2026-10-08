@@ -44,6 +44,11 @@ func TestAgentBudgetsSaysWhenTheProjectFileWasRefused(t *testing.T) {
 			if !strings.Contains(out, ".yakos.yml was not read") || rep.Warnings != 1 {
 				t.Fatalf("no refusal finding (warnings %d):\n%s", rep.Warnings, out)
 			}
+			for _, want := range []string{"every project setting in it is ignored", "budget, models, injection_scan, decisions, supervisor-gate"} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("the finding does not say all project settings are ignored (%q missing):\n%s", want, out)
+				}
+			}
 			if strings.Contains(out, proj) || strings.Contains(out, "backend") {
 				t.Fatalf("the finding names the path or the file's text:\n%s", out)
 			}

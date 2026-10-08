@@ -80,8 +80,12 @@ never holds a login: ADR-0010. Detailed entries follow.
   workflow file's sha256. See `docs/flows.md`.
 - **OpenAI-compatible endpoint (K-150).** `YAKOS_IMPL=go yakos serve --openai-endpoint` (or
   `openai_endpoint: true` in the trusted policy) serves `/v1/models` and
-  `/v1/chat/completions` on `127.0.0.1:7898`, authenticated by the REST write
-  token; models are `yakos/auto`, `yakos/agent/<id>` and `<runtime>/<model>`.
+  `/v1/chat/completions` on `127.0.0.1:7898`, authenticated by its own token in
+  `~/.yakos-state/openai-endpoint-token` (K-174; rotate it with
+  `yakos serve --rotate-openai-token`; the REST write token is not accepted, so an
+  existing client that sends the REST write token gets 401 until it is switched to
+  the contents of `~/.yakos-state/openai-endpoint-token`; read it with `cat`, rotate
+  it with `yakos serve --rotate-openai-token`); models are `yakos/auto`, `yakos/agent/<id>` and `<runtime>/<model>`.
   Tools and function calling are refused. See
   `docs/openai-compatible-endpoint.md`.
 

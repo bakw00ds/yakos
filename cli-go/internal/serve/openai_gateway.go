@@ -16,6 +16,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/gateway/openai"
 	"github.com/bakw00ds/yakos/internal/perfdash"
 	"github.com/bakw00ds/yakos/internal/routerpolicy"
+	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
 // openAIEndpointEnabled says whether the endpoint should start: the flag, or the
@@ -39,10 +40,24 @@ func openAIEndpointEnabled(flag bool, policyDir string) bool {
 // startOpenAIGateway binds the endpoint and serves it in the background. A failed
 // bind is a loud warning and the daemon continues without it (the same rule as
 // the MCP listener: the port is fixed, so a squatter must be visible).
-func startOpenAIGateway(ctx context.Context, cfg Config, svc *dispatch.Service, writeToken string, errCh chan error) error {
+func startOpenAIGateway(ctx context.Context, cfg Config, svc *dispatch.Service, errCh chan error) error {
+	// The endpoint has its own token (K-174), not the REST write token. It is
+	// minted on first start and then kept; `yakos serve --rotate-openai-token`
+	// replaces it, and the endpoint reads the file per request.
+	tokenDir := cfg.OpenAITokenDir
+	if tokenDir == "" {
+		tokenDir = statepath.Dir()
+	}
+	if _, err := openai.LoadOrCreateToken(tokenDir); err != nil {
+		msg := fmt.Sprintf("the OpenAI-compatible endpoint token could not be prepared: %v; the endpoint is DISABLED for this run", err)
+		slog.Error("serve: " + msg)
+		fmt.Fprintln(os.Stderr, "yakos serve: WARNING: "+msg)
+		close(errCh)
+		return nil
+	}
 	srv, err := openai.New(openai.Config{
 		Addr:        cfg.OpenAIAddr,
-		WriteToken:  writeToken,
+		Token:       openai.FileToken(tokenDir),
 		Service:     svc,
 		Transcripts: consoleui.NewTranscripts(perfdash.DefaultWorkDir(cfg.WorkspaceRoot)),
 		YakosRoot:   cfg.YakosRoot,
@@ -60,7 +75,7 @@ func startOpenAIGateway(ctx context.Context, cfg Config, svc *dispatch.Service, 
 		close(errCh)
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "yakos serve: openai-compatible endpoint: http://%s/v1 (bearer: the REST write token)\n", ln.Addr())
+	fmt.Fprintf(os.Stderr, "yakos serve: openai-compatible endpoint: http://%s/v1 (bearer: the token in %s)\n", ln.Addr(), openai.TokenPath(tokenDir))
 	go func() { errCh <- srv.ServeListener(ctx, ln) }()
 	return nil
 }

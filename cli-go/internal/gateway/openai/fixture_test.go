@@ -105,7 +105,7 @@ func newFixture(t *testing.T) *fixture {
 
 	svc := dispatch.NewService(dispatch.ServiceConfig{YakosRoot: f.yroot, WorkspaceRoot: f.workspace, OperatorID: "daemon"})
 	srv, err := openai.New(openai.Config{
-		Addr: addr, WriteToken: testToken, Service: svc, Transcripts: f.store,
+		Addr: addr, Token: func() string { return testToken }, Service: svc, Transcripts: f.store,
 		YakosRoot: f.yroot, Workspace: f.workspace,
 		Registry: func(string) (*modelreg.Registry, error) { return modelreg.Load(modelreg.Options{}) },
 		SignedIn: func(_ context.Context, h string) bool { return f.signedIn[h] },
