@@ -94,6 +94,10 @@ const (
 type fileRules struct {
 	roots   []string
 	outside string
+	// anywhere lets a symlink lead to any regular file. It is for a caller that
+	// has already decided which directory it reads (ReadRegularFile) and wants only
+	// the type, size and swap checks, not the roots.
+	anywhere bool
 }
 
 func agentRules(yakosRoot, project string) fileRules {
@@ -153,14 +157,14 @@ func SkillFileRoots(yakosRoot, project string) []string {
 // without opening it, so a FIFO cannot block it. The error is for a file that
 // cannot even be examined, which is not the same as a file that is refused.
 func InspectAgentFile(path string, roots []string) (Problem, error) {
-	_, _, problem, err := inspect(path, roots)
+	_, _, problem, err := inspect(path, roots, false)
 	return problem, err
 }
 
 // inspect is InspectAgentFile that also says what it looked at: the identity of
 // the file that would be read, and the path to open it by, which for a symlink is
 // the path it resolves to and not the link.
-func inspect(path string, roots []string) (target os.FileInfo, openPath string, problem Problem, err error) {
+func inspect(path string, roots []string, anywhere bool) (target os.FileInfo, openPath string, problem Problem, err error) {
 	fi, err := os.Lstat(path)
 	if err != nil {
 		return nil, "", ProblemNone, err
@@ -175,7 +179,7 @@ func inspect(path string, roots []string) (target os.FileInfo, openPath string, 
 		if err != nil || !resolvedInfo.Mode().IsRegular() {
 			return nil, "", ProblemUnresolved, nil
 		}
-		if !insideRoots(resolved, roots) {
+		if !anywhere && !insideRoots(resolved, roots) {
 			return nil, "", ProblemOutside, nil
 		}
 		fi, openPath = resolvedInfo, resolved
@@ -276,7 +280,7 @@ var raceHook func(path string)
 // non-empty skip is the reason to leave the file out, and err is an I/O failure
 // on a file that was allowed.
 func readAgentFile(path string, rules fileRules) (data []byte, skip string, err error) {
-	inspected, openPath, problem, err := inspect(path, rules.roots)
+	inspected, openPath, problem, err := inspect(path, rules.roots, rules.anywhere)
 	if err != nil {
 		return nil, "", err
 	}
