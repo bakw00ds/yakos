@@ -337,7 +337,8 @@ supervisor gets the lower of its own ceiling and the supervisor's.
 `yakos budget set` and `reset`, and edits to the budget state files
 (`budget-policy.yml`, `budget-spend.json`, `budget-resets.json`, `budget.lock`,
 and the dispatch log `dispatch-log*.ndjson`, whose truncation would wipe spend),
-and `yakos dispatch supervisor`, are blocked for agents by the `budget-guard` hook (both twins), in every
+`yakos dispatch supervisor`, and the policy writers `yakos models enable|disable|alias|pin|pricing` and
+`yakos router policy set` (K-176, see `docs/routing.md`), are blocked for agents by the `budget-guard` hook (both twins), in every
 project and without any `.yakos.yml`. There is no `hook-bypass.md` scope for it,
 because an agent can write that file. Read-only commands (`budget status`,
 `budget check`, `cat` of a state file) pass. The operator runs the blocked ones

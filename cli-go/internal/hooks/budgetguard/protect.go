@@ -18,6 +18,11 @@ import (
 var (
 	budgetCmdRE   = regexp.MustCompile(`yakos[[:space:]]+budget[[:space:]]+(set|reset)([[:space:]]|$)`)
 	dispatchSupRE = regexp.MustCompile(`yakos[[:space:]]+dispatch[[:space:]]+(--?[A-Za-z-]+([[:space:]]+[^-[:space:]][^[:space:]]*)?[[:space:]]+)*supervisor([[:space:]]|$)`)
+	// K-176: the K-153 trusted policy writers. The audit line of a write names
+	// the OS user, so an agent's change would look like the operator's. Read
+	// only models list|show|probe and router policy get|explain stay open.
+	modelsWriteRE = regexp.MustCompile(`yakos[^[:space:]]*[[:space:]]+models[[:space:]]+(enable|disable|alias|pin|pricing)([[:space:]]|$)`)
+	routerSetRE   = regexp.MustCompile(`yakos[^[:space:]]*[[:space:]]+router[[:space:]]+policy[[:space:]]+set([[:space:]]|$)`)
 	budgetFilesRE = regexp.MustCompile(`budget-(policy\.yml|spend\.json|resets\.json)|budget\.lock|dispatch-log[^[:space:]/]*\.ndjson`)
 	budgetBaseRE  = regexp.MustCompile(`^(budget-(policy\.yml|spend\.json|resets\.json)|budget\.lock|dispatch-log[^[:space:]/]*\.ndjson)$`)
 	// readOnlyRE is the only exemption: a single-line read command with no
@@ -54,6 +59,12 @@ func protectedBudgetOp(in hooktype.HookInput) string {
 		// launches it itself (not through a tool call); agents may not.
 		if anyLine(dispatchSupRE, cmd) {
 			return "yakos dispatch supervisor"
+		}
+		if anyLine(modelsWriteRE, cmd) {
+			return "yakos models enable|disable|alias|pin|pricing"
+		}
+		if anyLine(routerSetRE, cmd) {
+			return "yakos router policy set"
 		}
 		if anyLine(budgetFilesRE, cmd) {
 			if !strings.Contains(strings.TrimRight(cmd, "\n"), "\n") && readOnlyRE.MatchString(strings.TrimRight(cmd, "\n")) {

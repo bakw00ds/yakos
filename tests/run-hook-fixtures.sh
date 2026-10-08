@@ -1293,6 +1293,15 @@ case_check budget-guard.sh     pretooluse-bash-budget-quoted-set.json        2 b
 case_check budget-guard.sh     pretooluse-bash-budget-backslash-reset.json   2 budget-guard setup_no_allowlist
 case_check budget-guard.sh     pretooluse-bash-dispatch-log-truncate.json    2 budget-guard setup_no_allowlist
 case_check budget-guard.sh     pretooluse-write-dispatch-log.json            2 budget-guard setup_no_allowlist
+
+# --- budget-guard: K-176 (agents may not run the K-153 policy writers) ---------
+case_check budget-guard.sh     pretooluse-bash-models-enable.json            2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-models-pricing-quoted.json    2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-models-pin-later-line.json    2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-router-policy-set.json        2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-router-policy-set-escaped.json 2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-models-list.json              0 "" setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-router-policy-get.json        0 "" setup_no_allowlist
 case_check budget-guard.sh     pretooluse-bash-dispatch-log-grep.json        0 "" setup_no_allowlist
 case_check budget-guard.sh     pretooluse-bash-dispatch-supervisor.json      2 budget-guard setup_no_allowlist
 case_check budget-guard.sh     pretooluse-bash-dispatch-other-agent.json     0 "" setup_no_allowlist

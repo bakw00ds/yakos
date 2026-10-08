@@ -449,6 +449,11 @@ type ConfigChange struct {
 	SHABefore, SHAAfter string
 	// Surface is "cli" or "console".
 	Surface string
+	// Actor is "operator" or "agent" (K-176): whether the caller looked like an
+	// agent context (a Claude Code or dispatched-agent marker in its
+	// environment). It is a label for the audit reader, not a boundary: the
+	// gate is the budget-guard hook. "" omits it.
+	Actor string
 }
 
 // auditFiles are the files a ConfigChange may name: the router policy, the model
@@ -465,6 +470,11 @@ type configChangedEvent struct {
 	SHABefore  string `json:"policy_sha_before"`
 	SHAAfter   string `json:"policy_sha_after"`
 	Surface    string `json:"surface"`
+	// K-176: who was calling. Actor is "operator" or "agent"; Agent and
+	// SessionID come from the request when the caller carried them.
+	Actor     string `json:"actor,omitempty"`
+	Agent     string `json:"agent,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // ConfigChanged appends a config_changed event: who (the request's OperatorID),
@@ -492,6 +502,7 @@ func (a *Account) configChangedLine(c ConfigChange) ([]byte, error) {
 		Type: "config_changed", Ts: a.started.UTC().Format(time.RFC3339), OperatorID: op,
 		File: c.File, Action: logIdent(c.Action, 64), SHABefore: logHex(c.SHABefore, 64), SHAAfter: logHex(c.SHAAfter, 64),
 		Surface: logSurface(c.Surface),
+		Actor:   logSurface(c.Actor), Agent: logIdent(a.req.AgentName, 128), SessionID: logIdent(a.req.SessionID, 128),
 	}
 	return json.Marshal(ev)
 }
@@ -502,6 +513,9 @@ func (a *Account) configChangedLine(c ConfigChange) ([]byte, error) {
 type ConfigAudit struct {
 	a *Account
 	f *os.File
+	// Actor is stamped on every change recorded through this audit when the
+	// change does not name one (K-176).
+	Actor string
 }
 
 // OpenConfigAudit opens the dispatch log inside stateDir (the trusted
@@ -522,6 +536,9 @@ func OpenConfigAudit(req Request, stateDir string) (*ConfigAudit, error) {
 
 // Record appends the config_changed line through the held descriptor.
 func (c *ConfigAudit) Record(ch ConfigChange) error {
+	if ch.Actor == "" {
+		ch.Actor = c.Actor
+	}
 	line, err := c.a.configChangedLine(ch)
 	if err != nil {
 		return err

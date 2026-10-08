@@ -100,10 +100,10 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 		}
 		if h.WorkCurrentDir != "" {
 			h.appendLog(&out, in, now, "BLOCK", "block",
-				"agent attempted to change dollar budgets ("+hit+")",
+				"agent attempted to change an operator control: dollar budgets or routing policy ("+hit+")",
 				map[string]any{"rule": "budget-state-protected", "tool": in.Tool, "match": hit})
 		}
-		msg := "budget-guard: dollar budgets are an operator control: agents may not run 'yakos budget set|reset' or 'yakos dispatch supervisor', or edit the budget state files (" + hit + ").\n" +
+		msg := "budget-guard: dollar budgets and routing policy are an operator control: agents may not run 'yakos budget set|reset', 'yakos dispatch supervisor', 'yakos models enable|disable|alias|pin|pricing' or 'yakos router policy set', or edit the budget state files (" + hit + ").\n" +
 			"       Ask the operator to run it from their own shell."
 		out.Stderr = append(out.Stderr, []byte(msg+"\n")...)
 		out.ExitCode = 2

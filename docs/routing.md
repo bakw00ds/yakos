@@ -660,7 +660,25 @@ Policy is written from a terminal:
   `YAKOS_DISPATCH_LOG` says, because a project can set that variable. The log is
   opened and locked before the file is written; if it cannot be opened the command
   exits 1 and writes nothing. The audit records the OS user, not an authenticated
-  identity.
+  identity. Since K-176 the line also carries `actor` (`agent` when the caller's
+  environment holds an agent marker, `YAKOS_AGENT_TYPE`, a Claude session id,
+  `CLAUDECODE` or `CLAUDE_PROJECT_DIR`; otherwise `operator`), and `agent` and
+  `session_id` when the environment names them. These are labels from the
+  caller's own environment, not an authenticated identity.
+- Agents may not run the writers. The `budget-guard` hook (both twins) refuses a
+  Bash tool call that runs `yakos models enable|disable|alias|pin|pricing` or
+  `yakos router policy set`, in every project and without a `.yakos.yml`, with no
+  `hook-bypass.md` scope (an agent can write that file). `models list|show|probe`
+  and `router policy get|explain` pass. Matching is on the command text, with
+  quotes and backslashes removed, like the budget commands: variable indirection
+  and `$(...)` are out of reach, so it is a speed bump, not a sandbox. The operator
+  runs the writers from their own shell.
+- Trust root: the writers target `$HOME/.yakos-state` (an absolute `$HOME`, as
+  every reader resolves it). A `$HOME` that lies inside a project directory is
+  trusted as given. This is accepted: a process whose `HOME` a project controls
+  already controls the readers too, and writers that used the passwd entry would
+  write a file the readers never read. The writers are an audit and correctness
+  layer, not a boundary against code that can set the caller's environment.
 
 ## Models & Providers tab (K-153)
 

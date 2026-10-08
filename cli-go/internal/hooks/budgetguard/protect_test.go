@@ -50,6 +50,23 @@ func TestProtectsBudgetState(t *testing.T) {
 		{"dispatch supervisor with flags first", "Bash", map[string]any{"command": `./bin/yakos dispatch --model haiku supervisor x --project /p`}, true},
 		{"dispatch supervisor quoted", "Bash", map[string]any{"command": `yakos dispatch "supervisor" x`}, true},
 		{"dispatch another agent is fine", "Bash", map[string]any{"command": `yakos dispatch backend "supervisor notes"`}, false},
+		// K-176: the K-153 trusted policy writers.
+		{"models enable", "Bash", map[string]any{"command": "yakos models enable gpt-reserve"}, true},
+		{"models disable with path", "Bash", map[string]any{"command": "./bin/yakos models disable gpt-5.5 --project /p"}, true},
+		{"models alias", "Bash", map[string]any{"command": "yakos models alias fast gpt-5.5"}, true},
+		{"models pin", "Bash", map[string]any{"command": "cd x && yakos models pin backend gpt-5.5"}, true},
+		{"models pricing quoted", "Bash", map[string]any{"command": `yakos models "pricing" gpt-5.5 --billing api --input 1 --output 2`}, true},
+		{"models pin on a later line", "Bash", map[string]any{"command": "echo hi\nyakos models pin backend gpt-5.5"}, true},
+		{"models backslash subcommand", "Bash", map[string]any{"command": `yakos models ena\ble x`}, true},
+		{"renamed binary", "Bash", map[string]any{"command": "yakos-dev models enable x"}, true},
+		{"router policy set", "Bash", map[string]any{"command": "yakos router policy set --rules-file -"}, true},
+		{"router policy set quoted", "Bash", map[string]any{"command": `yakos router "policy" 'set' --rules-file r.yml`}, true},
+		{"models list is fine", "Bash", map[string]any{"command": "yakos models list --json"}, false},
+		{"models show is fine", "Bash", map[string]any{"command": "yakos models show gpt-5.5"}, false},
+		{"models probe is fine", "Bash", map[string]any{"command": "yakos models probe --harness codex"}, false},
+		{"router policy get is fine", "Bash", map[string]any{"command": "yakos router policy get --json"}, false},
+		{"router explain is fine", "Bash", map[string]any{"command": "yakos router explain backend"}, false},
+		{"other tool naming it is fine", "Read", map[string]any{"file_path": "/home/u/yakos models enable"}, false},
 		{"unrelated bash", "Bash", map[string]any{"command": "ls -la"}, false},
 	}
 	for _, c := range cases {

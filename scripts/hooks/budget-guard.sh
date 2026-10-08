@@ -100,6 +100,14 @@ case "$_bg_tool" in
             # `yakos dispatch supervisor` could spend between 1x and 2x. The
             # hook launches it itself (not through a tool call); agents may not.
             _bg_hit="yakos dispatch supervisor"
+        elif printf '%s\n' "$_bg_cmd" | grep -Eq 'yakos[^[:space:]]*[[:space:]]+models[[:space:]]+(enable|disable|alias|pin|pricing)([[:space:]]|$)'; then
+            # K-176: the K-153 trusted policy writers. They change which
+            # models and prices the router and the ledger use; the audit line
+            # names the OS user, so an agent's change would look like the
+            # operator's. Read-only models list|show|probe stay open.
+            _bg_hit="yakos models enable|disable|alias|pin|pricing"
+        elif printf '%s\n' "$_bg_cmd" | grep -Eq 'yakos[^[:space:]]*[[:space:]]+router[[:space:]]+policy[[:space:]]+set([[:space:]]|$)'; then
+            _bg_hit="yakos router policy set"
         elif printf '%s\n' "$_bg_cmd" | grep -Eq "$_bg_files"; then
             # Only a single-line, metacharacter-free read command is exempt.
             case "$_bg_cmd" in
@@ -123,10 +131,10 @@ case "$_bg_tool" in
 esac
 if [ -n "$_bg_hit" ]; then
     ho_log "budget-guard" "BLOCK" "block" \
-        "agent attempted to change dollar budgets ($_bg_hit)" \
+        "agent attempted to change an operator control: dollar budgets or routing policy ($_bg_hit)" \
         "$(jq -nc --arg t "$_bg_tool" --arg h "$_bg_hit" '{rule: "budget-state-protected", tool: $t, match: $h}')"
     ho_block "budget-guard" \
-"dollar budgets are an operator control: agents may not run 'yakos budget set|reset' or 'yakos dispatch supervisor', or edit the budget state files ($_bg_hit).
+"dollar budgets and routing policy are an operator control: agents may not run 'yakos budget set|reset', 'yakos dispatch supervisor', 'yakos models enable|disable|alias|pin|pricing' or 'yakos router policy set', or edit the budget state files ($_bg_hit).
        Ask the operator to run it from their own shell."
 fi
 
