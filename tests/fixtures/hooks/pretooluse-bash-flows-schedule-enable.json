@@ -1,0 +1,11 @@
+{
+  "session_id": "fixture-pretooluse-bash-flows-schedule-enable-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {"command": "yakos flows schedule enable nightly"},
+  "tool_use_id": "toolu_fixture_pretooluse-bash-flows-schedule-enable"
+}

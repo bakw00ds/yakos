@@ -84,7 +84,18 @@ command -v jq >/dev/null 2>&1 || exit 0
 # needs no .yakos.yml), and there is deliberately no hook-bypass.md scope for it:
 # an agent can write that file. The operator runs these from their own shell.
 # Heuristic speed bump, not a sandbox (same-user code can always evade).
+#
+# Known evasions, pre-existing and shared by every phrase below (`budget set`
+# included): variable indirection, `$'..'` quoting, a renamed symlink or glob
+# path to the binary, `base64 | sh`, `xargs`, a function or alias wrapper,
+# and `$(...)`. The text match cannot see through any of them. A command that
+# merely QUOTES a writer phrase (echo, grep, a commit message) is blocked
+# too; put such text in a file with the Write tool. Only a backslash-newline
+# continuation is joined before matching (K-176), as the shell itself does.
+# The audit `actor` label of a write is advisory, not a boundary.
 _bg_files='budget-(policy\.yml|spend\.json|resets\.json)|budget\.lock|dispatch-log[^[:space:]/]*\.ndjson'
+# K-176: the Write/Edit tools can change the two K-153 policy files directly.
+_bg_policy_files='router-policy\.yml|model-registry\.yml'
 _bg_tool="$(hi_tool)"
 _bg_hit=""
 case "$_bg_tool" in
@@ -92,7 +103,11 @@ case "$_bg_tool" in
         # Normalise: drop quotes and backslashes so `yakos budget "set"` and
         # `re\set` match. Variable indirection and $(...) stay out of reach of
         # text matching (documented limit).
-        _bg_cmd="$(hi_field '.tool_input.command' | tr -d "\"'\\\\")"
+        _bg_cmd="$(hi_field '.tool_input.command')"
+        # Join backslash-newline continuations first (the shell removes both
+        # characters), so `yakos \<newline> models enable` is one line.
+        _bg_cmd="${_bg_cmd//\\$'\n'/}"
+        _bg_cmd="$(printf '%s' "$_bg_cmd" | tr -d "\"'\\\\")"
         if printf '%s\n' "$_bg_cmd" | grep -Eq 'yakos[[:space:]]+budget[[:space:]]+(set|reset)([[:space:]]|$)'; then
             _bg_hit="yakos budget set|reset"
         elif printf '%s\n' "$_bg_cmd" | grep -Eq 'yakos[[:space:]]+dispatch[[:space:]]+(--?[A-Za-z-]+([[:space:]]+[^-[:space:]][^[:space:]]*)?[[:space:]]+)*supervisor([[:space:]]|$)'; then
@@ -108,6 +123,10 @@ case "$_bg_tool" in
             _bg_hit="yakos models enable|disable|alias|pin|pricing"
         elif printf '%s\n' "$_bg_cmd" | grep -Eq 'yakos[^[:space:]]*[[:space:]]+router[[:space:]]+policy[[:space:]]+set([[:space:]]|$)'; then
             _bg_hit="yakos router policy set"
+        elif printf '%s\n' "$_bg_cmd" | grep -Eq 'yakos[^[:space:]]*[[:space:]]+flows[[:space:]]+schedule[[:space:]]+(enable|disable)([[:space:]]|$)'; then
+            # K-176 (sec-362 F1): enable pins a workflow sha and turns on its
+            # cron/webhook triggers, i.e. persistent unattended agent runs.
+            _bg_hit="yakos flows schedule enable|disable"
         elif printf '%s\n' "$_bg_cmd" | grep -Eq "$_bg_files"; then
             # Only a single-line, metacharacter-free read command is exempt.
             case "$_bg_cmd" in
@@ -126,6 +145,8 @@ case "$_bg_tool" in
         _bg_path="$(hi_file_path)"
         if printf '%s\n' "${_bg_path##*/}" | grep -Eq "^($_bg_files)\$"; then
             _bg_hit="budget state file"
+        elif printf '%s\n' "${_bg_path##*/}" | grep -Eq "^($_bg_policy_files)\$"; then
+            _bg_hit="routing policy file"
         fi
         ;;
 esac
@@ -134,7 +155,7 @@ if [ -n "$_bg_hit" ]; then
         "agent attempted to change an operator control: dollar budgets or routing policy ($_bg_hit)" \
         "$(jq -nc --arg t "$_bg_tool" --arg h "$_bg_hit" '{rule: "budget-state-protected", tool: $t, match: $h}')"
     ho_block "budget-guard" \
-"dollar budgets and routing policy are an operator control: agents may not run 'yakos budget set|reset', 'yakos dispatch supervisor', 'yakos models enable|disable|alias|pin|pricing' or 'yakos router policy set', or edit the budget state files ($_bg_hit).
+"dollar budgets and routing policy are an operator control: agents may not run 'yakos budget set|reset', 'yakos dispatch supervisor', 'yakos models enable|disable|alias|pin|pricing', 'yakos router policy set' or 'yakos flows schedule enable|disable', or edit the budget state files or the routing policy files ($_bg_hit).
        Ask the operator to run it from their own shell."
 fi
 

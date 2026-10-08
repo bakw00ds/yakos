@@ -1694,6 +1694,17 @@ case_check budget-guard.sh     pretooluse-bash-router-policy-set.json        2 b
 case_check budget-guard.sh     pretooluse-bash-router-policy-set-escaped.json 2 budget-guard setup_no_allowlist
 case_check budget-guard.sh     pretooluse-bash-models-list.json              0 "" setup_no_allowlist
 case_check budget-guard.sh     pretooluse-bash-router-policy-get.json        0 "" setup_no_allowlist
+case_check budget-guard.sh     pretooluse-write-router-policy.json           2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-write-model-registry.json          2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-edit-router-policy.json            2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-edit-model-registry-dotdot.json    2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-write-router-policy-symlink-parent.json 2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-write-state-other-yml.json         0 "" setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-flows-schedule-enable.json    2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-flows-schedule-disable.json   2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-flows-schedule-list.json      0 "" setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-models-enable-continuation.json 2 budget-guard setup_no_allowlist
+case_check budget-guard.sh     pretooluse-bash-models-list-continuation.json 0 "" setup_no_allowlist
 case_check budget-guard.sh     pretooluse-bash-dispatch-log-grep.json        0 "" setup_no_allowlist
 case_check budget-guard.sh     pretooluse-bash-dispatch-supervisor.json      2 budget-guard setup_no_allowlist
 case_check budget-guard.sh     pretooluse-bash-dispatch-other-agent.json     0 "" setup_no_allowlist

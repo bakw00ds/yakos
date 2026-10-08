@@ -666,13 +666,26 @@ Policy is written from a terminal:
   `session_id` when the environment names them. These are labels from the
   caller's own environment, not an authenticated identity.
 - Agents may not run the writers. The `budget-guard` hook (both twins) refuses a
-  Bash tool call that runs `yakos models enable|disable|alias|pin|pricing` or
-  `yakos router policy set`, in every project and without a `.yakos.yml`, with no
-  `hook-bypass.md` scope (an agent can write that file). `models list|show|probe`
-  and `router policy get|explain` pass. Matching is on the command text, with
-  quotes and backslashes removed, like the budget commands: variable indirection
-  and `$(...)` are out of reach, so it is a speed bump, not a sandbox. The operator
-  runs the writers from their own shell.
+  Bash tool call that runs `yakos models enable|disable|alias|pin|pricing`,
+  `yakos router policy set` or `yakos flows schedule enable|disable`, in every
+  project and without a `.yakos.yml`, with no `hook-bypass.md` scope (an agent
+  can write that file). It also refuses a Write or Edit of `router-policy.yml` or
+  `model-registry.yml` (matched on the base name, so a `..` or a symlinked parent
+  in the path does not help). `models list|show|probe` and
+  `router policy get|explain` pass. Matching is on the command text, with
+  backslash-newline continuations joined and then quotes and backslashes removed,
+  like the budget commands. The operator runs the writers from their own shell.
+- Limits of the hook, all pre-existing and shared with `yakos budget set`:
+  variable indirection, `$'..'` quoting, a renamed symlink or glob path to the
+  binary, `base64 | sh`, `xargs`, a function or alias wrapper and `$(...)` are out
+  of reach of text matching, so it is a speed bump, not a sandbox. A Bash command
+  that only quotes a writer phrase (an `echo`, a `grep`, a commit message) is
+  blocked as well; put such text in a file with the Write tool and refer to the
+  file. The audit identity is a label only: an operator shell started inside
+  Claude Code inherits `CLAUDECODE` and reads as `actor=agent`, and an agent that
+  evades the hook and strips the markers reads as `operator`. The hook covers
+  tool calls only; there is no REST or MCP write path for these files at this
+  version, and one added later needs its own gate.
 - Trust root: the writers target `$HOME/.yakos-state` (an absolute `$HOME`, as
   every reader resolves it). A `$HOME` that lies inside a project directory is
   trusted as given. This is accepted: a process whose `HOME` a project controls
