@@ -41,10 +41,23 @@ func cliOperatorID() string {
 	return name
 }
 
-// auditWrite records a policy write. The write has already happened; an audit
-// failure is reported (exit 1) so the operator knows it went unrecorded.
-func auditWrite(stderr io.Writer, file, action string, res statepath.EditResult) bool {
-	err := dispatch.NewAccount(dispatch.Request{OperatorID: cliOperatorID(), Surface: dispatch.SurfaceCLI}).ConfigChanged(dispatch.ConfigChange{
+// openAudit opens (and flock-holds) the dispatch log in the trusted state
+// directory BEFORE a policy write, so a write that could not be recorded is
+// refused rather than made unaudited. The log is always the one in stateDir (the
+// home state directory); YAKOS_DISPATCH_LOG, which a project can set, is ignored.
+func openAudit(stderr io.Writer, stateDir string) *dispatch.ConfigAudit {
+	au, err := dispatch.OpenConfigAudit(dispatch.Request{OperatorID: cliOperatorID(), Surface: dispatch.SurfaceCLI}, stateDir)
+	if err != nil {
+		_, _ = fmt.Fprintln(stderr, "yakos: the dispatch log cannot be opened, so the change was not made")
+		return nil
+	}
+	return au
+}
+
+// auditWrite records a policy write through the already-open log. The write has
+// happened; a failure here is reported (exit 1) so the operator knows.
+func auditWrite(stderr io.Writer, au *dispatch.ConfigAudit, file, action string, res statepath.EditResult) bool {
+	err := au.Record(dispatch.ConfigChange{
 		File: file, Action: action, SHABefore: res.SHABefore, SHAAfter: res.SHAAfter, Surface: dispatch.SurfaceCLI,
 	})
 	if err != nil {
@@ -55,12 +68,12 @@ func auditWrite(stderr io.Writer, file, action string, res statepath.EditResult)
 }
 
 // reportWrite prints the one-line result of a write and audits it.
-func reportWrite(stdout, stderr io.Writer, file, action, what string, res statepath.EditResult) int {
+func reportWrite(stdout, stderr io.Writer, au *dispatch.ConfigAudit, file, action, what string, res statepath.EditResult) int {
 	if !res.Changed {
 		_, _ = fmt.Fprintf(stdout, "unchanged: %s (%s)\n", what, file)
 		return 0
 	}
-	if !auditWrite(stderr, file, action, res) {
+	if !auditWrite(stderr, au, file, action, res) {
 		return 1
 	}
 	_, _ = fmt.Fprintf(stdout, "ok: %s (%s %s)\n", what, file, res)
@@ -98,6 +111,11 @@ func modelsWrite(stdout, stderr io.Writer, env modelsEnv, sub string, pos []stri
 		return es, len(es) > 0
 	}
 	const overlay = modelreg.OverlayFileName
+	au := openAudit(stderr, env.stateDir)
+	if au == nil {
+		return 1
+	}
+	defer au.Close()
 	switch sub {
 	case "enable", "disable":
 		if len(pos) != 1 {
@@ -119,7 +137,7 @@ func modelsWrite(stdout, stderr io.Writer, env modelsEnv, sub string, pos []stri
 				}
 			}
 		}
-		return reportWrite(stdout, stderr, overlay, "models."+sub, sub+"d "+pos[0], res)
+		return reportWrite(stdout, stderr, au, overlay, "models."+sub, sub+"d "+pos[0], res)
 	case "alias":
 		if len(pos) != 3 {
 			return fail("usage: yakos models alias <%s> <codex|agy> <id|default>", strings.Join(modelreg.AliasNames, "|"))
@@ -137,11 +155,11 @@ func modelsWrite(stdout, stderr io.Writer, env modelsEnv, sub string, pos []stri
 		if err != nil {
 			return fail("%v", err)
 		}
-		return reportWrite(stdout, stderr, overlay, "models.alias", fmt.Sprintf("%s on %s is now %s", alias, harness, orDefault(id)), res)
+		return reportWrite(stdout, stderr, au, overlay, "models.alias", fmt.Sprintf("%s on %s is now %s", alias, harness, orDefault(id)), res)
 	case "pricing":
-		return modelsPricing(stdout, stderr, env, reg, pos, a, fail)
+		return modelsPricing(stdout, stderr, au, env, reg, pos, a, fail)
 	default: // pin
-		return modelsPin(stdout, stderr, env, reg, pos, a, fail)
+		return modelsPin(stdout, stderr, au, env, reg, pos, a, fail)
 	}
 }
 
@@ -152,7 +170,7 @@ func orDefault(id string) string {
 	return id
 }
 
-func modelsPricing(stdout, stderr io.Writer, env modelsEnv, reg *modelreg.Registry, pos []string, a modelsWriteArgs, fail func(string, ...any) int) int {
+func modelsPricing(stdout, stderr io.Writer, au *dispatch.ConfigAudit, env modelsEnv, reg *modelreg.Registry, pos []string, a modelsWriteArgs, fail func(string, ...any) int) int {
 	if len(pos) != 1 {
 		return fail("usage: yakos models pricing <id> --input <usd> --output <usd> [--cache-read <usd>] [--cache-write <usd>] [--billing api|subscription|local] | --clear")
 	}
@@ -171,15 +189,41 @@ func modelsPricing(stdout, stderr io.Writer, env modelsEnv, reg *modelreg.Regist
 			}
 		}
 	}
-	if a.billing != "" {
-		if !modelreg.Billing(a.billing).Valid() {
-			return fail("--billing %q: want subscription, api or local", a.billing)
+	if a.billing != "" && !modelreg.Billing(a.billing).Valid() {
+		return fail("--billing %q: want subscription, api or local", a.billing)
+	}
+	// Everything is parsed and validated before the first write, so a bad price
+	// leaves the overlay (billing included) as it was.
+	var price *modelreg.Pricing
+	if !a.clear && (a.input != "" || a.output != "" || a.billing == "") {
+		if a.input == "" || a.output == "" {
+			return fail("--input and --output are required (dollars per million tokens)")
 		}
+		var p modelreg.Pricing
+		for _, f := range []struct {
+			name, val string
+			dst       *float64
+		}{{"--input", a.input, &p.Input}, {"--output", a.output, &p.Output}, {"--cache-read", a.cacheRead, &p.CacheRead}, {"--cache-write", a.cacheWrite, &p.CacheWrite}} {
+			if f.val == "" {
+				continue
+			}
+			v, err := parsePrice(f.name, f.val)
+			if err != nil {
+				return fail("%v", err)
+			}
+			*f.dst = v
+		}
+		if err := p.Validate(); err != nil {
+			return fail("%v", err)
+		}
+		price = &p
+	}
+	if a.billing != "" {
 		res, err := modelreg.SetBilling(env.stateDir, id, modelreg.Billing(a.billing))
 		if err != nil {
 			return fail("%v", err)
 		}
-		if rc := reportWrite(stdout, stderr, overlay, "models.billing", id+" is billed "+a.billing, res); rc != 0 {
+		if rc := reportWrite(stdout, stderr, au, overlay, "models.billing", id+" is billed "+a.billing, res); rc != 0 {
 			return rc
 		}
 	}
@@ -188,40 +232,19 @@ func modelsPricing(stdout, stderr io.Writer, env modelsEnv, reg *modelreg.Regist
 		if err != nil {
 			return fail("%v", err)
 		}
-		return reportWrite(stdout, stderr, overlay, "models.pricing", "cleared the price of "+id, res)
+		return reportWrite(stdout, stderr, au, overlay, "models.pricing", "cleared the price of "+id, res)
 	}
-	if a.input == "" && a.output == "" && a.billing != "" {
+	if price == nil {
 		return 0 // only the billing mode was asked for
 	}
-	if a.input == "" || a.output == "" {
-		return fail("--input and --output are required (dollars per million tokens)")
-	}
-	var p modelreg.Pricing
-	for _, f := range []struct {
-		name, val string
-		dst       *float64
-		need      bool
-	}{{"--input", a.input, &p.Input, true}, {"--output", a.output, &p.Output, true}, {"--cache-read", a.cacheRead, &p.CacheRead, false}, {"--cache-write", a.cacheWrite, &p.CacheWrite, false}} {
-		if f.val == "" {
-			continue
-		}
-		v, err := parsePrice(f.name, f.val)
-		if err != nil {
-			return fail("%v", err)
-		}
-		*f.dst = v
-	}
-	if err := p.Validate(); err != nil {
-		return fail("%v", err)
-	}
-	res, err := modelreg.SetPricing(env.stateDir, id, &p)
+	res, err := modelreg.SetPricing(env.stateDir, id, price)
 	if err != nil {
 		return fail("%v", err)
 	}
-	return reportWrite(stdout, stderr, overlay, "models.pricing", "priced "+id, res)
+	return reportWrite(stdout, stderr, au, overlay, "models.pricing", "priced "+id, res)
 }
 
-func modelsPin(stdout, stderr io.Writer, env modelsEnv, reg *modelreg.Registry, pos []string, a modelsWriteArgs, fail func(string, ...any) int) int {
+func modelsPin(stdout, stderr io.Writer, au *dispatch.ConfigAudit, env modelsEnv, reg *modelreg.Registry, pos []string, a modelsWriteArgs, fail func(string, ...any) int) int {
 	const file = routerpolicy.FileName
 	if len(pos) < 1 || len(pos) > 2 || (a.clear && len(pos) != 1) || (!a.clear && len(pos) != 2) {
 		return fail("usage: yakos models pin <agent> <id> [--runtime <name>] | yakos models pin <agent> --clear")
@@ -235,7 +258,7 @@ func modelsPin(stdout, stderr io.Writer, env modelsEnv, reg *modelreg.Registry, 
 		if err != nil {
 			return fail("%v", err)
 		}
-		return reportWrite(stdout, stderr, file, "models.unpin", "unpinned "+agent, res)
+		return reportWrite(stdout, stderr, au, file, "models.unpin", "unpinned "+agent, res)
 	}
 	var matches []modelreg.Entry
 	for _, e := range reg.Find(pos[1]) {
@@ -259,7 +282,7 @@ func modelsPin(stdout, stderr io.Writer, env modelsEnv, reg *modelreg.Registry, 
 	if err != nil {
 		return fail("%v", err)
 	}
-	return reportWrite(stdout, stderr, file, "models.pin", fmt.Sprintf("pinned %s to %s/%s", agent, matches[0].Harness, pos[1]), res)
+	return reportWrite(stdout, stderr, au, file, "models.pin", fmt.Sprintf("pinned %s to %s/%s", agent, matches[0].Harness, pos[1]), res)
 }
 
 // routerPolicy runs `yakos router policy get|set`.
@@ -327,12 +350,17 @@ func routerPolicySet(stdout, stderr io.Writer, state, rulesFile string) int {
 		_, _ = fmt.Fprintf(stderr, "router policy set: --rules-file: %v\n", err)
 		return explainExitUsage
 	}
+	au := openAudit(stderr, state)
+	if au == nil {
+		return explainExitFail
+	}
+	defer au.Close()
 	res, err := routerpolicy.SetRules(state, data, router.CheckPolicy)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "router policy set: %s\n", sanitizeForTerminal(err.Error()))
 		return explainExitFail
 	}
-	if rc := reportWrite(stdout, stderr, routerpolicy.FileName, "router.policy.set", "router rules", res); rc != 0 {
+	if rc := reportWrite(stdout, stderr, au, routerpolicy.FileName, "router.policy.set", "router rules", res); rc != 0 {
 		return explainExitFail
 	}
 	return 0

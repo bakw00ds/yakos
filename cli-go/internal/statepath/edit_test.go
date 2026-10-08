@@ -258,3 +258,28 @@ func TestYAMLHelpers(t *testing.T) {
 		t.Errorf("String() = %q", got)
 	}
 }
+
+func TestBreakStale_GivesBackALiveLockAndRemovesAStaleOne(t *testing.T) {
+	old := editLockStale
+	editLockStale = time.Hour
+	defer func() { editLockStale = old }()
+	dir, file := newState(t)
+	_ = SecureDir(dir)
+	lock := file + ".lock"
+	if err := os.WriteFile(lock, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	breakStale(lock) // a waiter that lost the race: the lock is fresh
+	if _, err := os.Lstat(lock); err != nil {
+		t.Fatalf("a live lock was not given back: %v", err)
+	}
+	editLockStale = time.Millisecond
+	time.Sleep(5 * time.Millisecond)
+	breakStale(lock)
+	if _, err := os.Lstat(lock); err == nil {
+		t.Error("a stale lock survived")
+	}
+	if es, _ := os.ReadDir(dir); len(es) != 0 {
+		t.Errorf("debris left: %v", es)
+	}
+}

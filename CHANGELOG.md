@@ -73,7 +73,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   group-writable file is refused, never overwritten; keys and comments the edit
   did not touch are kept; the result is checked as the reader will read it) and
   append a `config_changed` line (operator, file, sha before and after) to the
-  dispatch log. The privileged router keys are never written by these commands.
+  dispatch log. The privileged router keys are never written by these commands:
+  `router policy set` refuses YAML anchors, aliases and merge keys in the rules
+  input, and every write is refused unless each top-level key other than `rules:`
+  means the same (aliases resolved) before and after. The audit line always goes
+  to the log in the home state directory (never the `YAKOS_DISPATCH_LOG` a
+  project can set); that log is opened and locked before the write, and a write
+  whose log cannot be opened is refused. `models pricing` validates the whole
+  command before its first write. A stale edit lock is broken by rename, so
+  only one waiter wins.
 
 ## [0.62.0.0] — 2026-10-06
 

@@ -2,6 +2,7 @@ package router
 
 import (
 	"os"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -42,6 +43,9 @@ func TestViewOfShowsRulesPinsAndPrivilegedKeys(t *testing.T) {
 }
 
 func TestViewOfAnUntrustedFileIsEmptyWithAWarningAndNoPath(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("a group/world-writable file cannot be fabricated with os.Chmod on Windows")
+	}
 	dir := stateWithPolicy(t, "hooks_endpoint: true\n")
 	if err := os.Chmod(routerpolicy.Path(dir), 0o666); err != nil {
 		t.Fatal(err)

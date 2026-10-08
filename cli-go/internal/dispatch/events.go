@@ -26,6 +26,28 @@ func dispatchLogPath() string {
 // flock for cross-process safety (matching the bash flock usage in dispatch.sh).
 // Errors are non-fatal: if the log can't be written, dispatch still proceeds.
 func appendEvent(path string, line []byte) error {
+	f, err := openLogLocked(path)
+	if err != nil {
+		return err
+	}
+	defer closeLogLocked(f)
+	return writeLine(f, line)
+}
+
+func writeLine(f *os.File, line []byte) error {
+	line = append(line[:len(line):len(line)], '\n')
+	_, err := f.Write(line)
+	return err
+}
+
+func closeLogLocked(f *os.File) {
+	unlockFile(f)
+	_ = f.Close()
+}
+
+// openLogLocked opens the dispatch log for appending and takes its flock; the
+// caller releases both with closeLogLocked.
+func openLogLocked(path string) (*os.File, error) {
 	// SECURITY (M5, security-review-2026-09-14.md): the dispatch-log holds
 	// TaskPreview (the first 200 bytes of every dispatched task), operator
 	// IDs, and conversation/session IDs. 0755/0644 let any local user read
@@ -34,7 +56,7 @@ func appendEvent(path string, line []byte) error {
 	// setup token — all 0600/0700).
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil { //nolint:gosec
-		return fmt.Errorf("events: mkdir %s: %w", dir, err)
+		return nil, fmt.Errorf("events: mkdir %s: %w", dir, err)
 	}
 	// S-2 R12 / N5: MkdirAll and O_CREATE apply their modes only when they
 	// create the path, so an existing 0755 directory (bash-created install)
@@ -43,7 +65,7 @@ func appendEvent(path string, line []byte) error {
 	// (YAKOS_DISPATCH_LOG) is left alone, since it is not ours to chmod.
 	if filepath.Base(dir) == stateDirName {
 		if err := statepath.SecureDir(dir); err != nil {
-			return fmt.Errorf("events: %w", err)
+			return nil, fmt.Errorf("events: %w", err)
 		}
 	}
 
@@ -52,24 +74,18 @@ func appendEvent(path string, line []byte) error {
 	// see openflags_unix.go.
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND|noFollowFlag, 0600) //nolint:gosec
 	if err != nil {
-		return fmt.Errorf("events: open %s: %w", path, err)
+		return nil, fmt.Errorf("events: open %s: %w", path, err)
 	}
-	defer func() { _ = f.Close() }()
-
 	// Tighten via the open descriptor (fchmod, no TOCTOU) and refuse a file
 	// owned by another user — see statepath.SecureFile.
 	if err := statepath.SecureFile(f); err != nil {
-		return fmt.Errorf("events: %w", err)
+		_ = f.Close()
+		return nil, fmt.Errorf("events: %w", err)
 	}
-
 	// flock for cross-process append safety (mirrors bash flock usage).
 	// Per-platform impl in lock_unix.go / lock_windows.go.
 	lockFile(f)
-	defer unlockFile(f)
-
-	line = append(line, '\n')
-	_, err = f.Write(line)
-	return err
+	return f, nil
 }
 
 // Result is the outcome of a dispatch Run, used to build the dispatch_finished event.

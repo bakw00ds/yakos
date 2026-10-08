@@ -175,7 +175,7 @@ func lockEdit(lock string) (func(), error) {
 			return nil, errors.New("statepath: cannot take the edit lock")
 		}
 		if fi, serr := os.Lstat(lock); serr == nil && (time.Since(fi.ModTime()) > editLockStale || fi.Mode()&os.ModeSymlink != 0) {
-			_ = os.Remove(lock)
+			breakStale(lock)
 			continue
 		}
 		if time.Now().After(deadline) {
@@ -183,6 +183,29 @@ func lockEdit(lock string) (func(), error) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// breakStale removes a lock a waiter judged stale. It renames the lock aside
+// first, so of several waiters breaking the same stale lock only one rename
+// succeeds; the others find nothing and go back to taking the lock. The renamed
+// file is then re-checked: if a waiter that lost the race renamed the FRESH lock
+// the winner had just created, that lock is put back (os.Link fails if the name
+// is taken again) instead of being deleted.
+//
+// Residual window (sec-356 L1): between a waiter's Lstat and its rename another
+// waiter can break and re-take the lock; the re-check restores it, but if a
+// third process takes the name in the same instant the restore fails and two
+// edits can overlap once. Both still write atomically (rename), so the worst
+// case is one lost update, and it needs a holder that died 30 s earlier.
+func breakStale(lock string) {
+	aside := fmt.Sprintf("%s.stale-%d-%d", lock, os.Getpid(), time.Now().UnixNano())
+	if os.Rename(lock, aside) != nil {
+		return
+	}
+	if fi, err := os.Lstat(aside); err == nil && fi.Mode()&os.ModeSymlink == 0 && time.Since(fi.ModTime()) <= editLockStale {
+		_ = os.Link(aside, lock) // we took a live lock: give it back
+	}
+	_ = os.Remove(aside)
 }
 
 // YAMLGet returns the value node of key in mapping m, or nil.

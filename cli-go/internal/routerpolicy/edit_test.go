@@ -9,6 +9,8 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/router"
 	"github.com/bakw00ds/yakos/internal/routerpolicy"
+	"github.com/bakw00ds/yakos/internal/statepath"
+	"gopkg.in/yaml.v3"
 )
 
 func stateWith(t *testing.T, content string) string {
@@ -190,4 +192,67 @@ func TestWrittenPolicyIsOwnerOnlyAndAtomic(t *testing.T) {
 	if len(ents) != 1 {
 		t.Errorf("leftover files: %v", ents)
 	}
+}
+
+// aliasedPolicy is an operator file whose allow_unsandboxed_runtimes aliases an
+// empty anchor defined before rules:. A rules input that redefines &rts would, if
+// spliced in, change what the alias means (sec-356 M1).
+const aliasedPolicy = "ext: &rts []\nrules:\n  - match: {class: chat}\n    action: {runtime: claude}\nallow_unsandboxed_runtimes: *rts\n"
+
+const aliasRules = "- match: {agent: a}\n  action: {runtime: claude, fallbacks: &rts [codex]}\n"
+
+func TestSetRulesRefusesAnchorsAliasesAndMergeKeys(t *testing.T) {
+	for name, rules := range map[string]string{
+		"anchor redefinition": aliasRules,
+		"alias":               "- &r {match: {agent: a}, action: {runtime: claude}}\n- *r\n",
+		"merge key":           "- match: {agent: a}\n  action:\n    <<: {runtime: claude}\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := stateWith(t, aliasedPolicy)
+			before, _ := os.ReadFile(routerpolicy.Path(dir))
+			if _, err := routerpolicy.SetRules(dir, []byte(rules), nil); err == nil {
+				t.Fatal("accepted")
+			}
+			if after, _ := os.ReadFile(routerpolicy.Path(dir)); string(after) != string(before) {
+				t.Errorf("file changed:\n%s", after)
+			}
+			if f, _ := routerpolicy.Load(dir); len(f.AllowUnsandboxedRuntimes) != 0 {
+				t.Errorf("allow_unsandboxed_runtimes = %v", f.AllowUnsandboxedRuntimes)
+			}
+		})
+	}
+}
+
+// The second layer, on its own: an edit that smuggles an anchor in (or sets a
+// privileged key outright) is refused because a key other than rules: changed
+// meaning.
+func TestEditRefusesAnyChangeToAKeyOtherThanRules(t *testing.T) {
+	t.Run("redefined anchor", func(t *testing.T) {
+		dir := stateWith(t, aliasedPolicy)
+		before, _ := os.ReadFile(routerpolicy.Path(dir))
+		_, err := routerpolicy.Edit(dir, func(top *yaml.Node) error {
+			var seq yaml.Node
+			if err := yaml.Unmarshal([]byte(aliasRules), &seq); err != nil {
+				return err
+			}
+			statepath.YAMLSet(top, "rules", seq.Content[0])
+			return nil
+		}, nil)
+		if err == nil {
+			t.Fatal("a write that changed allow_unsandboxed_runtimes through an alias was accepted")
+		}
+		if after, _ := os.ReadFile(routerpolicy.Path(dir)); string(after) != string(before) {
+			t.Errorf("file changed:\n%s", after)
+		}
+	})
+	t.Run("direct set", func(t *testing.T) {
+		dir := stateWith(t, privileged)
+		_, err := routerpolicy.Edit(dir, func(top *yaml.Node) error {
+			statepath.YAMLSet(top, "hooks_endpoint", &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!bool", Value: "false"})
+			return nil
+		}, nil)
+		if err == nil {
+			t.Fatal("accepted")
+		}
+	})
 }

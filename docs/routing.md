@@ -595,11 +595,19 @@ Policy is written from a terminal:
   and the file is replaced with a 0600 temporary file and a rename, under a lock
   file so two writers cannot lose each other's change.
 - The privileged router keys (`allow_unsandboxed_runtimes`, `hooks_endpoint`,
-  `openai_endpoint`) are shown and never set by these commands.
+  `openai_endpoint`) are shown and never set by these commands. Two checks hold
+  that: `router policy set` refuses YAML anchors, aliases and `<<` merge keys in the
+  rules input, and the writer re-parses the composed file and refuses the write
+  unless every top-level key other than `rules:` has the same value (aliases
+  resolved) as before.
 - Every write appends one `config_changed` line to the dispatch log through
   `dispatch.Account`: the operator (the OS user for the CLI), the file's base name,
-  a fixed action word, and the file's sha before and after. If the log cannot be
-  written the command says the change went unrecorded and exits 1.
+  a fixed action word, and the file's sha before and after. The line always goes
+  to the log in the home state directory (`~/.yakos-state`), whatever
+  `YAKOS_DISPATCH_LOG` says, because a project can set that variable. The log is
+  opened and locked before the file is written; if it cannot be opened the command
+  exits 1 and writes nothing. The audit records the OS user, not an authenticated
+  identity.
 
 ## Claude Code request-class aliases (K-141)
 

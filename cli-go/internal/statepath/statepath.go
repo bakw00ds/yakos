@@ -49,6 +49,9 @@ func DispatchLog() string {
 	return filepath.Join(Dir(), dispatchLogName)
 }
 
+// DispatchLogIn returns the dispatch-log path inside dir.
+func DispatchLogIn(dir string) string { return filepath.Join(dir, dispatchLogName) }
+
 // TrustedDir returns the user's real state directory, $HOME/.yakos-state,
 // resolved from the home directory only. Unlike Dir it deliberately ignores
 // YAKOS_DISPATCH_LOG.

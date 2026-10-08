@@ -18,26 +18,32 @@ import (
 	"github.com/bakw00ds/yakos/internal/routerpolicy"
 )
 
-// ledgerFor points the audit trail at a scratch directory and returns a reader
-// of its config_changed lines.
+// lastStateDir is the state directory the most recent rig/polEnv made; the audit
+// trail is the dispatch log inside it (the trusted home state directory).
+var lastStateDir string
+
+// ledgerFor sets YAKOS_DISPATCH_LOG to a decoy "project" directory (which the
+// writers must ignore) and returns a reader of the config_changed lines in the
+// state directory's own dispatch log.
 func ledgerFor(t *testing.T) func() []map[string]any {
 	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("YAKOS_DISPATCH_LOG", dir)
-	return func() []map[string]any {
-		b, err := os.ReadFile(filepath.Join(dir, "dispatch-log.ndjson"))
-		if err != nil {
-			return nil
-		}
-		var out []map[string]any
-		for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
-			var m map[string]any
-			if json.Unmarshal([]byte(l), &m) == nil && m["type"] == "config_changed" {
-				out = append(out, m)
-			}
-		}
-		return out
+	t.Setenv("YAKOS_DISPATCH_LOG", t.TempDir())
+	return func() []map[string]any { return configChangedLines(lastStateDir) }
+}
+
+func configChangedLines(dir string) []map[string]any {
+	b, err := os.ReadFile(filepath.Join(dir, "dispatch-log.ndjson"))
+	if err != nil {
+		return nil
 	}
+	var out []map[string]any
+	for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		var m map[string]any
+		if json.Unmarshal([]byte(l), &m) == nil && m["type"] == "config_changed" {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 func overlayOf(t *testing.T, r *modelsRig) modelreg.Overlay {
@@ -233,22 +239,41 @@ func TestModelsWriteRefusesWithNoHome(t *testing.T) {
 	}
 }
 
-func TestModelsWriteReportsAnUnrecordableChange(t *testing.T) {
+// sec-356 M2: the audit line goes to the home state directory's log whatever
+// YAKOS_DISPATCH_LOG says, and a log that cannot be opened refuses the write.
+func TestModelsWriteAuditsInTheHomeLogNotTheProjectOverride(t *testing.T) {
+	project := t.TempDir()
+	t.Setenv("YAKOS_DISPATCH_LOG", project)
+	r := newModelsRig(t)
+	if code, out, errs := r.do("disable", "gpt-5.5"); code != 0 {
+		t.Fatalf("exit %d out=%q err=%q", code, out, errs)
+	}
+	if n := len(configChangedLines(r.stateDir)); n != 1 {
+		t.Errorf("home log holds %d config_changed lines, want 1", n)
+	}
+	if es, _ := os.ReadDir(project); len(es) != 0 {
+		t.Errorf("the project override received files: %v", es)
+	}
+}
+
+func TestModelsWriteRefusedWhenTheHomeLogCannotBeOpened(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX paths")
 	}
-	blocker := filepath.Join(t.TempDir(), "file")
-	if err := os.WriteFile(blocker, nil, 0o600); err != nil {
+	r := newModelsRig(t)
+	// A directory where the log file should be: open fails, whatever the env says.
+	if err := os.Mkdir(filepath.Join(r.stateDir, "dispatch-log.ndjson"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("YAKOS_DISPATCH_LOG", blocker) // a file where the ledger directory should be
-	r := newModelsRig(t)
-	code, out, errs := r.do("disable", "gpt-5.5")
-	if code != 1 || out != "" || !strings.Contains(errs, "could not be recorded in the dispatch log") {
-		t.Errorf("exit %d out=%q err=%q", code, out, errs)
-	}
-	if _, err := os.Stat(filepath.Join(r.stateDir, modelreg.OverlayFileName)); err != nil {
-		t.Error("the write itself should have happened (and be reported as unaudited)")
+	for _, override := range []string{os.DevNull, t.TempDir()} {
+		t.Setenv("YAKOS_DISPATCH_LOG", override) // /dev/null must not make it pass
+		code, out, errs := r.do("disable", "gpt-5.5")
+		if code == 0 || out != "" || !strings.Contains(errs, "dispatch log cannot be opened") {
+			t.Errorf("override %q: exit %d out=%q err=%q", override, code, out, errs)
+		}
+		if _, err := os.Stat(filepath.Join(r.stateDir, modelreg.OverlayFileName)); err == nil {
+			t.Error("the overlay was written although the audit log could not be opened")
+		}
 	}
 }
 
@@ -278,6 +303,7 @@ func polEnv(t *testing.T, content string) (explainEnv, string) {
 			t.Fatal(err)
 		}
 	}
+	lastStateDir = dir
 	return explainEnv{stateDir: func() string { return dir }}, dir
 }
 
