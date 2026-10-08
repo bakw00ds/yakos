@@ -49,14 +49,16 @@ func ProfileHasAuth(home string) bool {
 const HooksFileName = "hooks.json"
 
 // ProfileHasHooks reports whether `yakos hooks install --harness codex` has
-// written the hooks file into the yakOS profile (a regular file, not a link).
+// put a hooks entry into the yakOS profile. A link or any other non-regular
+// entry counts as present: the caller must judge it untrusted (a silent "not
+// installed" would hide a swapped file), see hooksinstall.CodexHooksTrusted.
 func ProfileHasHooks(home string) bool {
 	dir := ProfileDir(home)
 	if dir == "" {
 		return false
 	}
-	fi, err := os.Lstat(filepath.Join(dir, HooksFileName))
-	return err == nil && fi.Mode().IsRegular()
+	_, err := os.Lstat(filepath.Join(dir, HooksFileName))
+	return err == nil
 }
 
 // Effective returns the CODEX_HOME dispatch should set and whether it is the

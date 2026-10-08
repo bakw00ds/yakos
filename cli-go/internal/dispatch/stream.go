@@ -367,7 +367,14 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		PolicySHA:       rr.Decision.PolicySHA,
 	}
 
+	// Codex and agy hooks judge the file policy by the dispatched agent; raw
+	// operator chat is the lead (as on claude).
+	chatAgent := p.Agent
+	if chatAgent == "" {
+		chatAgent = "lead"
+	}
 	chatReq := runtime.ChatDispatchRequest{
+		AgentName:         chatAgent,
 		Project:           project,
 		UserText:          p.Task,
 		AgentSystemPrompt: targetAgent.Prompt,

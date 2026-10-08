@@ -122,3 +122,68 @@ func TestCodexAndAgyEnvCarryDispatchedAgent(t *testing.T) {
 		}
 	}
 }
+
+// L-new-1: a symlinked profile hooks.json is untrusted (warning + ledger mark),
+// not a silent "not installed".
+func TestCodexSymlinkedProfileHooksIsUntrusted(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlinks")
+	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("CODEX_HOME", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	prof := codexhome.ProfileDir(home)
+	if err := os.MkdirAll(prof, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(prof, "auth.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := hooksinstall.InstallShape("codex", prof, ""); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(home, "real-hooks.json")
+	hp := filepath.Join(prof, codexhome.HooksFileName)
+	if err := os.Rename(hp, real); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, hp); err != nil {
+		t.Fatal(err)
+	}
+	var note strings.Builder
+	oldW := sandboxNoteWriter
+	sandboxNoteWriter = &note
+	sandboxNotes.Delete("codex-hooks-untrusted")
+	t.Cleanup(func() { sandboxNoteWriter = oldW })
+	if !CodexHooksUntrusted() {
+		t.Error("symlinked hooks.json not reported as untrusted")
+	}
+	a := &CodexAdapter{}
+	args := a.ExecCmd(context.Background(), DispatchRequest{AgentName: "x", Task: "t", Project: t.TempDir()}).Args
+	if slices.Contains(args, "--dangerously-bypass-hook-trust") {
+		t.Error("trust flag added for a symlinked hooks.json")
+	}
+	if !strings.Contains(note.String(), "gate is OFF") || strings.Contains(note.String(), home) {
+		t.Errorf("warning missing or leaks a path: %q", note.String())
+	}
+}
+
+// B1: the chat commands of codex and agy export the pane agent to the hooks.
+func TestCodexAndAgyChatEnvCarryAgent(t *testing.T) {
+	cmds := map[string]func(ChatDispatchRequest) []string{
+		"codex": func(r ChatDispatchRequest) []string {
+			return (&CodexAdapter{}).ChatExecCmd(context.Background(), r).Env
+		},
+		"agy": func(r ChatDispatchRequest) []string {
+			return (&AgyAdapter{}).ChatExecCmd(context.Background(), r).Env
+		},
+	}
+	for name, env := range cmds {
+		got := env(ChatDispatchRequest{AgentName: "backend", UserText: "hi", Project: t.TempDir()})
+		if !slices.Contains(got, "YAKOS_AGENT_TYPE=backend") {
+			t.Errorf("%s chat env lacks YAKOS_AGENT_TYPE=backend", name)
+		}
+	}
+}

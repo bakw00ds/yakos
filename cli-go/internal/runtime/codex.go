@@ -294,6 +294,7 @@ func (a *CodexAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest)
 
 	cmd := exec.CommandContext(ctx, "codex", args...) //nolint:gosec
 	cmd.Env = buildEnvCodex(DispatchRequest{
+		AgentName:     req.AgentName,
 		Project:       req.Project,
 		ModelOverride: req.ModelOverride,
 		AllowRoot:     req.AllowRoot,

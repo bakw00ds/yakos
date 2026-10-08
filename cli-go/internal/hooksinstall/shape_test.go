@@ -394,3 +394,27 @@ func TestInstallShapeAgyReportsForeignHooks(t *testing.T) {
 		t.Errorf("foreign entry lost: %s", got)
 	}
 }
+
+func TestBinaryCharsOKIsOSAware(t *testing.T) {
+	win := `C:\Users\RUNNER~1\AppData\Local\Temp\go-build\yakos.test.exe`
+	for _, c := range []struct {
+		p, goos string
+		want    bool
+	}{
+		{win, "windows", true},
+		{win, "linux", false},
+		{"/usr/local/bin/yakos", "linux", true},
+		{"/usr/local/bin/yakos", "windows", true},
+		{`C:\Program Files\yakos.exe`, "windows", false},
+		{`C:\a;b\yakos.exe`, "windows", false},
+		{`C:\a&b\yakos.exe`, "windows", false},
+		{"/tmp/a b", "linux", false},
+		{"/tmp/a;b", "linux", false},
+		{"/tmp/~x", "linux", false},
+		{"/tmp/a$b", "windows", false},
+	} {
+		if got := binaryCharsOK(c.p, c.goos); got != c.want {
+			t.Errorf("binaryCharsOK(%q, %s) = %v, want %v", c.p, c.goos, got, c.want)
+		}
+	}
+}

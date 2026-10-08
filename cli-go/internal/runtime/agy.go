@@ -193,6 +193,7 @@ func (a *AgyAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *
 
 	cmd := exec.CommandContext(ctx, "agy", args...) //nolint:gosec
 	cmd.Env = buildEnvAgy(DispatchRequest{
+		AgentName:     req.AgentName,
 		Project:       req.Project,
 		ModelOverride: req.ModelOverride,
 		AllowRoot:     req.AllowRoot,

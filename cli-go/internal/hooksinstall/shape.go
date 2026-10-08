@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,6 +48,19 @@ const maxShapeFile = 1 << 20
 const shapeTimeoutSec = 30
 
 var binaryRE = regexp.MustCompile(`^[A-Za-z0-9._/+@-]{1,200}$`)
+
+// binaryREWindows additionally allows the drive colon, backslashes and the
+// tilde of 8.3 short names (C:\Users\RUNNER~1\...). Spaces and the shell
+// metacharacters stay refused.
+var binaryREWindows = regexp.MustCompile(`^[A-Za-z0-9._/+@:~\\-]{1,200}$`)
+
+// binaryCharsOK applies the character rule of goos to a command word.
+func binaryCharsOK(binary, goos string) bool {
+	if goos == "windows" {
+		return binaryREWindows.MatchString(binary)
+	}
+	return binaryRE.MatchString(binary)
+}
 
 type shapeHook struct {
 	name  string
@@ -146,7 +160,7 @@ func checkBinaryText(binary string) error {
 		return errors.New("hooks install: binary path required")
 	case !filepath.IsAbs(binary):
 		return fmt.Errorf("hooks install: binary %q must be an absolute path (a bare or relative name resolves through the harness's PATH or cwd)", binary)
-	case !binaryRE.MatchString(binary) || filepath.Clean(binary) != binary:
+	case !binaryCharsOK(binary, runtime.GOOS) || filepath.Clean(binary) != binary:
 		return fmt.Errorf("hooks install: binary %q must be a clean absolute path without spaces or shell characters", binary)
 	}
 	return nil

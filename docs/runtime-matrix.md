@@ -139,12 +139,15 @@ is set in the dispatching process and the profile holds the hooks file.
 `yakos doctor` warns when a hooks file sits in a profile dispatch is not using
 and when the file differs from what this yakos would write (then the gate is off, not merely "modified").
 
-Agent identity: dispatch sets `YAKOS_AGENT_TYPE=<agent>` in the codex and agy
-child environment; `yakos hook run --shape` hands it to `path-allowlist` as the
-agent, so a call is judged by the dispatched agent's policy. If the variable does
-not reach the hook (not verified for either harness; chat dispatch carries no
-agent name), `path-allowlist` refuses file-path calls whenever
-`.claude/path-allowlist.json` exists, instead of judging them as the lead.
+Agent identity: dispatch and console chat set `YAKOS_AGENT_TYPE=<agent>` in the
+codex and agy child environment (chat with no pane agent is `lead`, as on
+claude); `yakos hook run --shape` hands it to `path-allowlist` as the agent, so
+a call is judged by that agent's policy. Verified live for both harnesses
+(codex 0.154.0 and agy, 2026-10-07): the harness passes its process environment
+to hook processes, so `YAKOS_AGENT_TYPE` arrives. If it ever does not reach the
+hook, `path-allowlist` refuses file-path calls whenever
+`.claude/path-allowlist.json` exists (the most restrictive policy), instead of
+judging them as the lead.
 
 What the gate does not cover (all unverified or by design):
 

@@ -10,6 +10,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/registry"
+	"github.com/bakw00ds/yakos/internal/runtime"
 )
 
 func deps(t *testing.T, failOpen bool) Deps {
@@ -171,5 +172,56 @@ func TestRunPathAllowlistUsesDispatchedAgent(t *testing.T) {
 	}
 	if got := Run(context.Background(), "codex", "path-allowlist", b, mk("")).ExitCode; got != 0 {
 		t.Errorf("no policy file but blocked: exit %d", got)
+	}
+}
+
+// B1: the agent a codex/agy chat command exports reaches the hook, so a chat
+// write is judged by that agent's policy (and by "lead" for raw chat).
+func TestChatEnvAgentDrivesPathPolicy(t *testing.T) {
+	proj := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pol := `{"lead":{"allow":["**"]},"backend":{"allow":["src/**"]}}`
+	if err := os.WriteFile(filepath.Join(proj, ".claude", "path-allowlist.json"), []byte(pol), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wc := t.TempDir()
+	agentOf := func(env []string) string {
+		for _, kv := range env {
+			if v, ok := strings.CutPrefix(kv, "YAKOS_AGENT_TYPE="); ok {
+				return v
+			}
+		}
+		return ""
+	}
+	write := func(agent, rel string) int {
+		d := deps(t, false)
+		d.Agent = agent
+		d.Resolve = func(string) (registry.Config, string) {
+			return registry.Config{WorkCurrentDir: wc, ProjectDir: proj, StateDir: t.TempDir()}, wc
+		}
+		b, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Write", "cwd": proj,
+			"tool_input": map[string]any{"file_path": filepath.Join(proj, rel), "content": "x"}})
+		return Run(context.Background(), "codex", "path-allowlist", b, d).ExitCode
+	}
+	for name, envOf := range map[string]func(runtime.ChatDispatchRequest) []string{
+		"codex": func(r runtime.ChatDispatchRequest) []string {
+			return (&runtime.CodexAdapter{}).ChatExecCmd(context.Background(), r).Env
+		},
+		"agy": func(r runtime.ChatDispatchRequest) []string {
+			return (&runtime.AgyAdapter{}).ChatExecCmd(context.Background(), r).Env
+		},
+	} {
+		be := agentOf(envOf(runtime.ChatDispatchRequest{AgentName: "backend", UserText: "hi", Project: proj}))
+		if got := write(be, "src/a.go"); got != 0 {
+			t.Errorf("%s: allowed path refused for agent %q: exit %d", name, be, got)
+		}
+		if got := write(be, "README.md"); got != 2 {
+			t.Errorf("%s: disallowed path passed for agent %q: exit %d", name, be, got)
+		}
+		if got := write(agentOf(envOf(runtime.ChatDispatchRequest{AgentName: "lead", UserText: "hi", Project: proj})), "README.md"); got != 0 {
+			t.Errorf("%s: lead chat write refused: exit %d", name, got)
+		}
 	}
 }
