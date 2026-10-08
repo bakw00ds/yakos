@@ -1,6 +1,8 @@
 package policywrite
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -74,8 +76,20 @@ func TestRefusalsCarryAFixedCodeAndWriteNothing(t *testing.T) {
 func TestSetPricingIsOneAtomicWrite(t *testing.T) {
 	dir, reg := fixture(t)
 	var r recorded
+	// Seed an overlay so "before" is a real file, then change billing and price.
+	if err := SetEnabled(dir, reg, "gpt-5.5", false, r.rec); err != nil {
+		t.Fatal(err)
+	}
+	seeded := read(t, filepath.Join(dir, modelreg.OverlayFileName))
+	r.changes = nil
 	if err := SetPricing(dir, reg, "gpt-5.6-terra", PricingArgs{Billing: "api", Input: "1.5", Output: "6"}, r.rec); err != nil {
 		t.Fatal(err)
+	}
+	// The one record spans the whole change: its before is the file as it was
+	// before the call, its after is the file now. Two writes would leave a record
+	// whose before is the half-done file.
+	if got := read(t, filepath.Join(dir, modelreg.OverlayFileName)); r.changes[0].Res.SHABefore != sha(seeded) || r.changes[0].Res.SHAAfter != sha(got) {
+		t.Errorf("record shas %s -> %s do not span the change", r.changes[0].Res.SHABefore, r.changes[0].Res.SHAAfter)
 	}
 	if len(r.changes) != 1 || !r.changes[0].Res.Changed || r.changes[0].Action != "models.pricing" {
 		t.Fatalf("records = %+v", r.changes)
@@ -96,9 +110,14 @@ func TestSetPricingIsOneAtomicWrite(t *testing.T) {
 		t.Error("a failed price left the billing mode changed")
 	}
 	// Billing alone is its own write.
-	if err := SetPricing(dir, reg, "gpt-5.6-terra", PricingArgs{Billing: "local"}, r.rec); err != nil || len(r.changes) != 2 || r.changes[1].Action != "models.billing" {
+	if err := SetPricing(dir, reg, "gpt-5.6-terra", PricingArgs{Billing: "local"}, r.rec); err != nil || len(r.changes) != 2 || r.changes[len(r.changes)-1].Action != "models.billing" {
 		t.Errorf("billing only: %v %+v", err, r.changes)
 	}
+}
+
+func sha(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
 }
 
 func contains(s, sub string) bool {
