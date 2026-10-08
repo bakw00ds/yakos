@@ -250,6 +250,22 @@ func TestHooksEndpointBindsProjectToNonce(t *testing.T) {
 	refused["agy relative"] = do("agy", agy("proj"))
 	if runtime.GOOS != "windows" {
 		refused["symlink out"] = do("codex", codex(link))
+		deep := filepath.Join(outside, "a", "b")
+		if err := os.MkdirAll(deep, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		deepLink := filepath.Join(f.project, "deeplink")
+		if err := os.Symlink(deep, deepLink); err != nil {
+			t.Fatal(err)
+		}
+		dangle := filepath.Join(f.project, "dangle")
+		if err := os.Symlink(filepath.Join(outside, "not-created"), dangle); err != nil {
+			t.Fatal(err)
+		}
+		// Lexically "deeplink/.." is the project; the OS applies ".." to the target.
+		refused["dot-dot after a link"] = do("codex", codex(deepLink+"/.."))
+		refused["dangling link out"] = do("codex", codex(dangle))
+		refused["below a dangling link"] = do("codex", codex(filepath.Join(dangle, "x")))
 		refused["symlink out, missing child"] = do("codex", codex(filepath.Join(link, "missing", "deeper")))
 	}
 	for name, w := range refused {

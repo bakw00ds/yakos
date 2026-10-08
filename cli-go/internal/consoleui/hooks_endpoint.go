@@ -141,6 +141,11 @@ func resolveDir(dir string) (string, error) {
 		if !errors.Is(err, os.ErrNotExist) {
 			return "", err
 		}
+		if fi, lerr := os.Lstat(p); lerr == nil && fi.Mode()&os.ModeSymlink != 0 {
+			// A dangling link: its target (maybe outside the project) does not
+			// exist yet, but the OS would follow it when something is created.
+			return "", errors.New("dangling symlink")
+		}
 		parent := filepath.Dir(p)
 		if parent == p {
 			return "", err
