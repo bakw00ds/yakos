@@ -38,6 +38,14 @@ never holds a login: ADR-0010. Detailed entries follow.
   show whether it is on. New question set `lib/decisions/routing-tier.yaml`. See
   `docs/routing.md` and the ADR-0009 addendum.
 
+- **flows: triggers follow-ups (K-172).** `yakos flows schedule enable|disable
+  <workflow>` writes the 0600 schedules file atomically (it was hand-edited); the
+  webhook secret may live in `~/.yakos-state/webhook-secrets/<secret_env>`
+  (0600, wins over the environment); a replayed signed request no longer spends
+  the 6/min budget; the request body is read before the schedules file so the
+  connection does not reveal whether a hook is enabled. Reference:
+  `docs/flows.md`.
+
 - **docs: ADR-0010, the runtime-matrix rewrite and the routing map (K-155).**
   ADR-0010 records harness-native routing, the vendor-policy facts it rests on
   with dates, and the one assumption no source settles (spawning the unmodified
