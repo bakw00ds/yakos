@@ -18,8 +18,10 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
+	"github.com/bakw00ds/yakos/internal/hooks/pathallowlist"
 	"github.com/bakw00ds/yakos/internal/hooks/registry"
 	"github.com/bakw00ds/yakos/internal/hooks/runner"
+	"github.com/bakw00ds/yakos/internal/runtime"
 )
 
 // Deps carries what differs between the CLI and the daemon.
@@ -84,7 +86,28 @@ func Run(ctx context.Context, shape, name string, data []byte, d Deps) hookio.Re
 		return hookio.Respond(shape, "PreToolUse", false, "")
 	}
 
-	cfg, workCurrentDir := d.Resolve(ins[0].WorkDir)
+	// A relative file path means "relative to the envelope's cwd", which may be
+	// a subdirectory of the project. The hooks judge paths against the project
+	// root, so make them absolute first (K-170 fix).
+	absolutizeFilePaths(ins)
+
+	// A bound project (the endpoint's nonce) outranks everything the caller or
+	// the envelope says: the hooks judge the call against that project only.
+	bound := hookio.ProjectFrom(ctx)
+	workDir := ins[0].WorkDir
+	if bound != "" {
+		workDir = bound
+	}
+	cfg, workCurrentDir := d.Resolve(workDir)
+	if cfg.ProjectDir == "" && d.Env["CLAUDE_PROJECT_DIR"] == "" {
+		// No trusted source named the project (no CLAUDE_PROJECT_DIR, no
+		// absolute workspace in the envelope). The hook process's own cwd is
+		// not one: agy runs hooks from .agents. A fail-closed hook refuses.
+		if event == "PreToolUse" {
+			return degraded("cannot determine the project directory from a trusted source")
+		}
+		return hookio.Respond(shape, event, false, "")
+	}
 	hook, _, found := registry.Lookup(name, cfg)
 	if !found {
 		return hookio.Respond(shape, event, false, "")
@@ -100,7 +123,7 @@ func Run(ctx context.Context, shape, name string, data []byte, d Deps) hookio.Re
 	for k, v := range d.Env {
 		env[k] = v
 	}
-	if env["CLAUDE_PROJECT_DIR"] == "" {
+	if env["CLAUDE_PROJECT_DIR"] == "" || bound != "" {
 		env["CLAUDE_PROJECT_DIR"] = cfg.ProjectDir
 	}
 
@@ -111,6 +134,14 @@ func Run(ctx context.Context, shape, name string, data []byte, d Deps) hookio.Re
 	if !hookio.ValidAgent(agent) {
 		agent = ""
 		env["YAKOS_REQUIRE_AGENT_TYPE"] = "1"
+	}
+	// A chat pane whose agent is a bare runtime name ("codex") has no policy
+	// entry of its own; claude judges the same chat as the lead. Tell
+	// path-allowlist to fall back to the lead's entry, and never to "no
+	// policy". Always overwritten here: the harness environment cannot set it.
+	delete(env, pathallowlist.FallbackAgentEnv)
+	if isRuntimeName(agent) {
+		env[pathallowlist.FallbackAgentEnv] = pathallowlist.FallbackAgent
 	}
 
 	for _, in := range ins {
@@ -134,6 +165,56 @@ func Run(ctx context.Context, shape, name string, data []byte, d Deps) hookio.Re
 		}
 	}
 	return hookio.Respond(shape, event, false, "")
+}
+
+// absolutizeFilePaths rewrites a relative tool_input.file_path / notebook_path
+// to "<envelope cwd>/<path>" when the envelope's cwd is absolute. The join is
+// textual on purpose: cleaning would collapse "link/.." before path-allowlist
+// can resolve the path as written. Payload maps belong to the decoder, so they
+// are copied.
+func absolutizeFilePaths(ins []hooktype.HookInput) {
+	for i := range ins {
+		cwd := ins[i].WorkDir
+		if !filepath.IsAbs(cwd) && !strings.HasPrefix(cwd, "/") {
+			continue
+		}
+		ti, ok := ins[i].Payload["tool_input"].(map[string]any)
+		if !ok {
+			continue
+		}
+		var nti map[string]any
+		for _, k := range []string{"file_path", "notebook_path"} {
+			p, ok := ti[k].(string)
+			if !ok || p == "" || filepath.IsAbs(p) || strings.HasPrefix(p, "/") {
+				continue
+			}
+			if nti == nil {
+				nti = make(map[string]any, len(ti))
+				for kk, v := range ti {
+					nti[kk] = v
+				}
+			}
+			nti[k] = strings.TrimRight(cwd, "/") + "/" + p
+		}
+		if nti == nil {
+			continue
+		}
+		pl := make(map[string]any, len(ins[i].Payload))
+		for k, v := range ins[i].Payload {
+			pl[k] = v
+		}
+		pl["tool_input"] = nti
+		ins[i].Payload = pl
+	}
+}
+
+func isRuntimeName(agent string) bool {
+	for _, r := range runtime.Known {
+		if r == agent {
+			return true
+		}
+	}
+	return false
 }
 
 // blockReason is the hook's own stderr text, falling back to its stdout.

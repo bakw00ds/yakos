@@ -149,6 +149,22 @@ through the harness's PATH or a project-controlled cwd). Install writes through
 `os.OpenRoot` and refuses a symlinked `.agents`. `yakos doctor` warns when the
 installed binary no longer exists: codex fails open when a hook cannot start.
 
+Fail-closed launcher (K-170): on Unix each hook command is
+`/bin/sh -c '<script>' <absolute yakos>`, with the binary as `$0`. A PreToolUse
+launcher runs the binary only if its path is absolute and names a regular,
+executable file (a hand-edited relative path would resolve against the harness
+cwd, so it is refused), and passes
+through its own answer only when it exits 0 or 2 (codex) or exits 0 (agy). A
+missing, non-executable, directory or crashing binary instead yields the
+harness's own deny (codex: exit 2 with a reason on stderr; agy: stdout
+`{"decision":"deny",...}`), so the tool call is refused rather than run ungated.
+A PostToolUse launcher (telemetry) only skips and says so on stderr. The command
+text is fixed (no run id, no temp path), but it is not the old bare
+`<binary> hook run ...`: re-run `hooks install` once after upgrading, and
+`yakos doctor` reports the old file as differing. Windows has no `/bin/sh`; there
+the command stays the bare absolute path and a missing binary is only reported by
+`yakos doctor`.
+
 | | codex (0.154.0) | agy (1.3.0) |
 |---|---|---|
 | File | `<yakOS codex profile>/hooks.json` (`~/.yakos-state/codex-home`); never `~/.codex` | `<workspace>/.agents/hooks.json`; other hook names in an existing file are kept, and install lists them in a warning (agy runs them headless with no trust step; agy also reads `.agent/`, `_agents/`, `_agent/` and parent `.agents/` directories) |
@@ -167,6 +183,14 @@ Login: yakOS does not copy `~/.codex/auth.json`. The profile is used once
 is set in the dispatching process and the profile holds the hooks file.
 `yakos doctor` warns when a hooks file sits in a profile dispatch is not using
 and when the file differs from what this yakos would write (then the gate is off, not merely "modified").
+
+Runtime-named agents (K-170): a pane whose agent is the bare runtime name
+(`codex`, `agy`, `claude`) has no roster entry and normally no entry of its own in
+`.claude/path-allowlist.json`. `yakos hook run --shape` then applies the `lead`
+entry, which is what a claude chat gets, instead of passing the call for lack of
+a policy. An entry named after the runtime still wins. A roster agent with no
+entry passes, as on claude. The fallback is set by yakos itself; a harness
+environment variable cannot name it.
 
 Agent identity: dispatch and console chat set `YAKOS_AGENT_TYPE=<agent>` in the
 codex and agy child environment (chat with no pane agent is `lead`, as on
@@ -187,11 +211,41 @@ What the gate does not cover (all unverified or by design):
   mapped best effort (`hookio/shape.go`); an unmapped tool name reaches the hooks
   under its own name and is not gated by `path-allowlist` or `secret-scan`.
 - A shell command that writes a file (`echo K=... > .env`) is not inspected by
-  `secret-scan` or `path-allowlist`, which gate file-write tools.
-- Agy's behaviour when the hook binary is missing or crashes was not tested; a
-  hook whose binary is missing may fail open (codex does; the installed path is
-  absolute and doctor checks it).
+  `secret-scan` or `path-allowlist`, which gate file-write tools. A follow-up
+  (K-170, shell-write decoding) closes the common forms.
+- Agy's behaviour when a hook command cannot start was never observed (agy cannot
+  be driven to a hook without a signed-in model call). The launcher removes the
+  question: it always starts, and it prints agy's deny itself.
 - Hooks do not make agy a containment boundary (K-158 above still applies).
+
+Project directory (K-170): the hooks find `.claude/path-allowlist.json` through
+`CLAUDE_PROJECT_DIR`, which neither harness sets. From the command line the project
+is, in order: `CLAUDE_PROJECT_DIR` if the hook process has it, else the envelope's
+absolute `cwd` (codex) or first `workspacePaths` entry (agy). The hook process's own
+working directory is never used (agy runs hooks from `.agents`). When none of those
+names a project, a fail-closed hook refuses the PreToolUse call ("cannot determine
+the project directory") and a telemetry hook skips it; `YAKOS_HOOKS_FAIL_OPEN=1`
+overrides, as for an undecodable envelope. A relative file path in a tool call is
+taken relative to the envelope's cwd, which may be a subdirectory of the project,
+and is made absolute before the hooks judge it against the project root. The
+endpoint resolves symlinks in the longest existing prefix of an envelope
+directory and refuses one containing "..". A harness started in a subdirectory of
+the project is judged by that subdirectory's `.claude/`, which usually holds no
+policy: start it at the project root.
+
+Live smoke (K-170, 2026-10-08, codex 0.154.0): `yakos hooks install --harness codex`
+into a scratch HOME, then `codex exec --dangerously-bypass-hook-trust` against a
+local stub of the Responses API (a scripted tool call, no vendor model), with
+`CODEX_HOME`, `HOME` and the XDG variables in a scratch tree. Observed: the
+installed PreToolUse hooks ran for a shell tool call (hook log lines, agent
+`reviewer`), a benign `echo hi` ran and `supervisor-stream` logged the
+PostToolUse, and with the installed binary made non-executable, or deleted, the
+call was refused by the launcher ("Command blocked by PreToolUse hook") and never
+ran. Not verified live: agy. `agy -p` with a scratch HOME honours the home
+override but, with no sign-in and no network, never reached a hook; agy has no
+model-endpoint override to stub, and the operator's sign-in was not used. For agy
+the evidence is the recorded K-156 envelopes and the fake-harness end-to-end
+tests.
 
 Optional endpoint: with `hooks_endpoint: true` in `~/.yakos-state/router-policy.yml`
 (owner-only, like the other keys), `yakos serve` mounts `POST
@@ -200,7 +254,11 @@ Optional endpoint: with `hooks_endpoint: true` in `~/.yakos-state/router-policy.
 in the `X-Yakos-Hook-Nonce` header (read it from
 `~/.yakos-state/hooks-endpoint-nonce`, rewritten at each daemon start), accepts
 64 KiB, is loopback-only, and returns `{"exit_code","stdout","stderr"}` for the
-caller to replay. `?agent=<id>` names the dispatched agent. The caller MUST treat
+caller to replay. The nonce is bound at issue time to the daemon's project (the
+IDE root behind `.project-path`, else the workspace): every hook runs against that
+project, and an envelope whose `cwd` or `workspacePaths` name another directory, a
+relative one, or a symlink out of it is refused with 403 and an audit line that
+carries the hook and shape but no path. `?agent=<id>` names the dispatched agent. The caller MUST treat
 a 413 (body over 64 KiB), and any other non-200 answer, as DENY; failing open on an
 endpoint error bypasses the gate. The installed files use the CLI.
 

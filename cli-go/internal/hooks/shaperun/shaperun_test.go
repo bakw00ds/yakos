@@ -225,3 +225,164 @@ func TestChatEnvAgentDrivesPathPolicy(t *testing.T) {
 		}
 	}
 }
+
+// K-170 item 0: a chat pane whose agent is the runtime name (codex, agy,
+// claude) has no entry of its own in path-allowlist.json. It must be judged by
+// the lead's policy, as a claude chat is, and never pass for lack of a policy.
+func TestRuntimeNamedAgentFallsBackToLeadPolicy(t *testing.T) {
+	proj := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pol := `{"lead":{"allow":["src/**"]},"agy":{"allow":["docs/**"]}}`
+	if err := os.WriteFile(filepath.Join(proj, ".claude", "path-allowlist.json"), []byte(pol), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wc := t.TempDir()
+	write := func(agent, rel string, env map[string]string) int {
+		d := deps(t, false)
+		d.Agent = agent
+		if env != nil {
+			d.Env = env
+		}
+		d.Resolve = func(string) (registry.Config, string) {
+			return registry.Config{WorkCurrentDir: wc, ProjectDir: proj, StateDir: t.TempDir()}, wc
+		}
+		b, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Write", "cwd": proj,
+			"tool_input": map[string]any{"file_path": filepath.Join(proj, rel), "content": "x"}})
+		return Run(context.Background(), "codex", "path-allowlist", b, d).ExitCode
+	}
+	for _, rt := range []string{"codex", "claude"} {
+		if got := write(rt, "README.md", nil); got != 2 {
+			t.Errorf("%s chat: write outside the lead allow-list passed (exit %d)", rt, got)
+		}
+		if got := write(rt, "src/a.go", nil); got != 0 {
+			t.Errorf("%s chat: write inside the lead allow-list refused (exit %d)", rt, got)
+		}
+	}
+	// An entry of the runtime's own name still wins over the fallback.
+	if got := write("agy", "docs/a.md", nil); got != 0 {
+		t.Errorf("agy: own entry not applied (exit %d)", got)
+	}
+	if got := write("agy", "src/a.go", nil); got != 2 {
+		t.Errorf("agy: own entry did not restrict (exit %d)", got)
+	}
+	// A roster agent with no entry passes, exactly as on claude.
+	if got := write("writer", "README.md", nil); got != 0 {
+		t.Errorf("roster agent without an entry blocked (exit %d)", got)
+	}
+	// The harness environment cannot name a fallback for a roster agent.
+	if got := write("writer", "README.md", map[string]string{"YAKOS_POLICY_FALLBACK_AGENT": "lead"}); got != 0 {
+		t.Errorf("ambient fallback variable changed a roster agent's verdict (exit %d)", got)
+	}
+}
+
+// K-170 (d, e): a project bound by the caller (the endpoint's nonce) wins over
+// the envelope's cwd and over the daemon's own CLAUDE_PROJECT_DIR.
+func TestBoundProjectOutranksEnvelopeAndEnvironment(t *testing.T) {
+	bound, decoy := t.TempDir(), t.TempDir()
+	if err := os.MkdirAll(filepath.Join(bound, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bound, ".claude", "path-allowlist.json"), []byte(`{"lead":{"deny":[".env"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wc := t.TempDir()
+	var resolved string
+	d := deps(t, false)
+	d.Agent = "lead"
+	d.Env = map[string]string{"CLAUDE_PROJECT_DIR": decoy}
+	d.Resolve = func(workDir string) (registry.Config, string) {
+		resolved = workDir
+		return registry.Config{WorkCurrentDir: wc, ProjectDir: workDir, StateDir: t.TempDir()}, wc
+	}
+	b, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Write", "cwd": decoy,
+		"tool_input": map[string]any{"file_path": ".env", "content": "x"}})
+	if got := Run(hookio.WithProject(context.Background(), bound), "codex", "path-allowlist", b, d).ExitCode; got != 2 {
+		t.Errorf("bound project's policy not applied: exit %d", got)
+	}
+	if resolved != bound {
+		t.Errorf("hooks resolved the envelope's directory, not the bound project")
+	}
+	// Control: without a bound project the envelope's directory is the project.
+	if got := Run(context.Background(), "codex", "path-allowlist", b, d).ExitCode; got != 0 {
+		t.Errorf("control: unbound call blocked: exit %d", got)
+	}
+}
+
+// K-170 (d): no trusted source for the project means a fail-closed hook refuses
+// a PreToolUse call; telemetry and PostToolUse still pass.
+func TestUnknownProjectFailsClosed(t *testing.T) {
+	d := deps(t, false)
+	d.Resolve = func(string) (registry.Config, string) { return registry.Config{}, "" }
+	for _, shape := range []string{"codex", "agy"} {
+		var env []byte
+		if shape == "codex" {
+			env = envelope(t, "codex", "Write", "a.txt", "hello")
+		} else {
+			env = envelope(t, "agy", "write_to_file", "a.txt", "hello")
+		}
+		r := Run(context.Background(), shape, "secret-scan", env, d)
+		blocked := r.ExitCode == 2 || strings.Contains(string(r.Stdout), `"deny"`)
+		if !blocked {
+			t.Errorf("%s: fail-closed hook allowed a call with no known project: %+v", shape, r)
+		}
+		if strings.Contains(string(r.Stderr)+string(r.Stdout), "/w") {
+			t.Errorf("%s: reason leaks a path: %+v", shape, r)
+		}
+	}
+	// FailOpen is the operator's emergency override.
+	d.FailOpen = true
+	if r := Run(context.Background(), "codex", "secret-scan", envelope(t, "codex", "Write", "a.txt", "hello"), d); r.ExitCode != 0 {
+		t.Errorf("YAKOS_HOOKS_FAIL_OPEN ignored: %+v", r)
+	}
+	// With CLAUDE_PROJECT_DIR set the project is known even if Resolve says "".
+	d.FailOpen = false
+	d.Env = map[string]string{"CLAUDE_PROJECT_DIR": t.TempDir()}
+	if r := Run(context.Background(), "codex", "secret-scan", envelope(t, "codex", "Write", "a.txt", "hello"), d); r.ExitCode == 2 {
+		t.Errorf("project from CLAUDE_PROJECT_DIR refused: %+v", r)
+	}
+}
+
+// Relative patch paths are relative to the envelope's cwd, which may be a
+// subdirectory of the project: "src/evil.go" from P/other lands in
+// P/other/src/evil.go, outside an allow-list of src/**.
+func TestRelativePathsAreJudgedFromTheEnvelopeCwd(t *testing.T) {
+	proj, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, ".claude", "path-allowlist.json"), []byte(`{"backend":{"allow":["src/**"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wc := t.TempDir()
+	run := func(cwd, tool string, input map[string]any) int {
+		d := deps(t, false)
+		d.Agent = "backend"
+		d.Resolve = func(string) (registry.Config, string) {
+			return registry.Config{WorkCurrentDir: wc, ProjectDir: proj, StateDir: t.TempDir()}, wc
+		}
+		b, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "tool_name": tool, "cwd": cwd, "tool_input": input})
+		return Run(hookio.WithProject(context.Background(), proj), "codex", "path-allowlist", b, d).ExitCode
+	}
+	patch := map[string]any{"input": "*** Begin Patch\n*** Add File: src/evil.go\n+x\n*** End Patch"}
+	if got := run(filepath.Join(proj, "other"), "apply_patch", patch); got != 2 {
+		t.Errorf("patch from a subdirectory cwd: exit %d, want 2", got)
+	}
+	if got := run(proj, "apply_patch", patch); got != 0 {
+		t.Errorf("patch from the project root: exit %d, want 0", got)
+	}
+	// From the allowed subdirectory the same relative path is fine.
+	if got := run(filepath.Join(proj, "src"), "Write", map[string]any{"file_path": "a.go", "content": "x"}); got != 0 {
+		t.Errorf("write inside src from cwd src: exit %d, want 0", got)
+	}
+	if got := run(filepath.Join(proj, "src"), "Write", map[string]any{"file_path": "../README.md", "content": "x"}); got != 2 {
+		t.Errorf("traversal from cwd src: exit %d, want 2", got)
+	}
+	if got := run(filepath.Join(proj, "other"), "Write", map[string]any{"file_path": "src/evil.go", "content": "x"}); got != 2 {
+		t.Errorf("write from a subdirectory cwd: exit %d, want 2", got)
+	}
+}

@@ -2,6 +2,7 @@ package hookio
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -134,5 +135,42 @@ func TestRespondReasonBoundedAndValidJSON(t *testing.T) {
 	}
 	if len(d.Reason) > maxReason {
 		t.Fatalf("reason %d bytes", len(d.Reason))
+	}
+}
+
+func TestEnvelopeDirs(t *testing.T) {
+	cases := []struct {
+		shape, body string
+		want        []string
+	}{
+		{"codex", `{"cwd":"/p","tool_name":"Bash"}`, []string{"/p"}},
+		{"codex", `{"tool_name":"Bash"}`, nil},
+		{"codex", `{"cwd":""}`, nil},
+		{"codex", `{"cwd":7}`, nil},
+		{"codex", `not json`, nil},
+		{"codex", `[]`, nil},
+		{"agy", `{"workspacePaths":["/a","/b",7,""]}`, []string{"/a", "/b"}},
+		{"agy", `{"workspacePaths":"/a"}`, nil},
+		{"agy", `{"cwd":"/ignored"}`, nil},
+		{"claude", `{"cwd":"/p"}`, nil},
+	}
+	for _, c := range cases {
+		got := EnvelopeDirs(c.shape, []byte(c.body))
+		if strings.Join(got, "|") != strings.Join(c.want, "|") {
+			t.Errorf("%s %s: %q, want %q", c.shape, c.body, got, c.want)
+		}
+	}
+	if got := EnvelopeDirs("codex", []byte(`{"cwd":"/p","x":"`+strings.Repeat("a", MaxShapeBytes)+`"}`)); got != nil {
+		t.Errorf("oversize envelope named dirs: %q", got)
+	}
+}
+
+func TestProjectContext(t *testing.T) {
+	ctx := context.Background()
+	if ProjectFrom(ctx) != "" {
+		t.Fatal("project set on a bare context")
+	}
+	if got := ProjectFrom(WithProject(ctx, "/p")); got != "/p" {
+		t.Errorf("ProjectFrom = %q", got)
 	}
 }
