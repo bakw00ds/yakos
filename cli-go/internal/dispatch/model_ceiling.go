@@ -39,13 +39,14 @@ func modelHint(model string) string {
 }
 
 // overlayHint says how to make a model rankable: map the aliases in the user
-// overlay. An unpinned model ("") never ranks, with or without an overlay, so the
+// overlay. It names the file, never its absolute path: a refusal is printed to
+// terminals and logs, and the path carries the home directory (K-168). An unpinned model ("") never ranks, with or without an overlay, so the
 // hint for it is to pin one.
 func overlayHint(runtimeName, model string) string {
 	if model == "" {
 		return fmt.Sprintf("pin a model in the agent's frontmatter: the harness default of %s has no cost class, and an overlay cannot rank it", runtimeName)
 	}
-	return fmt.Sprintf("map %s's tier aliases to model ids in the overlay %s", runtimeName, modelreg.OverlayPath(modelreg.DefaultStateDir()))
+	return fmt.Sprintf("map %s's tier aliases to model ids in the user overlay %s in the yakos state directory", runtimeName, modelreg.OverlayFileName)
 }
 
 // enforceCeiling applies agent's max_model ceiling to model on the runtime that

@@ -14,6 +14,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/runtime"
 )
 
 // Exit-code contract of `yakos budget` (docs/budgets.md):
@@ -474,10 +475,34 @@ func hasModelFlag(args []string) bool {
 	return false
 }
 
+// bashDefaultModel is the tier cli/lib/dispatch.sh runs when neither the
+// frontmatter nor a promoted policy names one (MODEL_RESOLVED's fallback).
+const bashDefaultModel = "sonnet"
+
+// bashEffectiveModel is the model the bash dispatch would run for a without a
+// --model: model-policy (a promoted tier) over model, each alias-resolved, else
+// the fixed bashDefaultModel. It mirrors dispatch.sh's resolution, so the clamp
+// ranks what the relay will actually use rather than the composed model alone.
+func bashEffectiveModel(a agentscompose.ComposedAgent) string {
+	if p := strings.TrimSpace(a.ModelPolicy); p != "" {
+		return runtime.ResolveAlias(p)
+	}
+	m := strings.TrimSpace(a.ModelRaw)
+	if m == "" {
+		m = a.Model
+	}
+	if m == "" {
+		return bashDefaultModel
+	}
+	return runtime.ResolveAlias(m)
+}
+
 // clampFrontmatterModel covers a passthrough dispatch with no --model: the
-// bash dispatch would resolve the agent's frontmatter model and pin the relay
-// to it, bypassing the max_model ceiling. When the composed frontmatter model
-// exceeds the ceiling, an explicit --model <ceiling> is appended (K-116).
+// bash dispatch resolves the model itself (policy, then frontmatter, then a
+// fixed sonnet) and pins the relay to it, bypassing the max_model ceiling. The
+// effective model is ranked against the ceiling: a dearer one is lowered with an
+// explicit --model <ceiling model> (K-116), and one the registry cannot rank is
+// refused, as in the native dispatch (K-168).
 func clampFrontmatterModel(args []string, agent, project, yakosRoot string) ([]string, error) {
 	if yakosRoot == "" {
 		return args, nil
@@ -487,11 +512,11 @@ func clampFrontmatterModel(args []string, agent, project, yakosRoot string) ([]s
 		return args, nil
 	}
 	for _, a := range roster {
-		if a.ID != agent || a.Model == "" {
+		if a.ID != agent {
 			continue
 		}
 		ceiling := budget.MaxModel(agent, budget.Options{Project: project})
-		clamped, note, err := dispatch.EnforceModelCeiling(passthroughRuntime(args), agent, ceiling, a.Model)
+		clamped, note, err := dispatch.EnforceModelCeiling(passthroughRuntime(args), agent, ceiling, bashEffectiveModel(a))
 		if err != nil {
 			return nil, err
 		}

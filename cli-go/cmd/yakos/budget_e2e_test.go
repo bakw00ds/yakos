@@ -200,3 +200,66 @@ func TestBudgetGateClampsFrontmatterPin(t *testing.T) {
 		t.Fatalf("agent without a ceiling must be untouched: %v", got)
 	}
 }
+
+// K-168 (sec-339b M2): with no --model the bash dispatch runs model-policy, else
+// model, else a fixed sonnet. The clamp ranks that effective model, so a no-model
+// agent cannot run sonnet over a haiku ceiling and a model-policy line cannot lift
+// an agent over its ceiling.
+func TestPassthroughClampRanksTheBashEffectiveModel(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("YAKOS_DISPATCH_LOG", state)
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	dir := filepath.Join(root, "lib", "agents")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	agents := map[string]string{
+		"nomodel": "id: nomodel\n",
+		"pinned":  "id: pinned\nmodel: haiku\nmodel-policy: opus\n",
+		"aliased": "id: aliased\nmodel: best\n",
+		"cheap":   "id: cheap\nmodel: haiku\n",
+	}
+	for n, fm := range agents {
+		body := "---\n" + fm + "---\n\n## Purpose\n\nx.\n"
+		if err := os.WriteFile(filepath.Join(dir, n+".md"), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	proj := t.TempDir()
+	for _, n := range []string{"nomodel", "pinned", "aliased"} {
+		if err := budget.SetMaxModel(state, n, "haiku"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, n := range []string{"nomodel", "pinned", "aliased"} {
+		got, err := passthroughClamped([]string{"dispatch", n, "t", "--project", proj}, n, proj, root)
+		if err != nil || strings.Join(got[len(got)-2:], " ") != "--model haiku" {
+			t.Errorf("%s: effective model not clamped to haiku: %v %v", n, got, err)
+		}
+	}
+	// Within the ceiling, or no ceiling: argv untouched.
+	got, err := passthroughClamped([]string{"dispatch", "cheap", "t"}, "cheap", proj, root)
+	if err != nil || hasModelFlag(got) {
+		t.Errorf("cheap has no ceiling: %v %v", got, err)
+	}
+	if err := budget.SetMaxModel(state, "pinned", "opus"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = passthroughClamped([]string{"dispatch", "pinned", "t"}, "pinned", proj, root)
+	if err != nil || hasModelFlag(got) {
+		t.Errorf("opus policy under an opus ceiling must pass: %v %v", got, err)
+	}
+	// The built-in supervisor ceiling (sonnet) clamps a model-policy: opus line.
+	body := "---\nid: watchdog\nmodel: haiku\nmodel-policy: opus\n---\n\n## Purpose\n\nx.\n"
+	if err := os.WriteFile(filepath.Join(dir, "watchdog.md"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, ".yakos.yml"), []byte("supervisor:\n  agent: watchdog\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err = passthroughClamped([]string{"dispatch", "watchdog", "t", "--project", proj}, "watchdog", proj, root)
+	if err != nil || strings.Join(got[len(got)-2:], " ") != "--model sonnet" {
+		t.Errorf("renamed supervisor with model-policy: opus: %v %v", got, err)
+	}
+}

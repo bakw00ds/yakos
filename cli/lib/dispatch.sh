@@ -374,6 +374,70 @@ export YAKOS_USAGE_OUT="$usage_tmp"
 export YAKOS_MODEL_OVERRIDE="$MODEL_RESOLVED"
 epoch_start="$(ct_iso_to_epoch "$ts_start" 2>/dev/null || date +%s)"
 
+# ---- bounded run of a shell function (K-169) -------------------------------
+# yk_rt_dispatch is a shell FUNCTION. GNU coreutils timeout(1) (Linux, or macOS
+# with coreutils) execs its command and cannot run a function: "failed to run
+# command 'yk_rt_dispatch'", exit 127, before any runtime starts. ct_timeout is
+# right for an external command and wrong here, so a function gets a shell-native
+# deadline instead: it runs in a background subshell, the parent polls it, and on
+# expiry the subshell and its descendants get TERM, then KILL after a grace
+# period. Same contract as timeout(1): exit 124 on expiry, else the command's
+# own status. stdin is passed through (a background job would otherwise get
+# /dev/null). Any other command still goes through ct_timeout.
+
+# _dispatch_descendants <pid>: pid's descendants, one per line (empty without ps).
+_dispatch_descendants() {
+    ps -A -o pid= -o ppid= 2>/dev/null | awk -v root="$1" '
+        { parent[$1] = $2; pids[NR] = $1; n = NR }
+        END {
+            mark[root] = 1
+            do {
+                changed = 0
+                for (i = 1; i <= n; i++) {
+                    c = pids[i]
+                    if (!(c in mark) && (parent[c] in mark)) { mark[c] = 1; changed = 1; print c }
+                }
+            } while (changed)
+        }'
+}
+
+_dispatch_run_bounded() {
+    local secs="$1"; shift
+    if [ "$(type -t "$1" 2>/dev/null)" != "function" ]; then
+        ct_timeout "$secs" "$@"
+        return $?
+    fi
+    secs="${secs%s}"
+    case "$secs" in
+        ''|*[!0-9]*) ct_die "dispatch: timeout '$secs' is not a whole number of seconds" ;;
+    esac
+    local pid rc=0 deadline victims
+    "$@" <&0 &
+    pid=$!
+    if [ "$secs" -gt 0 ]; then
+        deadline=$((SECONDS + secs))
+        while kill -0 "$pid" 2>/dev/null; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+                victims="$(_dispatch_descendants "$pid" | tr '\n' ' ')"
+                # shellcheck disable=SC2086  # a space-separated list of pids
+                kill -TERM "$pid" $victims 2>/dev/null || true
+                local grace=0
+                while kill -0 "$pid" 2>/dev/null && [ "$grace" -lt 10 ]; do
+                    sleep 0.2
+                    grace=$((grace + 1))
+                done
+                # shellcheck disable=SC2086
+                kill -KILL "$pid" $victims 2>/dev/null || true
+                wait "$pid" 2>/dev/null || true
+                return 124
+            fi
+            sleep 0.2
+        done
+    fi
+    wait "$pid" || rc=$?
+    return "$rc"
+}
+
 # Run the adapter with stderr split: one copy goes to the terminal (fd 2),
 # the other is saved to stderr_tmp for post-mortem logging on failure.
 # Option B: dispatch.sh owns the capture; adapters are oblivious.
@@ -386,7 +450,7 @@ epoch_start="$(ct_iso_to_epoch "$ts_start" 2>/dev/null || date +%s)"
 # differences in wait-on-process-substitution semantics; buffered replay
 # is portable and race-free.
 set +e
-ct_timeout "$TIMEOUT" yk_rt_dispatch "$PROJECT" "$AGENT_NAME" "$TASK" \
+_dispatch_run_bounded "$TIMEOUT" yk_rt_dispatch "$PROJECT" "$AGENT_NAME" "$TASK" \
     >"$out_tmp" 2>"$stderr_tmp"
 rc=$?
 set -e

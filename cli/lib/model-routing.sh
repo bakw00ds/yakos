@@ -899,11 +899,14 @@ _mr_strip_candidate() {
 # Atomically rewrites the model: line in a YAML frontmatter block.
 # Strategy: awk identifies the line within the ---...--- block and
 # replaces only that line, preserving all other bytes byte-for-byte.
-# Writes to a tempfile then mv over original (atomic).
+# Writes to a tempfile then mv over original (atomic). The replacement is a copy
+# of the original (cp -p) with its content swapped in place, so the file keeps its
+# mode: a bare mv of a mktemp file left it 0600 (K-168).
 _mr_rewrite_model_frontmatter() {
     local file="$1" new_model="$2"
-    local tmp
+    local tmp out
     tmp="$(mktemp -t yakos-mr-rewrite.XXXXXX)"
+    out="$(mktemp -t yakos-mr-rewrite.XXXXXX)"
     awk -v new_model="$new_model" '
         BEGIN { in_fm=0; done=0 }
         NR==1 && /^---[[:space:]]*$/ { in_fm=1; print; next }
@@ -914,7 +917,13 @@ _mr_rewrite_model_frontmatter() {
         }
         { print }
     ' "$file" > "$tmp"
-    mv "$tmp" "$file"
+    if cp -p "$file" "$out" && cat "$tmp" > "$out"; then
+        mv "$out" "$file"
+    else
+        rm -f "$tmp" "$out"
+        return 1
+    fi
+    rm -f "$tmp"
 }
 
 # _mr_graveyard_count <agent-id> <suggested-model>
@@ -959,6 +968,19 @@ cmd_promote() {
 Pass --global to promote a framework-shipped agent (rewrites lib/agents/${agent_id}.md under YAKOS_ROOT)."
     fi
 
+    # 2b. Symlink guard (K-168 / sec-339b L3). A project agent reached through a
+    # linked .claude, .claude/agents or agent file would be written through the
+    # link, outside the project. Refuse before any write (backup included), as
+    # the Go implementation does. The message carries no path.
+    if [ "$is_framework" -eq 0 ]; then
+        local agents_dir claude_dir
+        agents_dir="$(dirname -- "$agent_file")"
+        claude_dir="$(dirname -- "$agents_dir")"
+        if [ -L "$claude_dir" ] || [ -L "$agents_dir" ] || [ -L "$agent_file" ]; then
+            ct_die "model-routing promote: agent file refused: a symlinked directory or file is not followed"
+        fi
+    fi
+
     # 3. Find the most recent candidate.
     local cand
     cand="$(_mr_latest_candidate "$agent_id")"
@@ -991,7 +1013,7 @@ Pass --global to promote a framework-shipped agent (rewrites lib/agents/${agent_
     if ! bash "$YAKOS_LIB/validate.sh" --strict "$validate_target" >/dev/null 2>&1; then
         ct_log "model-routing promote: validate --strict failed; restoring backup"
         cp "$backup_file" "$agent_file"
-        ct_die "model-routing promote: validation failed after rewrite; original restored from $backup_file"
+        ct_die "model-routing promote: validation failed after rewrite; the original was restored from the backup"
     fi
 
     # 7. Append history entry.
