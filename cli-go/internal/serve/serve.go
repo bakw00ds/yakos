@@ -225,6 +225,19 @@ type Config struct {
 	// Off by default; requires --share-terminal on `yakos start`.
 	ShareTerminal bool
 
+	// OpenAIEndpoint turns on the OpenAI-compatible endpoint (K-150), as
+	// `yakos serve --openai-endpoint` does. It is also turned on by
+	// `openai_endpoint: true` in the trusted ~/.yakos-state/router-policy.yml.
+	OpenAIEndpoint bool
+
+	// OpenAIAddr overrides the endpoint's listen address (loopback only). Empty
+	// means 127.0.0.1:7898. For tests.
+	OpenAIAddr string
+
+	// OpenAIPolicyDir overrides the directory the trusted policy is read from.
+	// Empty means the real state dir. For tests.
+	OpenAIPolicyDir string
+
 	// TerminalManager, when non-nil, is the active PTY session manager.
 	// Populated by Run() when ShareTerminal is true; also injectable for tests.
 	// When nil and ShareTerminal is true, Run() constructs one from termmanager.New.
@@ -911,6 +924,16 @@ func Run(ctx context.Context, cfg Config) error {
 		close(mcpHTTPErrCh)
 	}
 
+	// OpenAI-compatible endpoint (K-150): off unless asked for.
+	openAIErrCh := make(chan error, 1)
+	if openAIEndpointEnabled(cfg.OpenAIEndpoint, cfg.OpenAIPolicyDir) {
+		if err := startOpenAIGateway(ctx, cfg, dispatchSvc, restWriteToken, openAIErrCh); err != nil {
+			return err
+		}
+	} else {
+		close(openAIErrCh)
+	}
+
 	// Build the JSON-RPC server and register handlers (bus is passed via cfg).
 	cfgWithBus := cfg
 	cfgWithBus.Bus = bus
@@ -971,6 +994,13 @@ func Run(ctx context.Context, cfg Config) error {
 	case mcpHTTPErr := <-mcpHTTPErrCh:
 		if mcpHTTPErr != nil && rpcErr == nil {
 			rpcErr = mcpHTTPErr
+		}
+	case <-time.After(drainTimeout):
+	}
+	select {
+	case openAIErr := <-openAIErrCh:
+		if openAIErr != nil && rpcErr == nil {
+			rpcErr = openAIErr
 		}
 	case <-time.After(drainTimeout):
 	}

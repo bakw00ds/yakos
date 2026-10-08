@@ -232,6 +232,31 @@ jobs:
           dash scripts/install.sh --help
           dash scripts/uninstall-yakos-go.sh --help
 
+  gateway-protocol:
+    # The OpenAI-compatible endpoint's wire contract (K-150): models list, chat
+    # completions (stream and not), auth/Host/Origin negatives, conversation
+    # resume, digest scanning, ledger surface. Fake CLIs on PATH and loopback
+    # only: the job needs no network and no credentials.
+    name: gateway-protocol
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: '1.25'
+          cache-dependency-path: cli-go/go.sum
+
+      - name: Gateway protocol tests
+        working-directory: cli-go
+        run: |
+          go test -race -count=1 -timeout 5m ./internal/gateway/...
+          go test -race -count=1 -timeout 5m -run 'OpenAI' ./internal/serve/ ./internal/routerpolicy/
+
   govulncheck:
     # Advisory vulnerability scan for Go dependencies (cli-go/).
     # Uses govulncheck from the Go vuln DB; catches known CVEs and

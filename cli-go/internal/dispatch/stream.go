@@ -119,6 +119,9 @@ type RouteInfo struct {
 	Reason       string
 	Class        string
 	FallbackFrom string
+	// PolicySHA identifies the router policy file the decision was made under
+	// ("" when there is none).
+	PolicySHA string
 }
 
 // StreamChunk is one incremental unit of streaming output.
@@ -427,6 +430,7 @@ func (s *Service) RunStream(ctx context.Context, p Params, onChunk func(StreamCh
 		onChunk(StreamChunk{Type: "route", Route: &RouteInfo{
 			Runtime: d.Runtime, Provider: d.Provider, Model: d.ModelID, RuleID: d.RuleID,
 			Reason: d.Reason, Class: d.RouteClass, FallbackFrom: d.FallbackFrom,
+			PolicySHA: d.PolicySHA,
 		}})
 	}
 

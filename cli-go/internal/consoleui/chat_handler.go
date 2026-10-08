@@ -1448,10 +1448,16 @@ func resumeTargetGone(text string) bool {
 // not look like a missing session (a rate limit, a network error) keeps the id.
 // A successful turn stores its own id, which resets the count.
 func (ch *chatHandlers) forgetDeadResume(conversationID, operatorID, rt string, res dispatch.Result) {
+	forgetDeadResume(ch.transcripts, conversationID, operatorID, rt, res)
+}
+
+// forgetDeadResume is the method's body over any transcript store; the OpenAI-
+// compatible endpoint (K-150) calls it through ForgetDeadResume.
+func forgetDeadResume(tr *Transcripts, conversationID, operatorID, rt string, res dispatch.Result) {
 	if res.ExitCode == 0 {
 		return
 	}
-	n, err := ch.transcripts.NoteResumeFailure(conversationID, rt, operatorID)
+	n, err := tr.NoteResumeFailure(conversationID, rt, operatorID)
 	if err != nil {
 		slog.Warn("consoleui: count resume failure", "conversation", conversationID, "err", err)
 		return
@@ -1459,7 +1465,7 @@ func (ch *chatHandlers) forgetDeadResume(conversationID, operatorID, rt string, 
 	if !resumeTargetGone(res.StderrTail) && n < resumeFailureLimit {
 		return
 	}
-	if clrErr := ch.transcripts.ClearNativeSession(conversationID, rt, operatorID); clrErr != nil {
+	if clrErr := tr.ClearNativeSession(conversationID, rt, operatorID); clrErr != nil {
 		slog.Warn("consoleui: clear native session id", "conversation", conversationID, "err", clrErr)
 	}
 }

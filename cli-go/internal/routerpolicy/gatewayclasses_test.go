@@ -1,6 +1,7 @@
 package routerpolicy
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -149,5 +150,41 @@ func TestLoad_BadGatewayClassesShapeDoesNotBreakTheOtherKey(t *testing.T) {
 	ok, err := AllowsUnsandboxed(dir, "codex")
 	if err != nil || !ok {
 		t.Fatalf("got (%v, %v), want (true, nil)", ok, err)
+	}
+}
+
+// openai_endpoint (K-150) is on only for the YAML boolean true; any other value,
+// or a wrong type, is off and does not discard the rest of the file.
+func TestOpenAIEndpointKey(t *testing.T) {
+	cases := []struct {
+		name, yml string
+		want      bool
+	}{
+		{"absent", "", false},
+		{"true", "openai_endpoint: true\n", true},
+		{"false", "openai_endpoint: false\n", false},
+		{"string true", "openai_endpoint: \"true\"\n", false},
+		{"yes word", "openai_endpoint: yes\n", false},
+		{"number", "openai_endpoint: 1\n", false},
+		{"list", "openai_endpoint: [true]\n", false},
+	}
+	for _, c := range cases {
+		dir := t.TempDir()
+		if err := os.WriteFile(Path(dir), []byte(c.yml+"allow_unsandboxed_runtimes: [agy]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		f, err := Load(dir)
+		if err != nil {
+			t.Fatalf("%s: %v", c.name, err)
+		}
+		if got := f.OpenAIEndpoint(); got != c.want {
+			t.Errorf("%s: OpenAIEndpoint() = %v, want %v", c.name, got, c.want)
+		}
+		if len(f.AllowUnsandboxedRuntimes) != 1 {
+			t.Errorf("%s: the rest of the file was lost", c.name)
+		}
+	}
+	if (File{}).OpenAIEndpoint() {
+		t.Error("the zero File enables the endpoint")
 	}
 }
