@@ -193,6 +193,7 @@ func TestModelsProbeThroughTheRouterHonoursTimeout(t *testing.T) {
 type hangingProbe struct {
 	cmd     *exec.Cmd
 	waited  chan error
+	exited  chan struct{} // closed when the probe process ends
 	out     *syncBuffer
 	pidFile string
 }
@@ -231,14 +232,26 @@ func startHangingProbe(t *testing.T, home string) *hangingProbe {
 		t.Fatal(err)
 	}
 	p.waited = make(chan error, 1)
-	go func() { p.waited <- p.cmd.Wait() }()
+	p.exited = make(chan struct{})
+	go func() { p.waited <- p.cmd.Wait(); close(p.exited) }()
 	t.Cleanup(func() { // a failing test leaves nothing running
 		_ = p.cmd.Process.Kill()
 		for _, pid := range p.agyPIDs() {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	})
-	for deadline := time.Now().Add(20 * time.Second); len(p.agyPIDs()) == 0 && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+	// The fake agy writes its pid before anything else, so the pid file is the start
+	// signal. The ceiling is generous because a race-instrumented helper on a loaded
+	// runner needs tens of seconds to reach agy; it is a hang guard, not a timing
+	// assertion, and a probe that ended early fails at once with its output.
+	for deadline := time.Now().Add(120 * time.Second); len(p.agyPIDs()) == 0 && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		select {
+		case <-p.exited:
+			if len(p.agyPIDs()) == 0 {
+				t.Fatalf("the probe ended before the fake agy started:\n%s", p.out.String())
+			}
+		default:
+		}
 	}
 	if len(p.agyPIDs()) == 0 {
 		t.Fatalf("the fake agy never started:\n%s", p.out.String())
