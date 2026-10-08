@@ -98,6 +98,14 @@ func restrictSensitive(chain []candidate) []candidate {
 // block, transcript digests). Classification ends in the safe direction: the
 // router's scan fails closed. warn gets one line per sensitive request.
 func classifyRequest(class string, ci chainInput, agent *agentscompose.ComposedAgent, task string, extra []string, warn io.Writer) (string, string) {
+	return classifyRequestSO(class, ci, agent, task, extra, nil, warn)
+}
+
+// classifyRequestSO is classifyRequest plus secretOnly: framework-authored text
+// (the console's knowledge pack) scanned for secret shapes only. Like the
+// agent's own prompt it may legitimately name ~/.ssh or .env in documentation,
+// so a path mention there is not a reason; a credential in it still is (K-173).
+func classifyRequestSO(class string, ci chainInput, agent *agentscompose.ComposedAgent, task string, extra, secretOnly []string, warn io.Writer) (string, string) {
 	in := router.Input{Class: class, NeverPaths: ci.project.NeverPaths}
 	if task != "" {
 		in.Material = append(in.Material, task)
@@ -109,6 +117,11 @@ func classifyRequest(class string, ci chainInput, agent *agentscompose.ComposedA
 	for _, x := range extra {
 		if x != "" {
 			in.Material = append(in.Material, x)
+		}
+	}
+	for _, x := range secretOnly {
+		if x != "" {
+			in.SecretOnly = append(in.SecretOnly, x)
 		}
 	}
 	c, why := router.ClassifyReason(in)

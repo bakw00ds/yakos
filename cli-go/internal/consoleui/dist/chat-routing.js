@@ -186,14 +186,61 @@
     return null;
   }
 
-  // fromTranscript turns a persisted transcript turn into a pane message, or null.
+  // fromTranscript turns a persisted route turn into a pane message, or null.
   function fromTranscript(e) {
     if (!e || e.role !== 'route') return null;
     return {
       role: 'route', ts: e.ts, sessionId: e.session_id,
       route: { runtime: e.runtime, model: e.model, reason: e.text, rule_id: e.rule_id,
-        fallback_from: e.fallback_from, pinned: e.pinned, override_refused: e.override_refused }
+        fallback_from: e.fallback_from, pinned: e.pinned, override_refused: e.override_refused,
+        provider: e.provider, class: e.class }
     };
+  }
+
+  // applyTranscript replays one persisted turn that is not text (a route chip,
+  // the handoff banner, a thinking block, a tool call or its result) into msgs,
+  // the pane's message list, building the same message objects the live stream
+  // builds (K-173). It returns true when it handled the turn, false for any other
+  // role. It only builds data: every string reaches the DOM later through the
+  // renderers' textContent / esc() paths, never through markup built here.
+  function applyTranscript(msgs, e) {
+    if (!e || !Array.isArray(msgs)) return false;
+    var sid = e.session_id;
+    switch (e.role) {
+      case 'route':
+        msgs.push(fromTranscript(e));
+        return true;
+      case 'handoff':
+        msgs.push({
+          role: 'handoff', ts: e.ts, sessionId: sid,
+          handoff: { from: e.handoff_from, to: e.runtime, turns: e.turns, digest_bytes: e.digest_bytes, redactions: e.redactions }
+        });
+        return true;
+      case 'thinking':
+        msgs.push({ role: 'thinking', text: e.text || '', ts: e.ts, sessionId: sid, streaming: false,
+          truncated: !!e.truncated, redacted: !!e.redacted });
+        return true;
+      case 'tool_use':
+        msgs.push({ role: 'tool_use', toolName: e.tool_name || '', toolInput: e.text || '', ts: e.ts, sessionId: sid });
+        return true;
+      case 'tool_result':
+        // The result belongs to the latest call of this session still waiting
+        // for one, as the live stream pairs them; without one it stands alone.
+        for (var i = msgs.length - 1; i >= 0; i--) {
+          var m = msgs[i];
+          if (m.role === 'tool_use' && m.sessionId === sid && !m.hasResult) {
+            m.toolOutput = e.text || '';
+            m.isError = !!e.is_error;
+            m.hasResult = true;
+            return true;
+          }
+        }
+        msgs.push({ role: 'tool_result', toolName: e.tool_name || '', toolOutput: e.text || '',
+          isError: !!e.is_error, ts: e.ts, sessionId: sid });
+        return true;
+      default:
+        return false;
+    }
   }
 
   window.YakChatRouting = {
@@ -206,6 +253,7 @@
     buildElement: buildElement,
     fromEvent: fromEvent,
     fromTranscript: fromTranscript,
+    applyTranscript: applyTranscript,
     _setModels: function (list) { models = clean(list); }, // test hook
     _esc: esc
   };
