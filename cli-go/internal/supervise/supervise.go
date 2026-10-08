@@ -57,6 +57,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/pathsafe"
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 // ---- public types -----------------------------------------------------------
@@ -479,7 +480,7 @@ func flipSupervisorEnabled(yakosYML string, enabled bool, nowFn func() time.Time
 		return fmt.Errorf("supervise: %s missing; run 'yakos init' first", yakosYML)
 	}
 
-	data, err := os.ReadFile(yakosYML) //nolint:gosec
+	data, err := projfile.ReadFile(yakosYML)
 	if err != nil {
 		return fmt.Errorf("supervise: read %s: %w", yakosYML, err)
 	}
@@ -537,7 +538,7 @@ func runStatus(cfg Config, home, acRoot string) (*Result, error) {
 	if _, err := os.Stat(paths.yakosYML); err != nil {
 		_, _ = fmt.Fprintf(w, "  config:      (missing; run 'yakos init')\n")
 	} else {
-		data, _ := os.ReadFile(paths.yakosYML) //nolint:gosec
+		data, _ := projfile.ReadFile(paths.yakosYML)
 		content := string(data)
 		if isSupervisorEnabledAs(content, "true") {
 			_, _ = fmt.Fprintf(w, "  enabled:     YES\n")
@@ -778,7 +779,7 @@ func runSet(cfg Config, home, acRoot string) (*Result, error) {
 		return nil, fmt.Errorf("supervise set: %s missing; run 'yakos init' first", paths.yakosYML)
 	}
 
-	data, err := os.ReadFile(paths.yakosYML) //nolint:gosec
+	data, err := projfile.ReadFile(paths.yakosYML)
 	if err != nil {
 		return nil, fmt.Errorf("supervise set: read %s: %w", paths.yakosYML, err)
 	}

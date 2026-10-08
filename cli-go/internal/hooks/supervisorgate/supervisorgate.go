@@ -41,6 +41,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 const hookName = "supervisor-gate"
@@ -289,7 +290,7 @@ func (h *Hook) readYML(in hooktype.HookInput) string {
 	if projectDir == "" {
 		return ""
 	}
-	data, err := os.ReadFile(filepath.Join(projectDir, ".yakos.yml")) //nolint:gosec
+	data, err := projfile.Read(projectDir)
 	if err != nil {
 		return ""
 	}

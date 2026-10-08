@@ -38,6 +38,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 const hookName = "supervisor-ack-gate"
@@ -268,7 +269,7 @@ func (h *Hook) isGateDisabledByYAML(projectDir string) bool {
 	if projectDir == "" {
 		return false
 	}
-	data, err := os.ReadFile(filepath.Join(projectDir, ".yakos.yml")) //nolint:gosec
+	data, err := projfile.Read(projectDir)
 	if err != nil {
 		return false
 	}
