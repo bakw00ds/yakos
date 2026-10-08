@@ -41,6 +41,14 @@ never holds a login: ADR-0010. Detailed entries follow.
   pins only; the rules replace is a compare-and-swap on the policy sha (409 on a
   stale save); `yakos budget set` now writes a `config_changed` line
   (`budget.set`). Reference: `docs/routing.md`, "Browser writes".
+- **flows: triggers follow-ups (K-172).** `yakos flows schedule enable|disable
+  <workflow>` writes the 0600 schedules file atomically (it was hand-edited); the
+  webhook secret may live in `~/.yakos-state/webhook-secrets/<secret_env>`
+  (0600, wins over the environment); a replayed signed request no longer spends
+  the 6/min budget; the request body is read before the schedules file so the
+  connection does not reveal whether a hook is enabled. Reference:
+  `docs/flows.md`.
+
 - **docs: ADR-0010, the runtime-matrix rewrite and the routing map (K-155).**
   ADR-0010 records harness-native routing, the vendor-policy facts it rests on
   with dates, and the one assumption no source settles (spawning the unmodified
