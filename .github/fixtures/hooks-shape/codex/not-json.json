@@ -1,0 +1,6 @@
+{
+  "raw": "{nope",
+  "want": {
+    "error": "not_json"
+  }
+}

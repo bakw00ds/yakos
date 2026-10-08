@@ -87,6 +87,9 @@ type policyFile struct {
 	MinInterval    optInt `yaml:"min_launch_interval_s"`
 	RunDeadline    optInt `yaml:"run_deadline_s"`
 	SessionBackoff optInt `yaml:"session_limit_backoff_min"`
+	// KillOnCritical (K-146) lets the dispatch event-scan feed cancel a run on a
+	// CRITICAL finding. Trusted-file only; absent or invalid means off.
+	KillOnCritical *bool `yaml:"kill_on_critical"`
 }
 
 // strictness says which direction of change means MORE supervision.

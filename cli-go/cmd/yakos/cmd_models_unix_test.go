@@ -10,10 +10,37 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
+
+// syncBuffer is a bytes.Buffer safe for the copier goroutine os/exec starts for a
+// non-file Stdout/Stderr to write while the test reads it for a failure message.
+// A plain bytes.Buffer made the failure path itself report "race detected during
+// execution of test", which hid the failure it was reporting.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// fastExit stops a race-instrumented helper process from sleeping a second in
+// os.Exit (the race runtime's atexit_sleep_ms default), which on a slow runner is
+// time the probe's own bound is not accountable for. Ignored by a normal binary.
+const fastExit = "GORACE=atexit_sleep_ms=0"
 
 // pidsAlive reports which of pids are still running; a zombie counts as gone (a
 // killed descendant is reparented to init and reaped a moment later).
@@ -74,9 +101,9 @@ func checkSignalEndsAgyAndItsHelpers(t *testing.T, sig os.Signal) {
 	cmd := exec.Command(os.Args[0], "-test.run=^TestBudgetHelperMain$")
 	cmd.Env = []string{
 		"YAKOS_TEST_MAIN_ARGS=" + string(args),
-		"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + t.TempDir(), "ANTIGRAVITY_API_KEY=agy-key",
+		"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + t.TempDir(), "ANTIGRAVITY_API_KEY=agy-key", fastExit,
 	}
-	var out bytes.Buffer
+	var out syncBuffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -135,16 +162,23 @@ func TestModelsProbeThroughTheRouterHonoursTimeout(t *testing.T) {
 			}
 		}
 	})
-	start := time.Now()
 	code, out := runYakos(t, t.TempDir(), []string{
-		"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + t.TempDir(), "ANTIGRAVITY_API_KEY=agy-key",
+		"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + t.TempDir(), "ANTIGRAVITY_API_KEY=agy-key", fastExit,
 	}, "models", "probe", "--harness", "agy", "--timeout", "1s")
-	elapsed := time.Since(start)
-	if code != 1 || !strings.Contains(out, "agy: failed, agy models did not finish within 1s\n") {
-		t.Errorf("exit %d, want 1 and a timeout of 1s (took %v):\n%s", code, elapsed, out)
+	end := time.Now()
+	// The time that belongs to the probe starts when agy does: before that is the
+	// helper process starting (a second or more of a race-instrumented test binary,
+	// ten times that on a loaded runner). The value itself is proved by the message,
+	// which names the timeout the probe ran with; the ceiling only catches a hang.
+	var sinceAgy time.Duration
+	if fi, err := os.Stat(pidFile); err == nil {
+		sinceAgy = end.Sub(fi.ModTime())
 	}
-	if elapsed > 12*time.Second {
-		t.Errorf("the probe took %v with --timeout 1s", elapsed)
+	if code != 1 || !strings.Contains(out, "agy: failed, agy models did not finish within 1s\n") {
+		t.Errorf("exit %d, want 1 and a timeout of 1s (%v after agy started):\n%s", code, sinceAgy, out)
+	}
+	if sinceAgy > 20*time.Second {
+		t.Errorf("the probe ran %v after agy started with --timeout 1s", sinceAgy)
 	}
 	raw, _ := os.ReadFile(pidFile)
 	for _, f := range strings.Fields(string(raw)) {
@@ -159,7 +193,8 @@ func TestModelsProbeThroughTheRouterHonoursTimeout(t *testing.T) {
 type hangingProbe struct {
 	cmd     *exec.Cmd
 	waited  chan error
-	out     *bytes.Buffer
+	exited  chan struct{} // closed when the probe process ends
+	out     *syncBuffer
 	pidFile string
 }
 
@@ -181,7 +216,7 @@ func (p *hangingProbe) agyPIDs() []int {
 func startHangingProbe(t *testing.T, home string) *hangingProbe {
 	t.Helper()
 	bin := t.TempDir()
-	p := &hangingProbe{pidFile: filepath.Join(t.TempDir(), "pids"), out: &bytes.Buffer{}}
+	p := &hangingProbe{pidFile: filepath.Join(t.TempDir(), "pids"), out: &syncBuffer{}}
 	script := "#!/bin/sh\necho $$ >> '" + p.pidFile + "'\nexec /bin/sleep 3604\n"
 	if err := os.WriteFile(filepath.Join(bin, "agy"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
@@ -190,21 +225,33 @@ func startHangingProbe(t *testing.T, home string) *hangingProbe {
 	p.cmd = exec.Command(os.Args[0], "-test.run=^TestBudgetHelperMain$")
 	p.cmd.Env = []string{
 		"YAKOS_TEST_MAIN_ARGS=" + string(args),
-		"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + home, "ANTIGRAVITY_API_KEY=agy-key",
+		"PATH=" + bin + ":/usr/bin:/bin", "HOME=" + home, "ANTIGRAVITY_API_KEY=agy-key", fastExit,
 	}
 	p.cmd.Stdout, p.cmd.Stderr = p.out, p.out
 	if err := p.cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
 	p.waited = make(chan error, 1)
-	go func() { p.waited <- p.cmd.Wait() }()
+	p.exited = make(chan struct{})
+	go func() { p.waited <- p.cmd.Wait(); close(p.exited) }()
 	t.Cleanup(func() { // a failing test leaves nothing running
 		_ = p.cmd.Process.Kill()
 		for _, pid := range p.agyPIDs() {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 	})
-	for deadline := time.Now().Add(20 * time.Second); len(p.agyPIDs()) == 0 && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+	// The fake agy writes its pid before anything else, so the pid file is the start
+	// signal. The ceiling is generous because a race-instrumented helper on a loaded
+	// runner needs tens of seconds to reach agy; it is a hang guard, not a timing
+	// assertion, and a probe that ended early fails at once with its output.
+	for deadline := time.Now().Add(120 * time.Second); len(p.agyPIDs()) == 0 && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		select {
+		case <-p.exited:
+			if len(p.agyPIDs()) == 0 {
+				t.Fatalf("the probe ended before the fake agy started:\n%s", p.out.String())
+			}
+		default:
+		}
 	}
 	if len(p.agyPIDs()) == 0 {
 		t.Fatalf("the fake agy never started:\n%s", p.out.String())

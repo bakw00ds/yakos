@@ -172,6 +172,18 @@ func (c *ctx) run() {
 		return
 	}
 
+	// `yakos hook run --shape` (codex, agy) sets YAKOS_REQUIRE_AGENT_TYPE when it
+	// could not learn which agent yakOS dispatched. The default "lead" would then
+	// stand in for it, and a missing "lead" entry passes everything, so with a
+	// policy file present the call is refused instead.
+	if c.in.Env["YAKOS_REQUIRE_AGENT_TYPE"] == "1" && PayloadAgentEmpty(c.in) {
+		c.log("BLOCK", "block", "dispatched agent unknown",
+			map[string]any{"agent_type": agent, "file_path": relFile,
+				"note": "YAKOS_AGENT_TYPE not available to the hook; refusing under a policy file"})
+		c.block("the dispatched agent is unknown to this hook (YAKOS_AGENT_TYPE did not reach it), so .claude/path-allowlist.json cannot be applied for it; refusing the file access rather than judging it as the lead.")
+		return
+	}
+
 	// `.[$agent] // empty`: jq's // treats null and false as absent.
 	pv := hookio.JQAlt(root[agent])
 	if pv == nil {
@@ -462,4 +474,9 @@ func orDot(p string) string {
 		return "."
 	}
 	return p
+}
+
+// PayloadAgentEmpty reports whether the envelope names no agent_type.
+func PayloadAgentEmpty(in hooktype.HookInput) bool {
+	return hookio.PayloadField(in, "agent_type") == ""
 }

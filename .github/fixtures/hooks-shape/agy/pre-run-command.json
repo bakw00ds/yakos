@@ -1,0 +1,32 @@
+{
+  "envelope": {
+    "conversationId": "c1",
+    "modelName": "m",
+    "stepIdx": 1,
+    "toolCall": {
+      "args": {
+        "CommandLine": "ls",
+        "Cwd": "/w"
+      },
+      "name": "run_command"
+    },
+    "transcriptPath": "/t",
+    "workspacePaths": [
+      "/w"
+    ]
+  },
+  "want": {
+    "inputs": [
+      {
+        "event": "PreToolUse",
+        "tool": "Bash",
+        "tool_input": {
+          "CommandLine": "ls",
+          "Cwd": "/w",
+          "command": "ls"
+        },
+        "work_dir": "/w"
+      }
+    ]
+  }
+}

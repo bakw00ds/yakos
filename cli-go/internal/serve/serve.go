@@ -42,6 +42,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/filewatch"
 	"github.com/bakw00ds/yakos/internal/grpcserver"
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/interactive"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/mcpserver"
@@ -49,6 +50,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/mtlscmd"
 	"github.com/bakw00ds/yakos/internal/perfdash"
 	"github.com/bakw00ds/yakos/internal/restapi"
+	"github.com/bakw00ds/yakos/internal/routerpolicy"
 	"github.com/bakw00ds/yakos/internal/setuptoken"
 	"github.com/bakw00ds/yakos/internal/statepath"
 	termmanager "github.com/bakw00ds/yakos/internal/terminalmanager"
@@ -174,6 +176,13 @@ type Config struct {
 	// Activated by --console-allow-bash in runServe.  A loud WARNING banner is
 	// printed when this flag is set and the console is in networked mode.
 	ConsoleAllowBash bool
+
+	// HooksRun runs one registered hook on a codex/agy envelope (K-145). With
+	// hooks_endpoint: true in the trusted router policy, it backs
+	// POST /api/hooks/run/{name}; nil leaves the endpoint off.
+	HooksRun func(ctx context.Context, shape, name string, body []byte) hookio.Response
+	// HooksKnown reports whether a hook name is registered.
+	HooksKnown func(name string) bool
 
 	// ConsoleStructuredQuestions, when true, activates the SDK engine (P2c) for
 	// interactive sessions with structuredQuestions:true.  Requires node ≥18 in
@@ -700,6 +709,17 @@ func Run(ctx context.Context, cfg Config) error {
 			UserStore:          uStore,
 			AllowNetworkedBash: cfg.ConsoleAllowBash,
 			WorktreeManager:    wtMgr,
+		}
+
+		// K-145: the hooks endpoint is on only when the owner-only router policy
+		// says so; a project file cannot turn it on.
+		if cfg.HooksRun != nil && cfg.HooksKnown != nil {
+			if trusted := statepath.TrustedDir(); trusted != "" && routerpolicy.HooksEndpointEnabled(trusted) {
+				consoleCfg.HooksEndpoint = &consoleui.HooksEndpoint{
+					Run: cfg.HooksRun, Known: cfg.HooksKnown,
+					NonceFile: filepath.Join(trusted, "hooks-endpoint-nonce"),
+				}
+			}
 		}
 
 		// Wire the terminal manager when --share-terminal is active (ADR-0008 P1).

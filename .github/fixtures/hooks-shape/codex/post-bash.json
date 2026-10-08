@@ -1,0 +1,28 @@
+{
+  "envelope": {
+    "cwd": "/p",
+    "hook_event_name": "PostToolUse",
+    "model": "m",
+    "permission_mode": "default",
+    "session_id": "s1",
+    "tool_input": {
+      "command": "echo hi"
+    },
+    "tool_name": "Bash",
+    "tool_response": "hi\n",
+    "tool_use_id": "c1",
+    "turn_id": "t1"
+  },
+  "want": {
+    "inputs": [
+      {
+        "event": "PostToolUse",
+        "tool": "Bash",
+        "tool_input": {
+          "command": "echo hi"
+        },
+        "work_dir": "/p"
+      }
+    ]
+  }
+}

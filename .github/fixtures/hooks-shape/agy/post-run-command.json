@@ -1,0 +1,31 @@
+{
+  "envelope": {
+    "conversationId": "c1",
+    "error": "",
+    "modelName": "m",
+    "stepIdx": 1,
+    "toolCall": {
+      "args": {
+        "CommandLine": "ls"
+      },
+      "name": "run_command"
+    },
+    "transcriptPath": "/t",
+    "workspacePaths": [
+      "/w"
+    ]
+  },
+  "want": {
+    "inputs": [
+      {
+        "event": "PostToolUse",
+        "tool": "Bash",
+        "tool_input": {
+          "CommandLine": "ls",
+          "command": "ls"
+        },
+        "work_dir": "/w"
+      }
+    ]
+  }
+}

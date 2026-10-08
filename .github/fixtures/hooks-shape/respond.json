@@ -1,0 +1,68 @@
+[
+  {
+    "shape": "codex",
+    "event": "PreToolUse",
+    "blocked": true,
+    "reason": "secret in .env",
+    "want": {
+      "stdout": "",
+      "stderr": "secret in .env\n",
+      "exit": 2
+    }
+  },
+  {
+    "shape": "codex",
+    "event": "PreToolUse",
+    "blocked": false,
+    "reason": "",
+    "want": {
+      "stdout": "",
+      "stderr": "",
+      "exit": 0
+    }
+  },
+  {
+    "shape": "agy",
+    "event": "PreToolUse",
+    "blocked": true,
+    "reason": "secret in .env",
+    "want": {
+      "stdout": "{\"decision\":\"deny\",\"reason\":\"secret in .env\"}\n",
+      "stderr": "",
+      "exit": 0
+    }
+  },
+  {
+    "shape": "agy",
+    "event": "PreToolUse",
+    "blocked": false,
+    "reason": "",
+    "want": {
+      "stdout": "{\"decision\":\"allow\"}\n",
+      "stderr": "",
+      "exit": 0
+    }
+  },
+  {
+    "shape": "agy",
+    "event": "PostToolUse",
+    "blocked": false,
+    "reason": "",
+    "want": {
+      "stdout": "{}\n",
+      "stderr": "",
+      "exit": 0
+    }
+  },
+  {
+    "shape": "agy",
+    "event": "PreToolUse",
+    "blocked": true,
+    "reason": "",
+    "want": {
+      "stdout": "{\"decision\":\"deny\",\"reason\":\"blocked by a yakOS hook\"}\n",
+      "stderr": "",
+      "exit": 0
+    }
+  }
+]

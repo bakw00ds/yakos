@@ -202,3 +202,23 @@ func TestLoad_RulesAndSHA(t *testing.T) {
 		t.Errorf("a missing file has no sha or rules: %+v", empty)
 	}
 }
+
+func TestHooksEndpointEnabled(t *testing.T) {
+	skipIfNoPosixModes(t)
+	dir := t.TempDir()
+	if HooksEndpointEnabled(dir) || HooksEndpointEnabled("") {
+		t.Fatal("enabled without a policy file")
+	}
+	writePolicy(t, dir, "hooks_endpoint: true\n", 0o666)
+	if HooksEndpointEnabled(dir) {
+		t.Fatal("world-writable policy must not enable the endpoint")
+	}
+	writePolicy(t, dir, "hooks_endpoint: false\n", 0o600)
+	if HooksEndpointEnabled(dir) {
+		t.Fatal("false enabled the endpoint")
+	}
+	writePolicy(t, dir, "hooks_endpoint: true\n", 0o600)
+	if !HooksEndpointEnabled(dir) {
+		t.Fatal("trusted hooks_endpoint: true not honoured")
+	}
+}
