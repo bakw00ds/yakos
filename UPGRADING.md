@@ -6,6 +6,25 @@ current release, what survives, and how to fully uninstall when needed.
 This doc is the **upgrade authority** — `yakos --help`, README, and
 CHANGELOG point here. Last updated for v0.39.
 
+## Unreleased: `yakos dispatch` is Go by default
+
+`yakos dispatch` now runs the Go dispatcher when `YAKOS_IMPL` is unset. Before,
+a checkout with the bash tree sent it to `cli/lib/dispatch.sh`. What changes on
+that path: router policy, budgets and `--explain` apply; codex runs with
+`--sandbox workspace-write` and agy with `--sandbox`; an explicit `--runtime`
+that cannot run fails instead of falling back (add `--runtime-fallback`); agents
+pinning `claude-sdk`, `antigravity-sdk` or a plugin runtime are skipped; and
+`model-policy:` frontmatter is not read. The full list of intended differences,
+and the case that holds the two paths to the same resolution otherwise, is in
+[docs/runtime-matrix.md](docs/runtime-matrix.md#which-implementation-runs-yakos-dispatch-k-143).
+
+To keep the old behavior for a shell or a project, set `YAKOS_IMPL=bash`
+(`yakos doctor` then warns, and `doctor --policy` flags it when codex or agy is
+installed). Nothing else needs doing: Go-only installs already ran the Go path.
+Known issue (K-169): on Linux with GNU coreutils `timeout` on PATH,
+`YAKOS_IMPL=bash yakos dispatch` fails in `dispatch.sh` (`ct_timeout` cannot run
+`yk_rt_dispatch`, exit 127), so the way back does not work there yet.
+
 ## Unreleased: model ceilings across runtimes, `--extends` (K-139c)
 
 - **Ceilinged codex agents are refused until you map codex aliases.** A

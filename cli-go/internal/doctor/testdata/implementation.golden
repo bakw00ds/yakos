@@ -1,0 +1,20 @@
+## unset-bash-tree
+Implementation
+  [info] yakos dispatch: Go-native (default); YAKOS_IMPL=bash selects the bash oracle
+
+## unset-go-only
+Implementation
+  [info] yakos dispatch: Go-native (default); YAKOS_IMPL=bash selects the bash oracle
+
+## go
+Implementation
+  [info] yakos dispatch: Go-native (default); YAKOS_IMPL=bash selects the bash oracle
+
+## bash
+Implementation
+  [warn] yakos dispatch: bash (YAKOS_IMPL=bash); no router, no --explain, codex and agy start without their sandbox flags
+
+## bash-no-tree
+Implementation
+  [warn] yakos dispatch: bash requested (YAKOS_IMPL=bash) but the bash CLI tree is not installed, so dispatch will fail; unset YAKOS_IMPL
+

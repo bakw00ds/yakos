@@ -88,9 +88,13 @@ is on PATH:
 
 | `YAKOS_IMPL` value | Behavior |
 |---|---|
-| unset (default) | Fully transparent: every invocation is proxied to bash yakos. The Go binary is invisible. |
-| `bash` | Same as unset. |
-| `go` | Go-native routing: `--version`, `go-port-status` handled natively; everything else proxied to bash. |
+| unset (default) | `dispatch` and `doctor` run Go-native (K-143). `hook`, `decide`, `budget`, `models` and `router` are always Go. Every other command is proxied to bash yakos when the bash tree is installed (Go-native on a Go-only install). |
+| `bash` | Every command is proxied to bash yakos, `dispatch` and `doctor` included (the way back from the Go default; `yakos doctor` warns). |
+| `go` | Go-native routing for every command the Go binary implements; the rest is proxied to bash. |
+
+The same table, with the per-command routing, is in
+[docs/go-shadow-mode.md](../docs/go-shadow-mode.md) and
+[docs/runtime-matrix.md](../docs/runtime-matrix.md#which-implementation-runs-yakos-dispatch-k-143).
 
 ### Opting in
 
@@ -113,17 +117,18 @@ The recommended install during Phase 1:
    symlinked from the repo's `cli/yakos`).
 2. Go binary installed via `make install` to a directory that appears
    **earlier** on PATH (e.g., `~/.local/bin/` if that's already first).
-3. Leave `YAKOS_IMPL` unset → bash behavior preserved for all existing scripts
-   and muscle memory.
+3. Leave `YAKOS_IMPL` unset: `dispatch` and `doctor` run Go, everything else
+   keeps its bash behavior. Set `YAKOS_IMPL=bash` to send those two back to bash.
 4. Set `YAKOS_IMPL=go` to explore the Go binary at will.
 
-When `YAKOS_IMPL` is unset, `yakos <anything>` is byte-for-byte equivalent
+With `YAKOS_IMPL=bash`, `yakos <anything>` is byte-for-byte equivalent
 between the two binaries — the Go binary proxies every call intact.
 
 ### Switching back
 
 ```sh
-unset YAKOS_IMPL          # or YAKOS_IMPL=bash
+export YAKOS_IMPL=bash    # all commands to bash, dispatch and doctor included
+unset YAKOS_IMPL          # the default: dispatch and doctor Go, the rest as installed
 ```
 
 No state is written by the Go binary when it proxies; switching back mid-session

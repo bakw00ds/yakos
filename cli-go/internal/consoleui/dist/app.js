@@ -2620,6 +2620,10 @@
     if (item) _applySlashItem(paneId, item);
   }
 
+  function hasContextDrawer() {
+    return !!(window.YakosContextDrawer && typeof window.YakosContextDrawer.open === 'function');
+  }
+
   function _applySlashItem(paneId, item) {
     var type = item.getAttribute('data-slash-type');
     var name = item.getAttribute('data-slash-name');
@@ -2651,6 +2655,11 @@
         if (pane) {
           pane.messages = [];
           renderPaneMessages(paneId);
+        }
+      } else if (name === 'context') {
+        // K-149: open the conversation context drawer (knowledge pack, hash).
+        if (pane && hasContextDrawer()) {
+          window.YakosContextDrawer.open(pane.conversationId, apiFetch);
         }
       } else if (name === 'help') {
         // Show a brief help message as a system message in the pane.

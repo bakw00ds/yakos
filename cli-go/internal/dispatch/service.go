@@ -147,6 +147,15 @@ type Params struct {
 	// over ResumeSessionID for the runtime it names. Ignored by Run.
 	NativeSessions map[string]string
 
+	// Knowledge is the conversation's stored knowledge block (K-149). For a
+	// codex or agy turn it replaces the agent body as the persona; a claude
+	// turn ignores it (claude loads the rules natively and its argv must not
+	// change). agy gets it on every turn that does not resume a native agy
+	// session (NativeSessions["agy"] set: a ResumeEngine pane after its first
+	// turn), since the resumed conversation already holds it. Server-side
+	// only: never bound from a request body.
+	Knowledge string
+
 	// Surface is the entry point that built this Params, one of the Surface*
 	// constants (rest, jsonrpc, grpc, mcp, flows, console-chat). The transport
 	// sets it as a constant of its own; it is recorded on the dispatch_finished
