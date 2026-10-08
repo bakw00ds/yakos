@@ -257,8 +257,12 @@ unbounded one. A project cannot change the window or the warning percentage. The
 user-level file is the only place to raise or disable a limit.
 
 The project file is read only if it is a regular file of at most 1 MiB. A symlink,
-a FIFO, a device or a larger file is refused with a warning, and the project then
-contributes no limits and no supervisor name.
+a FIFO, a device or a larger file is refused with a warning (it names no path), and
+a refused file is treated as absent everywhere: the project contributes no limits
+and no supervisor name, and the supervisor keeps its own name and its built-in
+budget and ceiling. Both supervisor hook twins apply the same refusal before they
+read the name, so a refused file cannot rename the supervisor to an agent the budget
+does not know. `yakos doctor` says when the file was refused.
 
 A project can also name the agent its supervisor runs as:
 

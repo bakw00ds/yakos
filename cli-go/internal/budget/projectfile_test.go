@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 func writeProject(t *testing.T, body string) string {
@@ -55,13 +57,13 @@ func TestReadProjectConfigMissingIsQuiet(t *testing.T) {
 func TestReadProjectConfigOversized(t *testing.T) {
 	// A valid prefix with a limit in it, padded past the cap by a comment: the
 	// whole file is refused, its limits are not used.
-	body := "agent_budgets:\n  backend: 5\n#" + strings.Repeat("x", MaxProjectFileBytes)
+	body := "agent_budgets:\n  backend: 5\n#" + strings.Repeat("x", projfile.MaxBytes)
 	c := readProjectConfig(writeProject(t, body))
 	if !strings.Contains(c.warn, "larger than") || len(c.limits) != 0 {
 		t.Fatalf("oversized file accepted: %+v", c)
 	}
 	// Exactly at the cap is still read.
-	pad := MaxProjectFileBytes - len("agent_budgets:\n  backend: 5\n#")
+	pad := projfile.MaxBytes - len("agent_budgets:\n  backend: 5\n#")
 	c = readProjectConfig(writeProject(t, "agent_budgets:\n  backend: 5\n#"+strings.Repeat("x", pad)))
 	if c.warn != "" || c.projectUSD("backend") == nil {
 		t.Fatalf("file at the cap refused: %+v", c)
@@ -108,36 +110,83 @@ func TestReadProjectConfigDirectoryRefused(t *testing.T) {
 	}
 }
 
-func TestReadProjectFileSwappedAfterLstat(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("needs symlinks and Unix open flags")
+const renamesSupervisorToBackend = "supervisor:\n  agent: backend\n  model: opus\n"
+
+// refusedProjects builds a project whose .yakos.yml renames the supervisor to
+// backend but is refused: once as a symlink, once padded past the cap.
+func refusedProjects(t *testing.T) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	big := t.TempDir()
+	body := renamesSupervisorToBackend + "#" + strings.Repeat("x", projfile.MaxBytes)
+	if err := os.WriteFile(filepath.Join(big, ".yakos.yml"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	dir := writeProject(t, "agent_budgets:\n  backend: 5\n")
-	target := writeProject(t, "agent_budgets:\n  backend: 999\n")
-	afterProjectLstat = func(path string) {
-		_ = os.Remove(path)
-		_ = os.Symlink(filepath.Join(target, ".yakos.yml"), path)
+	out["oversized"] = big
+	if runtime.GOOS != "windows" {
+		real := writeProject(t, renamesSupervisorToBackend)
+		link := t.TempDir()
+		if err := os.Symlink(filepath.Join(real, ".yakos.yml"), filepath.Join(link, ".yakos.yml")); err != nil {
+			t.Fatal(err)
+		}
+		out["symlink"] = link
 	}
-	defer func() { afterProjectLstat = func(string) {} }()
-	if _, err := readProjectFile(dir); err == nil {
-		t.Fatal("file swapped for a symlink after the Lstat was read")
+	return out
+}
+
+// sec-360 H1: a refused file is absent, so it cannot rename the supervisor, and
+// the supervisor keeps its built-in budget and sonnet ceiling (never OFF).
+func TestRefusedProjectFileIsAbsentAndNeverTurnsTheSupervisorBudgetOff(t *testing.T) {
+	for name, proj := range refusedProjects(t) {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			o := Options{StateDir: dir, Project: proj}
+			if !ProjectRefused(proj) {
+				t.Fatal("ProjectRefused = false")
+			}
+			if got := ProjectSupervisorAgents(proj); len(got) != 0 {
+				t.Fatalf("a refused file named a supervisor: %v", got)
+			}
+			st, err := Evaluate("supervisor", o)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if st.State == StateOff || st.LimitUSD != 100 || st.LimitTokens != 33_000_000 || st.Source != "builtin" {
+				t.Fatalf("supervisor budget with a refused file: %+v", st)
+			}
+			if got := MaxModel("supervisor", o); got != "sonnet" {
+				t.Fatalf("supervisor ceiling = %q", got)
+			}
+			// The same answer as no project file at all.
+			none, _ := Evaluate("supervisor", Options{StateDir: dir})
+			if none.LimitUSD != st.LimitUSD || none.LimitTokens != st.LimitTokens {
+				t.Fatalf("refused %+v differs from absent %+v", st, none)
+			}
+			if len(st.Warnings) == 0 {
+				t.Fatal("no warning for a refused file")
+			}
+		})
 	}
 }
 
-// A different regular file takes the place of the inspected one between the
-// Lstat and the open: only the identity check can tell.
-func TestReadProjectFileReplacedAfterLstat(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("rename over an open path differs on Windows")
+func TestRefusedProjectWarningsCarryNoPath(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Getuid() == 0 {
+		t.Skip("needs a mode 000 file and a non-root user")
 	}
-	dir := writeProject(t, "agent_budgets:\n  backend: 5\n")
-	other := filepath.Join(dir, "other")
-	if err := os.WriteFile(other, []byte("agent_budgets:\n  backend: 999\n"), 0o600); err != nil {
+	proj := writeProject(t, "agent_budgets:\n  backend: 5\n")
+	if err := os.Chmod(filepath.Join(proj, ".yakos.yml"), 0); err != nil {
 		t.Fatal(err)
 	}
-	afterProjectLstat = func(path string) { _ = os.Rename(other, path) }
-	defer func() { afterProjectLstat = func(string) {} }()
-	if _, err := readProjectFile(dir); err == nil || !strings.Contains(err.Error(), "changed") {
-		t.Fatalf("replaced file accepted: %v", err)
+	st, err := Evaluate("backend", Options{StateDir: t.TempDir(), Project: proj})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(st.Warnings) == 0 {
+		t.Fatal("no warning")
+	}
+	for _, w := range st.Warnings {
+		if strings.Contains(w, proj) || strings.Contains(w, string(filepath.Separator)) {
+			t.Fatalf("warning carries a path: %q", w)
+		}
 	}
 }

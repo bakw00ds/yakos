@@ -54,6 +54,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 	"github.com/bakw00ds/yakos/internal/hooks/yamlblock"
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 const hookName = "plan-quality-score"
@@ -631,7 +632,7 @@ func (h *Hook) loadConfig(projectDir string) (planQualityConfig, error) {
 	if projectDir == "" {
 		return cfg, nil
 	}
-	data, err := os.ReadFile(filepath.Join(projectDir, ".yakos.yml")) //nolint:gosec
+	data, err := projfile.Read(projectDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return cfg, nil
