@@ -732,8 +732,9 @@ func (c *projectConfig) addSupervisor(name string) {
 	c.supervisor = append(c.supervisor, name)
 }
 
-// readProjectConfig reads <project>/.yakos.yml. A missing file or key yields the
-// zero config; a malformed file sets warn and no limits.
+// readProjectConfig reads <project>/.yakos.yml through readProjectFile (a regular
+// file of at most MaxProjectFileBytes, never a link). A missing file or key yields
+// the zero config; a malformed or refused file sets warn and no limits.
 //
 // The supervisor's agent name is a project setting: the supervisor hook launches
 // `yakos dispatch <name>` and its budget is keyed on that name, so a project that
@@ -748,8 +749,11 @@ func readProjectConfig(project string) projectConfig {
 	if project == "" {
 		return c
 	}
-	data, err := os.ReadFile(filepath.Join(project, ".yakos.yml")) //nolint:gosec
+	data, err := readProjectFile(project)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			c.warn = fmt.Sprintf(".yakos.yml ignored: %v", err)
+		}
 		return c
 	}
 	var doc struct {
