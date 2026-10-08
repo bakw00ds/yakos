@@ -454,7 +454,7 @@ func TestByAxis_AllAxes(t *testing.T) {
 	})
 	ts, tok := newTestServer(t, dir)
 
-	for _, axis := range []string{"agent", "runtime", "project", "day"} {
+	for _, axis := range []string{"agent", "runtime", "project", "day", "model"} {
 		t.Run(axis, func(t *testing.T) {
 			resp := get(t, ts.URL+"/api/perf/by_axis?axis="+axis+"&window=24h", tok)
 			if resp.StatusCode != http.StatusOK {

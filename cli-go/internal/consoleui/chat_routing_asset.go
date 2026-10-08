@@ -20,3 +20,17 @@ func (s *Server) handleChatRoutingJS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	_, _ = w.Write(chatRoutingJS)
 }
+
+// modelsJS is the Models & Providers tab (K-153), served at /models.js. Like
+// chat-routing.js it is a plain script that app.js reaches through
+// window.YakModels; it carries no secret and loads before the token.
+//
+//go:embed dist/models.js
+var modelsJS []byte
+
+func (s *Server) handleModelsJS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	_, _ = w.Write(modelsJS)
+}

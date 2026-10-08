@@ -389,7 +389,7 @@ func ComputeTimeseries(events []cost.Event, window, bucket time.Duration, metric
 // ---- By-axis breakdown ------------------------------------------------------
 
 // ComputeByAxis aggregates events by a given axis dimension.
-// axis is one of "agent", "runtime", "project", "day".
+// axis is one of "agent", "runtime", "project", "day", "model".
 func ComputeByAxis(events []cost.Event, axis string) []AxisRow {
 	type acc struct {
 		tally
@@ -462,6 +462,15 @@ func axisKeyFor(ev cost.Event, axis string) string {
 			return "(unknown)"
 		}
 		return ev.Project
+	case "model":
+		// The concrete id the harness reported, else the resolved name, else the
+		// tier the dispatch asked for.
+		for _, m := range []string{ev.ModelID, ev.ModelResolved, ev.Model} {
+			if m != "" {
+				return m
+			}
+		}
+		return "(unknown)"
 	case "day":
 		parts := strings.SplitN(ev.Ts, "T", 2)
 		if len(parts) == 2 {

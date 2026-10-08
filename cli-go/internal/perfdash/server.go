@@ -322,10 +322,10 @@ func (s *Server) handleByAxis(w http.ResponseWriter, r *http.Request) {
 		axis = "agent"
 	}
 	switch axis {
-	case "agent", "runtime", "project", "day":
+	case "agent", "runtime", "project", "day", "model":
 		// valid
 	default:
-		writeErr(w, http.StatusBadRequest, "axis must be agent|runtime|project|day")
+		writeErr(w, http.StatusBadRequest, "axis must be agent|runtime|project|day|model")
 		return
 	}
 
