@@ -168,4 +168,7 @@ const (
 	SurfaceFlows       = "flows"
 	SurfaceTrigger     = "trigger" // a Flows run started by a cron or webhook trigger
 	SurfaceLibrary     = "library" // pkg/dispatch, the embeddable Go API
+
+	// SurfaceOpenAICompat is the OpenAI-compatible endpoint (K-150).
+	SurfaceOpenAICompat = "openai-compat"
 )

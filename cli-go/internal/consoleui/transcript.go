@@ -405,6 +405,24 @@ func (tr *Transcripts) FirstUserOwner(conversationID string) (string, error) {
 	}
 }
 
+// HasTranscript reports whether a non-empty transcript file exists for
+// conversationID. Used to tell "new id" from "existing transcript without a
+// recorded owner" (which FirstUserOwner reports identically).
+func (tr *Transcripts) HasTranscript(conversationID string) (bool, error) {
+	path, err := tr.transcriptPath(conversationID)
+	if err != nil {
+		return false, err
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("transcript: stat: %w", err)
+	}
+	return fi.Size() > 0, nil
+}
+
 // errTranscriptForbidden is returned by Read when the caller's operatorID does
 // not match the conversation owner.  HTTP handler must return 403.
 var errTranscriptForbidden = errors.New("transcript: access denied (operator mismatch)")

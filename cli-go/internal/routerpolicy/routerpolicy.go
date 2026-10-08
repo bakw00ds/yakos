@@ -72,6 +72,19 @@ type File struct {
 	// a malformed shape never fails the whole file. Read it through
 	// File.Classes (gatewayclasses.go), which validates it.
 	RawGatewayClasses yaml.Node `yaml:"gateway_classes,omitempty"`
+
+	// RawOpenAIEndpoint is the raw openai_endpoint key (K-150), kept as a node so
+	// a wrong type never fails the whole file. Read it through OpenAIEndpoint.
+	RawOpenAIEndpoint yaml.Node `yaml:"openai_endpoint,omitempty"`
+}
+
+// OpenAIEndpoint reports whether the trusted user policy turns the OpenAI-
+// compatible endpoint on (`openai_endpoint: true`). Only the YAML boolean true
+// counts: a string, a number or a missing key is off. A project .yakos.yml has
+// no such key and cannot enable it.
+func (f File) OpenAIEndpoint() bool {
+	n := f.RawOpenAIEndpoint
+	return n.Kind == yaml.ScalarNode && n.Tag == "!!bool" && n.Value == "true"
 }
 
 // ErrUntrusted marks a policy file ignored for being a symlink, not a regular

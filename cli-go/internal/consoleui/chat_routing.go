@@ -176,10 +176,16 @@ func lastRouteRuntime(entries []TranscriptEntry) string {
 // or an override) counts, and only when the target runtime has no session of its
 // own in this conversation to carry the context.
 func (ch *chatHandlers) planHandoff(conversationID, operatorID, newRuntime string, explicit bool, taskLen int) (digest string, hv *handoffView) {
+	return planHandoff(ch.transcripts, conversationID, operatorID, newRuntime, explicit, taskLen)
+}
+
+// planHandoff is the method's body over any transcript store; the OpenAI-
+// compatible endpoint (K-150) calls it through PlanHandoff.
+func planHandoff(tr *Transcripts, conversationID, operatorID, newRuntime string, explicit bool, taskLen int) (digest string, hv *handoffView) {
 	if !explicit || newRuntime == "" {
 		return "", nil
 	}
-	entries, err := ch.transcripts.Read(conversationID, operatorID)
+	entries, err := tr.Read(conversationID, operatorID)
 	if err != nil || len(entries) == 0 {
 		return "", nil
 	}
@@ -187,7 +193,7 @@ func (ch *chatHandlers) planHandoff(conversationID, operatorID, newRuntime strin
 	if prev == "" || prev == newRuntime {
 		return "", nil
 	}
-	if ch.transcripts.NativeSession(conversationID, newRuntime, operatorID) != "" {
+	if tr.NativeSession(conversationID, newRuntime, operatorID) != "" {
 		return "", nil
 	}
 	text, turns, redactions := buildHandoffDigest(entries, prev)
