@@ -1036,6 +1036,9 @@
   // modelOptionsFor returns the model values the header offers for a runtime,
   // '' (default / no override) first.
   function modelOptionsFor(runtime) {
+    // K-148: the registry (GET /api/models) drives the lists once it has loaded.
+    const reg = window.YakChatRouting && window.YakChatRouting.modelOptions(runtime, MODEL_ALIASES);
+    if (reg) return reg;
     return runtime === 'claude'
       ? ['', ...MODEL_TIERS, ...MODEL_ALIASES]
       : ['', ...MODEL_ALIASES];
@@ -1251,6 +1254,9 @@
       try { loadPaneStateFromStorage(); return Array.from(chatPanes.values()); } finally { chatPanes = live; }
     },
     buildDispatchBody: buildDispatchBody,
+    // K-148: feed one SSE event to a pane / build one message element.
+    handleSSE: function(pane, ev) { withRegisteredPane(pane, function(id) { _handleSSEEventForPane(ev, ev.session_id || '', id, pane); }); },
+    buildMessageElement: buildMessageElement,
   };
 
   // ---- Phase 3: openAttachPane ------------------------------------------------
@@ -1599,6 +1605,15 @@
       }
       renderPaneMessages(paneId);
       if (pane.autoScroll) scrollPaneToBottom(paneId);
+    } else if (ev.type === 'route' || ev.type === 'handoff') {
+      // K-148: where the router sent the turn (and, after a runtime switch, the
+      // context-reset notice). Arrives before the first token.
+      const rm = window.YakChatRouting && window.YakChatRouting.fromEvent(ev, sessionId);
+      if (rm) {
+        pane.messages.push(rm);
+        renderPaneMessages(paneId);
+        if (pane.autoScroll) scrollPaneToBottom(paneId);
+      }
     } else if (ev.type === 'error') {
       // Runtime error event (distinct from summary exit_code != 0).
       pane.messages.push({
@@ -2031,6 +2046,11 @@
     }
     // Prefetch the agent/command catalog for the "/" popover.
     fetchSkills();
+    // K-148: load the model registry; the selects re-render when it differs from
+    // the cached copy.
+    if (window.YakChatRouting) {
+      window.YakChatRouting.ensureLoaded(apiFetch, () => { for (const id of chatPanes.keys()) renderPaneHeader(id); });
+    }
     chatTabInitialized = true;
   }
 
@@ -2274,6 +2294,7 @@
           'aria-label="Runtime">' + runtimeOpts + '</select>' +
         '<select class="pane-model-select" id="pane-model-' + esc(paneId) + '" ' +
           'aria-label="Model">' + modelOpts + '</select>' +
+        (window.YakChatRouting ? window.YakChatRouting.modeBadgeHTML(pane) : '') +
         '<select class="pane-effort-select" id="pane-effort-' + esc(paneId) + '" ' +
           'aria-label="Effort level">' + effortOpts + '</select>' +
         '<input class="pane-agent-input" id="pane-agent-' + esc(paneId) + '" ' +
@@ -2800,6 +2821,11 @@
   }
 
   function buildMessageElement(msg, pane, paneId) {
+    // K-148: route chips and handoff banners are built by chat-routing.js.
+    if ((msg.role === 'route' || msg.role === 'handoff') && window.YakChatRouting) {
+      const routed = window.YakChatRouting.buildElement(msg, document);
+      if (routed) return routed;
+    }
     const el = document.createElement('div');
 
     if (msg.role === 'user') {
@@ -3341,6 +3367,9 @@
           msgs.push({ role: 'user', text: e.text || '', ts: e.ts, sessionId: e.session_id });
         } else if (e.role === 'assistant') {
           msgs.push({ role: 'assistant', text: e.text || '', ts: e.ts, sessionId: e.session_id, streaming: false });
+        } else if (e.role === 'route') {
+          const rm = window.YakChatRouting && window.YakChatRouting.fromTranscript(e);
+          if (rm) msgs.push(rm);
         } else if (e.role === 'summary') {
           msgs.push({
             role: 'summary',
@@ -3370,7 +3399,7 @@
   //            it from the agent's frontmatter pin / project config.
   //   model:   sent as-is; '' = no override (the agent / runtime default decides).
   // Reads the operator id and the IDE review-mode flag; touches no DOM.
-  function buildDispatchBody(pane, task, sessionId) {
+  function buildDispatchBody(pane, task, sessionId, override) {
     const body = {
       runtime: pane.runtime === 'auto' ? '' : pane.runtime,
       model: pane.model,
@@ -3394,6 +3423,8 @@
     if (pane.ideEmbedded && ideReviewMode) {
       body.worktreeMode = true;
     }
+    // K-148: an "@codex:gpt-5 ..." prefix overrides the pane's selects for this turn.
+    if (window.YakChatRouting) window.YakChatRouting.decorateBody(body, override);
     return body;
   }
 
@@ -3403,7 +3434,10 @@
     if (pane.status === 'streaming') return; // already running
 
     const textarea = document.getElementById('pane-input-' + paneId);
-    const task = textarea ? textarea.value.trim() : '';
+    const typed = textarea ? textarea.value.trim() : '';
+    // K-148: "@codex[:model] task" overrides the pane's runtime/model for this turn.
+    const override = window.YakChatRouting ? window.YakChatRouting.parseOverride(typed) : null;
+    const task = override ? override.task : typed;
     if (!task) return;
 
     // Bash pass-through: if the trimmed input starts with '!', treat the
@@ -3426,6 +3460,13 @@
     //   pane.interactive && !pane.interactiveLive → /api/chat/dispatch with interactive:true
     //                                               (first turn or after session reaped)
     //   !pane.interactive                         → /api/chat/dispatch (one-shot, unchanged)
+    if (override && pane.interactive && pane.interactiveLive) {
+      // A live interactive session is one engine of one runtime; it cannot be
+      // switched mid-conversation. Keep the text and say so.
+      pane.messages.push({ role: 'system', text: 'An interactive pane keeps its runtime for the whole conversation. Open a new conversation to use @' + override.runtime + '.', ts: new Date().toISOString(), sessionId: null });
+      renderPaneMessages(paneId);
+      return;
+    }
     if (pane.interactive && pane.interactiveLive) {
       // Follow-up turn into the existing interactive session.
       // Do NOT mint a new sessionId — the conversation is already registered.
@@ -3580,7 +3621,7 @@
     conversationToPaneIds.get(pane.conversationId).add(paneId);
 
     // Append user message immediately (optimistic).
-    pane.messages.push({ role: 'user', text: task, ts: new Date().toISOString(), sessionId });
+    pane.messages.push({ role: 'user', text: typed, ts: new Date().toISOString(), sessionId });
     if (textarea) textarea.value = '';
 
     renderPaneHeader(paneId);
@@ -3589,7 +3630,7 @@
 
     startElapsedTimer(pane, paneId);
 
-    const dispatchBody = buildDispatchBody(pane, task, sessionId);
+    const dispatchBody = buildDispatchBody(pane, task, sessionId, override);
 
     // Phase 4: for non-claude runtimes (buffered path), tool events are never
     // emitted by the server.  Show a one-time static affordance so the operator

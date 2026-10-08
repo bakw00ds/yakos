@@ -319,6 +319,11 @@ func TestManager_EnsureEngine_CapOwnerReuseAndReap(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	// The reaper drops the entry and then closes the engine: the count reaches
+	// zero a moment before the close finishes.
+	for closeBy := time.Now().Add(5 * time.Second); !e1.IsClosed() && time.Now().Before(closeBy); {
+		time.Sleep(20 * time.Millisecond)
+	}
 	if !e1.IsClosed() {
 		t.Error("reaped engine not closed")
 	}

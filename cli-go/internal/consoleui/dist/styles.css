@@ -4946,6 +4946,34 @@ html[data-theme="light"] .term-viewport {
   outline-offset: 2px;
 }
 
+/* K-148: routing mode badge, route chip, handoff banner */
+.pane-route-mode {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: var(--radius-control);
+  border: 1px solid var(--color-border);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+.pane-route-mode-pinned { color: var(--color-warning); }
+.pane-route-mode-runtime { color: var(--color-accent); }
+.chat-route-chip {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  border-left: 2px solid var(--color-border-strong);
+  padding: 2px 8px;
+}
+.chat-route-where { color: var(--color-accent); }
+.chat-handoff-banner {
+  font-size: 12px;
+  color: var(--color-warning);
+  background: var(--color-bg-banner);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  padding: 4px 8px;
+}
+
 /* Flows template gallery (K-152) */
 .flows-gallery-overlay { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.5); display: flex; align-items: center; justify-content: center; z-index: 1000; }
 .flows-gallery-box { background: var(--color-bg-base, var(--bg)); border: 1px solid var(--accent); border-radius: var(--radius-control, 4px); padding: 16px; max-width: 520px; width: 90%; max-height: 80vh; overflow: auto; }
@@ -4973,3 +5001,4 @@ html[data-theme="light"] .term-viewport {
 .context-drawer-parts { padding-left: 16px; }
 .context-drawer-parts .dropped { opacity: 0.6; }
 .context-drawer-soul { white-space: pre-wrap; word-break: break-word; }
+.chat-route-notice { color: var(--color-warning); }

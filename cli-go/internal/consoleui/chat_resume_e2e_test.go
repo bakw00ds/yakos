@@ -11,6 +11,7 @@ package consoleui_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -314,6 +315,31 @@ func TestResumePane_AtAHardStopIsRefusedBeforeTheHarnessRuns(t *testing.T) {
 
 // A conversation's live engine fixes its kind: a dispatch for the other kind of
 // runtime is a 409, not a turn delivered to the wrong engine.
+// closeAndSettle closes the conversation's engine and waits until the work
+// directory stops changing, so the dispatch goroutine's last transcript and
+// ledger writes land before the test's TempDir is removed (K-130 cleanup race).
+func (f resumeFixture) closeAndSettle(conv string) {
+	f.mgr.Close(conv)
+	last, stable := "", 0
+	for i := 0; i < 100 && stable < 4; i++ {
+		var sig strings.Builder
+		_ = filepath.WalkDir(f.workDir, func(p string, d os.DirEntry, err error) error {
+			if err == nil && !d.IsDir() {
+				if info, ierr := d.Info(); ierr == nil {
+					fmt.Fprintf(&sig, "%s:%d:%d;", p, info.Size(), info.ModTime().UnixNano())
+				}
+			}
+			return nil
+		})
+		if sig.String() == last {
+			stable++
+		} else {
+			last, stable = sig.String(), 0
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func TestResumePane_DispatchToAnotherEngineKindIs409(t *testing.T) {
 	post := func(f resumeFixture, runtime, conv, sess string) int {
 		resp := f.post(t, "/api/chat/dispatch", map[string]any{
@@ -326,7 +352,7 @@ func TestResumePane_DispatchToAnotherEngineKindIs409(t *testing.T) {
 	t.Run("claude into a codex pane", func(t *testing.T) {
 		f := newResumeServer(t, "codex", fakeCodexScript)
 		f.dispatchTurn(t, "codex", "conv-mix-a", "first")
-		t.Cleanup(func() { f.mgr.Close("conv-mix-a") })
+		t.Cleanup(func() { f.closeAndSettle("conv-mix-a") })
 		f.waitForEvents(t, 2)
 		if got := post(f, "claude", "conv-mix-a", "sess-mix-a2"); got != http.StatusConflict {
 			t.Fatalf("claude into a live codex ResumeEngine: %d, want 409", got)
@@ -336,12 +362,22 @@ func TestResumePane_DispatchToAnotherEngineKindIs409(t *testing.T) {
 			t.Fatalf("the pane's own runtime still dispatches: %d", got)
 		}
 	})
+	t.Run("agy into a codex pane", func(t *testing.T) {
+		f := newResumeServer(t, "codex", fakeCodexScript)
+		f.dispatchTurn(t, "codex", "conv-mix-c", "first")
+		t.Cleanup(func() { f.closeAndSettle("conv-mix-c") })
+		f.waitForEvents(t, 2)
+		if got := post(f, "agy", "conv-mix-c", "sess-mix-c2"); got != http.StatusConflict {
+			t.Fatalf("agy into a live codex ResumeEngine: %d, want 409", got)
+		}
+		f.pairsAfter(t, 1)
+	})
 	t.Run("codex into a claude pane", func(t *testing.T) {
 		f := newResumeServer(t, "codex", fakeCodexScript)
 		if got := post(f, "claude", "conv-mix-b", "sess-mix-b1"); got != http.StatusAccepted {
 			t.Fatalf("claude dispatch: %d", got)
 		}
-		t.Cleanup(func() { f.mgr.Close("conv-mix-b") })
+		t.Cleanup(func() { f.closeAndSettle("conv-mix-b") })
 		f.waitForEvents(t, 2)
 		if got := post(f, "codex", "conv-mix-b", "sess-mix-b2"); got != http.StatusConflict {
 			t.Fatalf("codex into a live claude engine: %d, want 409", got)

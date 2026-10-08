@@ -132,6 +132,9 @@ func TestStructuredQuestions_StartWithoutAPIKeyIsSurfacedAndNothingIsSpawned(t *
 	// 1. The live SSE error frame.
 	select {
 	case ev := <-frames:
+		if ev.Type == "route" { // K-148: every turn opens with where it was routed
+			ev = <-frames
+		}
 		if ev.Type != "error" {
 			t.Fatalf("first SSE frame type = %q, want error (no silent fallback to another engine)", ev.Type)
 		}
