@@ -33,6 +33,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/hookguard"
 	"github.com/bakw00ds/yakos/internal/hooks/registry"
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 // HooksImpl selects which hook implementation settings.json wires up.
@@ -326,7 +327,7 @@ var hooksImplLineRe = regexp.MustCompile(`(?m)^` + hooksImplYAMLKey + `:([ \t]*)
 // when .yakos.yml or the key is absent. An unparseable value is an error, not
 // a silent default.
 func ReadPersistedHooksImpl(projPath string) (impl HooksImpl, found bool, err error) {
-	data, err := os.ReadFile(filepath.Join(projPath, ".yakos.yml")) //nolint:gosec
+	data, err := projfile.Read(projPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", false, nil
@@ -351,7 +352,7 @@ func ReadPersistedHooksImpl(projPath string) (impl HooksImpl, found bool, err er
 // current.
 func PersistHooksImpl(projPath string, impl HooksImpl) error {
 	path := filepath.Join(projPath, ".yakos.yml")
-	data, err := os.ReadFile(path) //nolint:gosec
+	data, err := projfile.ReadFile(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}

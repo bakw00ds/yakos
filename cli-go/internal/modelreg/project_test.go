@@ -220,8 +220,8 @@ func TestProjectReadWarning_WordsEveryBranchWithoutThePath(t *testing.T) {
 	}
 }
 
-// The same branch through the real reader: a .yakos.yml that is a symlink to itself
-// fails to stat with an error that is not a permission error and not "not found".
+// A .yakos.yml that is a symlink to itself is refused as a link, and the warning
+// names no path.
 func TestLoadProject_AReadErrorThatIsNotAPermissionErrorNamesNoPath(t *testing.T) {
 	skipIfNoPosixModes(t)
 	dir := filepath.Join(t.TempDir(), "proj-secret-name")
@@ -232,7 +232,7 @@ func TestLoadProject_AReadErrorThatIsNotAPermissionErrorNamesNoPath(t *testing.T
 		t.Skipf("cannot make a symlink loop here: %v", err)
 	}
 	pol, warns := LoadProject(dir)
-	want := ".yakos.yml: it could not be read, so a models: disable list in it is NOT applied"
+	want := ".yakos.yml: is a symlink, which is not followed; the models: key is ignored"
 	if len(pol.Disable) != 0 || len(warns) != 1 || warns[0] != want {
 		t.Fatalf("policy %+v, warnings %q, want one warning %q", pol, warns, want)
 	}

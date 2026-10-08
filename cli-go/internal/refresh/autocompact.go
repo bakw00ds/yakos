@@ -28,6 +28,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 const (
@@ -55,7 +57,7 @@ type autoCompactSetting struct {
 // than a silent default.
 func readAutoCompactSetting(projPath string) (autoCompactSetting, error) {
 	def := autoCompactSetting{Window: DefaultAutoCompactWindow}
-	data, err := os.ReadFile(filepath.Join(projPath, ".yakos.yml")) //nolint:gosec
+	data, err := projfile.Read(projPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return def, nil

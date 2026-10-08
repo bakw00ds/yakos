@@ -51,6 +51,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 // knownStandards is the full inventory, in display order.
@@ -459,7 +461,7 @@ func runInit(cfg Config, res *Result, w, ew io.Writer) (*Result, error) {
 
 // readYML reads and unmarshals a .yakos.yml file into a map.
 func readYML(path string) (map[string]interface{}, error) {
-	raw, err := os.ReadFile(path) //nolint:gosec
+	raw, err := projfile.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
