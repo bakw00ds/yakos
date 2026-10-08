@@ -283,6 +283,10 @@ func TestCeiling_NoCandidateLeftNamesIdCeilingCommandAndOverlay(t *testing.T) {
 			t.Errorf("error %q lacks %q", err, want)
 		}
 	}
+	// K-168: the refusal never carries the state directory path (a home dir).
+	if sd := modelreg.DefaultStateDir(); sd != "" && strings.Contains(err.Error(), sd) {
+		t.Errorf("error leaks the state dir %q: %q", sd, err)
+	}
 }
 
 // An unpinned codex model never ranks: the error says to pin one.
@@ -324,7 +328,12 @@ func TestCeiling_StickyPinIsRefusedNotMoved(t *testing.T) {
 		t.Fatalf("turn 1: %+v %v", first, err)
 	}
 	withCeilings(t, map[string]string{"c-sonnet": "sonnet"})
-	got, err := route(t, root, project, "c-sonnet", func(in *routeInput) { in.ConversationID = "conv" })
+	// The fallbacks are opted in: only the sticky pin's explicit status can keep
+	// the conversation on codex. Without them the test passes with the explicit
+	// gate removed (sec-339b L4).
+	got, err := route(t, root, project, "c-sonnet", func(in *routeInput) {
+		in.ConversationID, in.RuntimeFallbackOptIn = "conv", []string{"claude"}
+	})
 	if err == nil {
 		t.Fatalf("a pinned conversation must be refused under the ceiling, got %+v", got)
 	}
