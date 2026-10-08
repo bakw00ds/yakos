@@ -11,7 +11,7 @@ Looking at it.
 [tool] Read  x
 [result: error] Read
     denied
-Done [31mred[0m done
+Done red done
 -- exit 0 | 2.2s | $0.0123 | gpt-x (codex)
 yakos [auto]> 
 

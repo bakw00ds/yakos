@@ -29,7 +29,8 @@ func TestConnectUsesRunningDaemon(t *testing.T) {
 	d := newFakeDaemon(t)
 	started := false
 	c, err := Connect(context.Background(), Boot{
-		Addr: hostOf(d), StateDir: stateWithToken(t, testToken),
+		Verify: okVerify,
+		Addr:   hostOf(d), StateDir: stateWithToken(t, testToken),
 		StartDaemon: func() error { started = true; return nil },
 	})
 	if err != nil {
@@ -48,7 +49,8 @@ func TestConnectStartsMissingDaemon(t *testing.T) {
 	var out bytes.Buffer
 	up := false
 	c, err := Connect(context.Background(), Boot{
-		Addr: hostOf(d), StateDir: stateWithToken(t, testToken), Out: &out,
+		Verify: okVerify,
+		Addr:   hostOf(d), StateDir: stateWithToken(t, testToken), Out: &out,
 		Probe:       func(string) bool { return up },
 		StartDaemon: func() error { up = true; return nil },
 		WaitUp:      func(string) bool { return up },
@@ -69,14 +71,14 @@ func TestConnectFailuresAreFixedAndPathFree(t *testing.T) {
 		b    Boot
 		want error
 	}{
-		{"spawn fails", Boot{Addr: "127.0.0.1:1", StateDir: state, Probe: func(string) bool { return false },
+		{"spawn fails", Boot{Verify: okVerify, Addr: "127.0.0.1:1", StateDir: state, Probe: func(string) bool { return false },
 			StartDaemon: func() error { return secretish }}, ErrDaemonStart},
-		{"no starter", Boot{Addr: "127.0.0.1:1", StateDir: state, Probe: func(string) bool { return false }}, ErrDaemonStart},
-		{"slow", Boot{Addr: "127.0.0.1:1", StateDir: state, Probe: func(string) bool { return false },
+		{"no starter", Boot{Verify: okVerify, Addr: "127.0.0.1:1", StateDir: state, Probe: func(string) bool { return false }}, ErrDaemonStart},
+		{"slow", Boot{Verify: okVerify, Addr: "127.0.0.1:1", StateDir: state, Probe: func(string) bool { return false },
 			StartDaemon: func() error { return nil }, WaitUp: func(string) bool { return false }}, ErrDaemonSlow},
-		{"token missing", Boot{Addr: "127.0.0.1:1", StateDir: state, Probe: func(string) bool { return true }}, ErrTokenMissing},
-		{"remote host", Boot{Addr: "example.com:7890", StateDir: state}, ErrNotLoopback},
-		{"wildcard", Boot{Addr: "0.0.0.0:7890", StateDir: state}, ErrNotLoopback},
+		{"token missing", Boot{Verify: okVerify, Addr: "127.0.0.1:1", StateDir: state, Probe: func(string) bool { return true }}, ErrTokenMissing},
+		{"remote host", Boot{Verify: okVerify, Addr: "example.com:7890", StateDir: state}, ErrNotLoopback},
+		{"wildcard", Boot{Verify: okVerify, Addr: "0.0.0.0:7890", StateDir: state}, ErrNotLoopback},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -98,7 +100,7 @@ func TestConnectFailuresAreFixedAndPathFree(t *testing.T) {
 
 func TestConnectBadTokenFile(t *testing.T) {
 	d := newFakeDaemon(t)
-	_, err := Connect(context.Background(), Boot{Addr: hostOf(d), StateDir: stateWithToken(t, "two words")})
+	_, err := Connect(context.Background(), Boot{Verify: okVerify, Addr: hostOf(d), StateDir: stateWithToken(t, "two words")})
 	if !errors.Is(err, ErrTokenBad) {
 		t.Fatalf("err = %v", err)
 	}
@@ -106,7 +108,7 @@ func TestConnectBadTokenFile(t *testing.T) {
 
 func TestConnectRejectedToken(t *testing.T) {
 	d := newFakeDaemon(t)
-	_, err := Connect(context.Background(), Boot{Addr: hostOf(d), StateDir: stateWithToken(t, "wrong-token")})
+	_, err := Connect(context.Background(), Boot{Verify: okVerify, Addr: hostOf(d), StateDir: stateWithToken(t, "wrong-token")})
 	if !errors.Is(err, ErrDaemonAuth) {
 		t.Fatalf("err = %v", err)
 	}
@@ -129,9 +131,44 @@ func TestClientErrorsCarryNoAddress(t *testing.T) {
 func TestOperatorIDIsStableAcrossConnects(t *testing.T) {
 	d := newFakeDaemon(t)
 	state := stateWithToken(t, testToken)
-	a, _ := Connect(context.Background(), Boot{Addr: hostOf(d), StateDir: state})
-	b, _ := Connect(context.Background(), Boot{Addr: hostOf(d), StateDir: state})
+	a, _ := Connect(context.Background(), Boot{Verify: okVerify, Addr: hostOf(d), StateDir: state})
+	b, _ := Connect(context.Background(), Boot{Verify: okVerify, Addr: hostOf(d), StateDir: state})
 	if a == nil || b == nil || a.OperatorID != b.OperatorID {
 		t.Fatalf("operator ids differ: %v %v", a, b)
+	}
+}
+
+func okVerify(context.Context, string) error { return nil }
+
+// A daemon that fails the ownership check must never see the bearer token:
+// the listener below records every request it gets.
+func TestConnectRefusesUnverifiedDaemonBeforeSendingToken(t *testing.T) {
+	var hits int
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hits++ }))
+	defer srv.Close()
+	addr := strings.TrimPrefix(srv.URL, "http://")
+	cases := []struct {
+		name   string
+		verify func(context.Context, string) error
+		want   error
+	}{
+		{"foreign project", func(context.Context, string) error { return ErrDaemonForeign }, ErrDaemonForeign},
+		{"stale build", func(context.Context, string) error { return ErrDaemonStale }, ErrDaemonStale},
+		{"unexpected verify error", func(context.Context, string) error { return errors.New("dial /tmp/x.sock: refused") }, ErrDaemonForeign},
+		{"no verifier", nil, ErrDaemonForeign},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Connect(context.Background(), Boot{Addr: addr, StateDir: stateWithToken(t, testToken), Verify: tc.verify})
+			if !errors.Is(err, tc.want) {
+				t.Fatalf("err = %v, want %v", err, tc.want)
+			}
+			if strings.Contains(err.Error(), "/tmp") || strings.Contains(err.Error(), testToken) {
+				t.Errorf("message leaks: %v", err)
+			}
+			if hits != 0 {
+				t.Fatalf("the daemon received %d request(s); the token must not be sent", hits)
+			}
+		})
 	}
 }

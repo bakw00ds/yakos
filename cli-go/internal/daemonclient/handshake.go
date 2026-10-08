@@ -30,6 +30,10 @@ type VersionInfo struct {
 	Commit  string `json:"commit"`
 	LibHash string `json:"lib_hash"`
 	BuildID string `json:"build_id"`
+	// Workspace and ConsoleAddr are additive (K-154): the daemon's workspace
+	// root and the console address it binds. Empty from an older daemon.
+	Workspace   string `json:"workspace,omitempty"`
+	ConsoleAddr string `json:"console_addr,omitempty"`
 }
 
 // ErrStaleDaemon is returned by Check when the connected daemon's build id

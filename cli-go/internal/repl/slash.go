@@ -117,7 +117,7 @@ func (r *REPL) cmdModel(arg string) {
 	}
 	for _, m := range r.models.Models {
 		if m.ID == arg && m.Harness != r.harness {
-			r.say("%s belongs to %s, not %s", arg, m.Harness, r.harness)
+			r.say("%s belongs to %s, not %s", arg, sanitize(m.Harness), r.harness)
 			return
 		}
 	}
@@ -133,7 +133,7 @@ func (r *REPL) listModels() {
 	var ids []string
 	for _, m := range r.models.Models {
 		if m.Usable && (r.harness == "" || m.Harness == r.harness) {
-			ids = append(ids, m.Harness+"/"+m.ID)
+			ids = append(ids, sanitize(m.Harness)+"/"+sanitize(m.ID))
 		}
 	}
 	sort.Strings(ids)
@@ -243,7 +243,13 @@ func (r *REPL) cmdAttach(ctx context.Context, arg string) {
 	}
 	r.say("attaching the native %s TUI (mirrored in the console Terminal pane); leave it the usual way to return here", arg)
 	r.attachd = true
-	err := r.cfg.Attach(ctx, arg)
+	run := func() error { return r.cfg.Attach(ctx, arg) }
+	var err error
+	if r.cfg.Terminal != nil {
+		err = GuardTerminal(int(r.cfg.Terminal.Fd()), run)
+	} else {
+		err = run()
+	}
 	r.attachd = false
 	select { // a Ctrl-C meant for the native TUI must not cancel the next turn
 	case <-r.cfg.Interrupt:

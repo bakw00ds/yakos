@@ -513,3 +513,32 @@ type dummyAddr struct{}
 
 func (dummyAddr) Network() string { return "pipe" }
 func (dummyAddr) String() string  { return "pipe:0" }
+
+// The REPL (K-154) decides whether to send the console token from these two
+// fields: the daemon must report its workspace and the console address it binds.
+func TestMethod_Version_ReportsWorkspaceAndConsoleAddr(t *testing.T) {
+	ws := t.TempDir()
+	for _, tc := range []struct{ name, addr, bind, want string }{
+		{"default", "", "", "127.0.0.1:7890"},
+		{"console-addr", "127.0.0.1:7999", "", "127.0.0.1:7999"},
+		{"console-bind wins", "127.0.0.1:7999", "127.0.0.1:7998", "127.0.0.1:7998"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, _ := newTestDaemon(t, serve.Config{WorkspaceRoot: ws, YakosRoot: repoRoot(t), ConsoleAddr: tc.addr, ConsoleBind: tc.bind})
+			raw, err := client.Call(context.Background(), "yakos.version", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var r struct {
+				Workspace   string `json:"workspace"`
+				ConsoleAddr string `json:"console_addr"`
+			}
+			if err := json.Unmarshal(raw, &r); err != nil {
+				t.Fatal(err)
+			}
+			if r.Workspace != ws || r.ConsoleAddr != tc.want {
+				t.Errorf("got %+v, want workspace %q console %q", r, ws, tc.want)
+			}
+		})
+	}
+}

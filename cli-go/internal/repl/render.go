@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 )
 
@@ -14,18 +15,35 @@ const (
 	maxToolLines  = 8
 )
 
-// sanitize drops terminal control characters from text that came from the
-// daemon or a model: ESC and the other C0 controls (newline and tab stay), the
-// C1 controls, DEL, bidi overrides and the BOM. A model must not be able to
-// move the cursor, retitle the window or reorder what the operator reads.
+// escSeq matches whole terminal control sequences, so their payload goes with
+// the introducer instead of printing as stray text: OSC (title changes, OSC 52
+// clipboard writes) up to BEL or ST, DCS/SOS/PM/APC strings up to ST, CSI, and
+// any other two-byte ESC sequence. The 8-bit C1 introducers (U+009B CSI,
+// U+009D OSC, U+0090 DCS, U+0098 SOS, U+009E PM, U+009F APC) are covered the
+// same way. An unterminated string runs to the end of the text: dropping too
+// much is the safe error.
+var escSeq = regexp.MustCompile(`(?s)` +
+	`(?:\x1b\]|\x{9d})[^\x07\x1b\x{9c}]*(?:\x07|\x1b\\|\x{9c})?` +
+	`|(?:\x1b[PX^_]|[\x{90}\x{98}\x{9e}\x{9f}])[^\x1b\x{9c}]*(?:\x1b\\|\x{9c})?` +
+	`|(?:\x1b\[|\x{9b})[0-?]*[ -/]*[@-~]?` +
+	`|\x1b[ -~]?`)
+
+// sanitize drops terminal control sequences and characters from text that came
+// from the daemon or a model: whole ESC/CSI/OSC/DCS sequences (see escSeq), the
+// remaining C0 controls (newline and tab stay), the C1 controls, DEL, the bidi
+// marks, embeds, overrides and isolates, zero-width characters and the BOM. A
+// model must not be able to move the cursor, retitle the window, write the
+// clipboard or reorder what the operator reads.
 func sanitize(s string) string {
+	s = escSeq.ReplaceAllString(s, "")
 	return strings.Map(func(r rune) rune {
 		switch {
 		case r == '\n' || r == '\t':
 			return r
 		case r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f):
 			return -1
-		case r >= 0x202a && r <= 0x202e, r >= 0x2066 && r <= 0x2069, r == 0xfeff:
+		case r >= 0x200b && r <= 0x200f, r == 0x061c, r >= 0x202a && r <= 0x202e,
+			r >= 0x2060 && r <= 0x2069, r == 0xfeff:
 			return -1
 		}
 		return r

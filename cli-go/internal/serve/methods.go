@@ -88,6 +88,12 @@ type versionResult struct {
 	Commit  string `json:"commit"`
 	LibHash string `json:"lib_hash"`
 	BuildID string `json:"build_id"`
+	// Workspace and ConsoleAddr let a client (the K-154 REPL) prove that the
+	// process answering on the owner-only socket is the daemon of its own
+	// workspace and that it owns the console address it is about to send the
+	// bearer token to. Additive: older clients ignore them.
+	Workspace   string `json:"workspace,omitempty"`
+	ConsoleAddr string `json:"console_addr,omitempty"`
 }
 
 // handleVersion returns a handler that reads the VERSION file and returns
@@ -108,6 +114,9 @@ func handleVersion(cfg Config) jsonrpc.Handler {
 			Commit:  buildinfo.Commit,
 			LibHash: buildinfo.LibHash(),
 			BuildID: buildinfo.BuildID(),
+
+			Workspace:   cfg.WorkspaceRoot,
+			ConsoleAddr: cfg.consoleBind(),
 		}, nil
 	}
 }

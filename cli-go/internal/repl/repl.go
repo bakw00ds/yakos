@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -29,8 +30,12 @@ var (
 type Config struct {
 	Client *Client
 	In     io.Reader
-	Out    io.Writer
-	Color  bool
+	// Terminal, when set, is the terminal behind In. /attach saves its mode
+	// before the native session and restores it afterwards (also on a panic),
+	// and discards input the session left queued.
+	Terminal *os.File
+	Out      io.Writer
+	Color    bool
 
 	Agent          string // agent name sent with every turn; default "claude"
 	Harness        string // "" = auto (the router decides)
@@ -63,7 +68,8 @@ type REPL struct {
 	model   string
 
 	events  <-chan Event
-	lines   chan string
+	sc      *bufio.Scanner
+	pending chan lineMsg // the one in-flight stdin read, nil when none
 	models  Models
 	skills  map[string]string
 	attachd bool
@@ -107,7 +113,7 @@ func randomID(prefix string) string {
 	return prefix + hex.EncodeToString(b)
 }
 
-func (r *REPL) say(format string, a ...any) { r.rd.line(fmt.Sprintf(format, a...)) }
+func (r *REPL) say(format string, a ...any) { r.rd.line(sanitize(fmt.Sprintf(format, a...))) }
 
 // Run reads lines until EOF, /exit or ctx ends.
 func (r *REPL) Run(ctx context.Context) error {
@@ -132,8 +138,8 @@ func (r *REPL) Run(ctx context.Context) error {
 		}
 	}
 
-	r.lines = make(chan string, 1)
-	go r.readLines(ctx)
+	r.sc = bufio.NewScanner(r.cfg.In)
+	r.sc.Buffer(make([]byte, 64<<10), maxLineLen)
 
 	r.say("yakOS REPL - conversation %s - %s - /help for commands, /exit to leave", r.conv, r.modeText())
 	for {
@@ -143,12 +149,13 @@ func (r *REPL) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-r.cfg.Interrupt:
 			r.say("(Ctrl-C at the prompt does nothing; /exit or Ctrl-D leaves)")
-		case line, ok := <-r.lines:
-			if !ok {
+		case m := <-r.nextLine():
+			r.pending = nil
+			if !m.ok {
 				r.say("")
 				return nil
 			}
-			if quit := r.handle(ctx, strings.TrimSpace(line)); quit {
+			if quit := r.handle(ctx, strings.TrimSpace(m.text)); quit {
 				return nil
 			}
 		}
@@ -164,17 +171,33 @@ func (r *REPL) prompt() {
 	r.rd.atBOL = false
 }
 
-func (r *REPL) readLines(ctx context.Context) {
-	defer close(r.lines)
-	sc := bufio.NewScanner(r.cfg.In)
-	sc.Buffer(make([]byte, 64<<10), maxLineLen)
-	for sc.Scan() {
-		select {
-		case r.lines <- sc.Text():
-		case <-ctx.Done():
-			return
-		}
+// lineMsg is one line read from the terminal; ok is false at EOF or on a read
+// error.
+type lineMsg struct {
+	text string
+	ok   bool
+}
+
+// nextLine returns the channel carrying the next input line, starting a read
+// only if none is in flight. The REPL owns the terminal's input solely while it
+// waits on this channel: there is no always-on reader, so while a native
+// session (/attach) runs on the same terminal nothing here competes with it for
+// keystrokes. A read abandoned by Ctrl-C at the prompt stays in flight and is
+// reused by the next call, so no line is lost or read twice.
+func (r *REPL) nextLine() <-chan lineMsg {
+	if r.pending == nil {
+		ch := make(chan lineMsg, 1)
+		r.pending = ch
+		sc := r.sc
+		go func() {
+			if sc.Scan() {
+				ch <- lineMsg{sc.Text(), true}
+				return
+			}
+			ch <- lineMsg{}
+		}()
 	}
+	return r.pending
 }
 
 func (r *REPL) modeText() string {
@@ -355,11 +378,12 @@ func (r *REPL) ask(ctx context.Context, ev Event) {
 		case <-r.cfg.Interrupt:
 			r.say("(question left unanswered)")
 			return
-		case line, ok := <-r.lines:
-			if !ok {
+		case m := <-r.nextLine():
+			r.pending = nil
+			if !m.ok {
 				return
 			}
-			line = strings.TrimSpace(line)
+			line := strings.TrimSpace(m.text)
 			r.rd.atBOL = true
 			if n, err := strconv.Atoi(line); err == nil && n >= 1 && n <= len(q.Options) {
 				line = q.Options[n-1].Label

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -12,6 +13,9 @@ import (
 
 	"golang.org/x/term"
 
+	"github.com/bakw00ds/yakos/internal/buildinfo"
+	"github.com/bakw00ds/yakos/internal/daemonclient"
+	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/repl"
 )
 
@@ -50,6 +54,80 @@ func wantREPL(g replGate, tty bool) bool {
 	return tty
 }
 
+// queryWorkspaceDaemon asks the daemon behind socketPath for its identity. It
+// is a seam: tests stand in a daemon without a real process.
+var queryWorkspaceDaemon = func(ctx context.Context, socketPath string) (daemonclient.VersionInfo, error) {
+	c, err := jsonrpc.DialClient(socketPath)
+	if err != nil {
+		return daemonclient.VersionInfo{}, err
+	}
+	defer c.Close() //nolint:errcheck
+	return daemonclient.QueryVersion(ctx, c)
+}
+
+// verifyRetries bounds the socket dial retries of verifyWorkspaceDaemon.
+var verifyRetries = 15
+
+// verifyWorkspaceDaemon proves the daemon holding the console address is this
+// workspace's own daemon from this binary's build, before the console token is
+// sent to it. The proof travels over the workspace's owner-only unix socket
+// (jsonrpc.SocketPath, the same one the exec path uses), which only a process
+// of this user can have created: a foreign or hostile listener on the TCP port
+// cannot answer there. The daemon reports its workspace root, build id and
+// console address; all three must match.
+func verifyWorkspaceDaemon(ctx context.Context, workspace, addr string) error {
+	if !daemonAlive(jsonrpc.PIDPath(workspace)) {
+		return repl.ErrDaemonForeign
+	}
+	// A daemon that was just spawned writes its pidfile before it listens on
+	// the socket, so a refused dial is retried briefly.
+	var info daemonclient.VersionInfo
+	var err error
+	for i := 0; ; i++ {
+		info, err = queryWorkspaceDaemon(ctx, jsonrpc.SocketPath(workspace))
+		if err == nil {
+			break
+		}
+		if i >= verifyRetries || ctx.Err() != nil {
+			return repl.ErrDaemonForeign
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return checkDaemonIdentity(info, workspace, addr, buildinfo.BuildID())
+}
+
+// checkDaemonIdentity is the pure decision behind verifyWorkspaceDaemon.
+func checkDaemonIdentity(info daemonclient.VersionInfo, workspace, addr, wantBuild string) error {
+	if info.BuildID == "" || info.BuildID != wantBuild {
+		return repl.ErrDaemonStale
+	}
+	if info.Workspace == "" || filepath.Clean(info.Workspace) != filepath.Clean(workspace) {
+		return repl.ErrDaemonForeign
+	}
+	if !sameConsolePort(info.ConsoleAddr, addr) {
+		return repl.ErrDaemonForeign
+	}
+	return nil
+}
+
+// sameConsolePort reports whether the daemon's bind address (loopback or a
+// wildcard) serves the same port as the address the REPL is about to dial.
+func sameConsolePort(bind, dial string) bool {
+	bh, bp, err := net.SplitHostPort(bind)
+	if err != nil {
+		return false
+	}
+	_, dp, err := net.SplitHostPort(dial)
+	if err != nil || bp != dp {
+		return false
+	}
+	if bh == "" || bh == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(bh)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
+}
+
 // runStartREPL runs the REPL and returns the process exit code.
 func runStartREPL(home, project, harness, model, consoleAddr string) int {
 	stateDir := filepath.Join(home, ".yakos-state")
@@ -58,10 +136,20 @@ func runStartREPL(home, project, harness, model, consoleAddr string) int {
 		addr = repl.DefaultAddr
 	}
 	ctx := context.Background()
+	workspace, werr := os.Getwd()
+	if werr != nil {
+		fmt.Fprintln(os.Stderr, "start: could not resolve the working directory")
+		return 1
+	}
+	var spawnArgs []string
+	if consoleAddr != "" {
+		spawnArgs = []string{"--console-addr", consoleAddr}
+	}
 
 	cl, err := repl.Connect(ctx, repl.Boot{
 		Addr: addr, StateDir: stateDir, Out: os.Stderr,
-		StartDaemon: func() error { return spawnDaemonFn(nil) },
+		Verify:      func(vctx context.Context, a string) error { return verifyWorkspaceDaemon(vctx, workspace, a) },
+		StartDaemon: func() error { return spawnDaemonFn(spawnArgs) },
 		WaitUp:      func(a string) bool { return pollConsolePort(a, 10*time.Second, 200*time.Millisecond) },
 	})
 	if err != nil {
@@ -83,8 +171,10 @@ func runStartREPL(home, project, harness, model, consoleAddr string) int {
 		}
 	}()
 
+	defer repl.RestoreTerminalOnSignal(int(os.Stdin.Fd()))()
+
 	r := repl.New(repl.Config{
-		Client: cl, In: os.Stdin, Out: os.Stdout, Color: os.Getenv("NO_COLOR") == "",
+		Client: cl, In: os.Stdin, Terminal: os.Stdin, Out: os.Stdout, Color: os.Getenv("NO_COLOR") == "",
 		Harness: harness, Model: model, Interrupt: intr,
 		Attach: func(ctx context.Context, rt string) error { return attachNative(ctx, rt, project) },
 	})

@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -109,5 +111,37 @@ func TestNativeKeepsTodaysArgv(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// TestNativeRuntimeConflict: --native and --runtime must name the same runtime.
+// runStart exits, so it runs in a re-executed test binary.
+func TestNativeRuntimeConflict(t *testing.T) {
+	if os.Getenv("YAKOS_TEST_NATIVE_CONFLICT") == "1" {
+		runStart(os.Getenv("YAKOS_TEST_ROOT"), strings.Fields(os.Getenv("YAKOS_TEST_ARGS")))
+		os.Exit(0) // reached only if runStart returned instead of exiting
+	}
+	for _, tc := range []struct {
+		args    string
+		refused bool
+	}{
+		{"p --native claude --runtime codex", true},
+		{"p --native codex --runtime claude", true},
+		{"p --native claude --runtime claude --dry-run", false},
+	} {
+		t.Run(tc.args, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], "-test.run=^TestNativeRuntimeConflict$") //nolint:gosec
+			cmd.Env = append(os.Environ(), "YAKOS_TEST_NATIVE_CONFLICT=1", "YAKOS_TEST_ARGS="+tc.args,
+				"YAKOS_TEST_ROOT="+repoRoot(t), "HOME="+t.TempDir())
+			out, err := cmd.CombinedOutput()
+			refused := strings.Contains(string(out), "--native and --runtime name different runtimes")
+			if refused != tc.refused {
+				t.Fatalf("refused = %v, want %v (err=%v)\n%s", refused, tc.refused, err, out)
+			}
+			var ee *exec.ExitError
+			if tc.refused && (!errors.As(err, &ee) || ee.ExitCode() != 1) {
+				t.Errorf("exit = %v, want status 1", err)
+			}
+		})
 	}
 }

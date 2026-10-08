@@ -20,12 +20,14 @@ const DefaultAddr = "127.0.0.1:7890"
 // Errors of Connect. Their text is fixed: it never names a path, a token or the
 // underlying system error.
 var (
-	ErrNotLoopback  = errors.New("the REPL talks to a local daemon only; use a loopback --console-addr (the console token is never sent to another host)")
-	ErrDaemonStart  = errors.New("the yakOS daemon is not running and could not be started; run `yakos serve` in another terminal, then retry")
-	ErrDaemonSlow   = errors.New("the yakOS daemon did not come up in time; run `yakos serve` in another terminal, then retry")
-	ErrTokenMissing = errors.New("no console token found: the daemon creates it on first start; run `yakos serve` once, then retry")
-	ErrTokenBad     = errors.New("the console token file is unreadable or empty; restart the daemon (`yakos serve stop`, then `yakos serve`) to recreate it")
-	ErrDaemonAuth   = errors.New("the daemon rejected the console token; restart it (`yakos serve stop`, then `yakos serve`) and retry")
+	ErrNotLoopback   = errors.New("the REPL talks to a local daemon only; use a loopback --console-addr (the console token is never sent to another host)")
+	ErrDaemonStart   = errors.New("the yakOS daemon is not running and could not be started; run `yakos serve` in another terminal, then retry")
+	ErrDaemonSlow    = errors.New("the yakOS daemon did not come up in time; run `yakos serve` in another terminal, then retry")
+	ErrTokenMissing  = errors.New("no console token found: the daemon creates it on first start; run `yakos serve` once, then retry")
+	ErrTokenBad      = errors.New("the console token file is unreadable or empty; restart the daemon (`yakos serve stop`, then `yakos serve`) to recreate it")
+	ErrDaemonForeign = errors.New("the process on the console address is not this project's yakOS daemon, so the console token was not sent; run `yakos serve stop` in the project that started the daemon (or free the port), then retry")
+	ErrDaemonStale   = errors.New("the running yakOS daemon is from another build; restart it (`yakos serve stop`, then `yakos serve`) and retry")
+	ErrDaemonAuth    = errors.New("the daemon rejected the console token; restart it (`yakos serve stop`, then `yakos serve`) and retry")
 )
 
 // Boot describes how to reach (and if needed start) the daemon.
@@ -39,6 +41,12 @@ type Boot struct {
 	StartDaemon func() error
 	// WaitUp blocks until addr accepts connections or the wait ends.
 	WaitUp func(addr string) bool
+
+	// Verify proves, over the owner-only unix socket and before the token is
+	// read, that the daemon on addr is this workspace's daemon, built from this
+	// binary. It returns nil, ErrDaemonForeign or ErrDaemonStale. Nil Verify
+	// fails closed (ErrDaemonForeign): the token is never sent unverified.
+	Verify func(ctx context.Context, addr string) error
 
 	Out io.Writer // progress line ("starting the yakOS daemon...")
 }
@@ -74,6 +82,18 @@ func Connect(ctx context.Context, b Boot) (*Client, error) {
 		if !wait(addr) {
 			return nil, ErrDaemonSlow
 		}
+	}
+	if b.Verify == nil {
+		return nil, ErrDaemonForeign
+	}
+	vctx, vcancel := context.WithTimeout(ctx, 5*time.Second)
+	verr := b.Verify(vctx, addr)
+	vcancel()
+	if verr != nil {
+		if errors.Is(verr, ErrDaemonStale) {
+			return nil, ErrDaemonStale
+		}
+		return nil, ErrDaemonForeign
 	}
 	tok, err := readToken(b.StateDir)
 	if err != nil {
