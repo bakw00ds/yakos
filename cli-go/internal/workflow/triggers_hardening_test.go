@@ -260,3 +260,48 @@ func TestSecretEnvRequiresYakosPrefix(t *testing.T) {
 		}
 	}
 }
+
+// WaitIdle returns only after the run goroutine has returned, and ActiveRuns
+// counts across workflow names (K-172).
+func TestEngine_WaitIdleBlocksUntilRunReturns(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{}, 1)
+	blocking := func(ctx context.Context, p dispatch.Params) ([]byte, dispatch.Result, error) {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		return []byte("x"), dispatch.Result{}, nil
+	}
+	eng, workDir := newTestEngine(t, blocking)
+	writeWF(t, workDir, "nightly", cronWF)
+	wf, _, err := workflow.LoadFile(filepath.Join(workDir, "workflows", "nightly.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.WaitIdle(context.Background()); err != nil {
+		t.Fatalf("idle engine: %v", err)
+	}
+	if _, err := eng.StartTriggered(context.Background(), wf, workflow.TriggerWebhook, "op", dispatch.IdentityCarrier{}, nil); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if n := eng.ActiveRuns(); n != 1 {
+		t.Fatalf("ActiveRuns = %d, want 1", n)
+	}
+	short, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if err := eng.WaitIdle(short); err == nil {
+		t.Fatal("WaitIdle returned while a run was in flight")
+	}
+	close(release)
+	long, cancel2 := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel2()
+	if err := eng.WaitIdle(long); err != nil {
+		t.Fatalf("WaitIdle after release: %v", err)
+	}
+	if n := eng.ActiveRuns(); n != 0 {
+		t.Fatalf("ActiveRuns = %d after idle", n)
+	}
+}
