@@ -25,6 +25,17 @@ never holds a login: ADR-0010. Detailed entries follow.
   the Anthropic gateway (K-151), Flows triggers (K-152), the Models & Providers
   tab and policy writers (K-153), the REPL (K-154).
 
+- **feat(router): Jev routing shadow, opt-in (K-177).** After a dispatch is routed,
+  Jev can suggest a tier; it is recorded as `tier_suggested_by_jev` (and
+  `jev_shadow`: `ok`, `skipped_sensitive`, `unavailable`) on the finished ledger
+  row and never changes a route. Off by default and enabled only by
+  `routing_shadow: true` in the user-level `decision-policy.yml`; a project file
+  cannot enable it. It sends the agent name, the route class and the first 2 KiB of
+  the task to `*.typesafe.ai`, never a sensitive task, with a 3 second bound, no
+  retry and no wait on the dispatch path. `yakos doctor` and `yakos router explain`
+  show whether it is on. New question set `lib/decisions/routing-tier.yaml`. See
+  `docs/routing.md` and the ADR-0009 addendum.
+
 - **docs: ADR-0010, the runtime-matrix rewrite and the routing map (K-155).**
   ADR-0010 records harness-native routing, the vendor-policy facts it rests on
   with dates, and the one assumption no source settles (spawning the unmodified

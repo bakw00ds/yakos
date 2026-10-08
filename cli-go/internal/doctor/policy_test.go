@@ -614,3 +614,37 @@ func TestRun_DefaultReportHasNoPolicySection(t *testing.T) {
 		t.Errorf("the default report must not include the policy section:\n%s", buf.String())
 	}
 }
+
+// K-177: the Jev routing shadow shows up in the policy report only when the user
+// opted in, and the finding says what leaves the host.
+func TestCheckPolicy_JevRoutingShadowReportedOnlyWhenOptedIn(t *testing.T) {
+	f := newPolicyFixture(t)
+	for _, fd := range CheckPolicy(f.policyEnv()) {
+		if fd.ID == "jev-routing-shadow-on" {
+			t.Fatalf("reported with no opt-in: %+v", fd)
+		}
+	}
+	dir := filepath.Join(f.home, ".yakos-state")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "decision-policy.yml"), []byte("routing_shadow: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var got *PolicyFinding
+	for _, fd := range CheckPolicy(f.policyEnv()) {
+		if fd.ID == "jev-routing-shadow-on" {
+			fd := fd
+			got = &fd
+		}
+	}
+	if got == nil || got.Severity != PolicyLow || !strings.Contains(got.Message, "2 KiB") || got.Fix == "" {
+		t.Fatalf("finding = %+v", got)
+	}
+	f.env["YAKOS_DECISION_DISABLE"] = "1"
+	for _, fd := range CheckPolicy(f.policyEnv()) {
+		if fd.ID == "jev-routing-shadow-on" {
+			t.Fatalf("reported with the kill switch set: %+v", fd)
+		}
+	}
+}

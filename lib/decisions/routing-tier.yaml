@@ -1,0 +1,55 @@
+# Question set: routing-tier (ADR-0009, K-177).
+#
+# Reviewed source, not configuration. Every decision logs this file's sha256.
+# Changing ANY byte changes the hash: re-run the eval, then update the pinned
+# model and thresholds together.
+#
+# SHADOW ONLY. The dispatcher asks this question after the route is final and
+# writes the answer to the ledger as tier_suggested_by_jev. The answer never
+# changes the runtime, the model, the model ceiling or the sensitive class. It
+# exists to compare Jev's suggestion with the offline eval gate later. The call
+# is opt-in (routing_shadow in the user-level decision-policy.yml) and sends
+# only the three fields below; a sensitive task is never sent.
+#
+# Wording rules (https://docs.typesafe.ai/model-jaggedness/jev-1.13):
+#   - positive phrasing, no negations
+#   - explicit criteria per option
+schema_id: routing-tier@1
+version: 1
+surface: routing-tier
+model: jev-1.13.0            # pinned; aliases such as jev-latest are rejected
+may_block: false             # no Jev answer may block or steer anything
+
+max_state_bytes: 4096
+
+# Only these top-level state fields may leave the machine (allowlist). The
+# dispatcher builds exactly these three; task_preview is the first 2 KiB of the
+# task text, whitespace-normalised and secret-redacted before the request.
+state_fields:
+  - agent
+  - route_class
+  - task_preview
+
+questions:
+  tier:
+    type: choice
+    instructions: >-
+      Pick the smallest model tier that completes the task described by
+      task_preview well. The agent field names the role that will run it.
+    criteria:
+      haiku: >-
+        Mechanical or lookup work with an obvious answer: renaming, formatting,
+        summarising a short text, listing or classifying items, answering a
+        factual question from supplied context.
+      sonnet: >-
+        Ordinary engineering and writing work: implementing a well specified
+        change in one or two files, writing tests, reviewing a small diff,
+        explaining code, drafting documentation.
+      opus: >-
+        Open-ended or high-stakes work: designing a system, debugging across
+        several subsystems, security analysis, planning a large refactor, or
+        reasoning that needs many dependent steps.
+
+thresholds:
+  tier:
+    min_confidence: 0.50

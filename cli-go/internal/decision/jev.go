@@ -63,6 +63,9 @@ type Jev struct {
 	Breaker *Breaker // nil disables (tests only)
 	Budget  *Budget  // nil disables (tests only)
 	Backoff time.Duration
+	// NoRetry makes Decide a single attempt, whatever the status. The routing
+	// shadow (K-177) sets it: it has no deadline to spare for a second try.
+	NoRetry bool
 }
 
 // Name implements Provider.
@@ -230,7 +233,7 @@ func (j *Jev) Decide(ctx context.Context, req Request) (*Result, error) {
 			return res, nil
 		}
 		last = err
-		if !retry {
+		if !retry || j.NoRetry {
 			break
 		}
 	}

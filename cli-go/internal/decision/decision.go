@@ -304,9 +304,14 @@ type Policy struct {
 	// Provider is the user-level switch that turns a provider on ("jev", "mock").
 	// It lives here, outside any repository, because a cloned project must not
 	// be able to start sending data to a third party by itself.
-	Provider string       `yaml:"provider"`
-	Budget   BudgetConfig `yaml:"budget"`
-	Egress   EgressConfig `yaml:"egress"`
+	Provider string `yaml:"provider"`
+	// RoutingShadow turns on the K-177 routing shadow: after a dispatch is
+	// routed, a bounded slice of the task text is sent to Jev and the suggested
+	// tier is written to the ledger. It never changes a route. Default false;
+	// like Provider it can only be set here, in the trusted user-level file.
+	RoutingShadow bool         `yaml:"routing_shadow"`
+	Budget        BudgetConfig `yaml:"budget"`
+	Egress        EgressConfig `yaml:"egress"`
 }
 
 // DefaultPolicy is the documented ceiling: 2000 calls, $1/day, strict egress.
@@ -362,6 +367,7 @@ func LoadPolicy(path string) (Policy, error) {
 	}
 	p.Egress.NeverPaths = got.Egress.NeverPaths
 	p.Provider = strings.TrimSpace(got.Provider)
+	p.RoutingShadow = got.RoutingShadow
 	return p, nil
 }
 

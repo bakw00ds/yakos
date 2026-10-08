@@ -77,6 +77,13 @@ func (r *runner) checkDecisionProbe() {
 		r.err(sec, "decisions.model %q is an alias or unpinned; pin an exact version such as %s", dc.Model, decision.PinnedModel)
 	}
 
+	// 2b. The routing shadow (K-177): on or off, always stated here.
+	if st := r.routingShadowState(); st.Enabled {
+		r.warn(sec, "routing shadow: %s", st.Detail)
+	} else {
+		r.info(sec, "routing shadow: %s", st.Detail)
+	}
+
 	// 3. Question sets and hashes.
 	lib := r.cfg.YakosLib
 	if lib == "" && r.yakosRoot != "" {
@@ -155,3 +162,33 @@ func (r *runner) checkDecisionProbe() {
 }
 
 func writeln(r *runner, s string) { _, _ = r.w.Write([]byte(s + "\n")) }
+
+// routingShadowState resolves the Jev routing shadow (K-177) for the doctor.
+func (r *runner) routingShadowState() decision.RoutingShadow {
+	proj := r.cfg.ProjectPath
+	if proj == "" {
+		if r.cfg.Getwd != nil {
+			proj, _ = r.cfg.Getwd()
+		} else {
+			proj, _ = os.Getwd()
+		}
+	}
+	return decision.ResolveRoutingShadow(r.stateDir(), proj, r.env)
+}
+
+// checkRoutingShadow is the plain `yakos doctor` line. The shadow is off by
+// default and a clean run prints nothing for it (the output is pinned against the
+// bash doctor); it is printed only when it is on, because then task text leaves
+// the host.
+func (r *runner) checkRoutingShadow() {
+	st := r.routingShadowState()
+	if !st.Enabled {
+		return
+	}
+	writeln(r, "Jev routing shadow")
+	r.warn(SectionRoutingShadow, "%s", st.Detail)
+	if r.env(decision.KeyEnv) == "" {
+		r.info(SectionRoutingShadow, "%s is not set, so every shadow call is recorded as unavailable", decision.KeyEnv)
+	}
+	writeln(r, "")
+}

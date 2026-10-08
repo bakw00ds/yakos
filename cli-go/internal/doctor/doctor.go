@@ -117,6 +117,9 @@ const (
 	// SectionImplementation reports which implementation `yakos dispatch` runs
 	// on (K-143).
 	SectionImplementation
+
+	// SectionRoutingShadow reports whether the Jev routing shadow (K-177) is on.
+	SectionRoutingShadow
 )
 
 // Finding is one reported item: a severity level plus a human-readable message.
@@ -310,6 +313,7 @@ func Run(cfg Config) (*Report, error) {
 	r.checkHookFallback()
 	r.checkRuntimeIsolation()
 	r.checkImplementation()
+	r.checkRoutingShadow()
 
 	if cfg.ProbeRuntime {
 		r.checkRuntimeProbe()
