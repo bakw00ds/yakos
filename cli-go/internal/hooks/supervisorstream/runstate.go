@@ -149,6 +149,12 @@ func appendPending(path string, event map[string]any) {
 // carries its own). An empty line is not recorded.
 func appendPendingLine(path, line string) { _ = appendPendingLines(path, []string{line}) }
 
+// pendingReadCapBytes bounds how much of the pending file appendPendingLines reads
+// back to trim it: the newest 1 MiB. A pending record is a preview of a few hundred
+// bytes and the file is kept to about 150 lines, so a real one is under 100 KiB.
+// A file past the cap is cut to its newest lines, so it shrinks.
+const pendingReadCapBytes = 1 << 20
+
 // appendPendingLines appends already-encoded preview lines in one write and keeps
 // the file to its last 100 lines once it passes 150. Empty lines are not recorded.
 // The pending file lives in a directory the sandboxed model may be able to write
@@ -175,16 +181,44 @@ func appendPendingLines(path string, lines []string) error {
 		return err
 	}
 	_ = f.Chmod(0o600)
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
+	// Read back at most pendingReadCapBytes, from the end of the file: the trim
+	// below keeps the newest lines, and a file that grew far past the cap (a hook
+	// that appended for weeks, or a planted one) must not be read whole into memory.
+	size := int64(-1)
+	if fi, serr := f.Stat(); serr == nil {
+		size = fi.Size()
+	}
+	start := int64(0)
+	if size > pendingReadCapBytes {
+		start = size - pendingReadCapBytes
+	}
+	if _, err := f.Seek(start, io.SeekStart); err != nil {
 		return nil
 	}
-	raw, rerr := io.ReadAll(f)
+	raw, rerr := io.ReadAll(io.LimitReader(f, pendingReadCapBytes+1))
 	if rerr != nil {
 		return nil
 	}
-	all := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
-	if len(all) > 150 {
-		tail := strings.Join(all[len(all)-100:], "\n") + "\n"
+	capped := start > 0 || int64(len(raw)) > pendingReadCapBytes
+	text := string(raw)
+	if capped && start > 0 {
+		// The window starts mid-line: drop the partial first line.
+		if i := strings.IndexByte(text, '\n'); i >= 0 {
+			text = text[i+1:]
+		} else {
+			text = ""
+		}
+	}
+	all := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if len(all) > 150 || capped {
+		keep := all
+		if len(keep) > 100 {
+			keep = keep[len(keep)-100:]
+		}
+		tail := ""
+		if len(keep) > 1 || (len(keep) == 1 && keep[0] != "") {
+			tail = strings.Join(keep, "\n") + "\n"
+		}
 		tmp := path + ".tmp." + strconv.Itoa(os.Getpid())
 		// a planted link at tmp is removed, never followed
 		_ = os.Remove(tmp)
