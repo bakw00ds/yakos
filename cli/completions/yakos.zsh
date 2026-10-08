@@ -68,6 +68,7 @@ _yakos() {
         'router:explain how the router routes a dispatch'
         'plan:score and correlate plan quality'
         'work:record plan outcome and close work session'
+        'flows:enable or disable a workflow trigger (schedule enable, disable)'
         'workflow:run a named multi-step workflow'
     )
 

@@ -1,9 +1,13 @@
 package anthropic
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -90,5 +94,69 @@ func TestRotateToken(t *testing.T) {
 		if b, _ := os.ReadFile(other); string(b) != "x" {
 			t.Error("RotateToken wrote through a symlink")
 		}
+	}
+}
+
+// An unset or short configured token must match nothing, whichever path serves
+// the request. With DeferToken and no SetToken, Handler() once let an empty
+// offered token equal the empty configured one (sha256 of "" on both sides) and
+// reached the upstream with the operator's key (sec-355d I1).
+func TestHandlerFailsClosedWithoutAUsableToken(t *testing.T) {
+	for name, configured := range map[string]string{"unset": "", "short": "short-token"} {
+		t.Run(name, func(t *testing.T) {
+			up := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) { w.WriteHeader(http.StatusOK) })
+			u, _ := url.Parse(up.srv.URL)
+			addr := freeAddr(t)
+			srv, err := New(Config{Addr: addr, DeferToken: true, baseURL: u, badTokenGap: -1, APIKey: "FAKE-key-for-test"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if configured != "" {
+				srv.SetToken(configured)
+			}
+			offers := []map[string]string{
+				{TokenHeader: ""},
+				{TokenHeader: " "},
+				{"Authorization": "Bearer  "},
+				{"Authorization": "Bearer " + configured, TokenHeader: configured},
+				{},
+			}
+			for i, hdr := range offers {
+				req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"m","max_tokens":1,"messages":[]}`))
+				req.Host = addr
+				req.Header.Set("Content-Type", "application/json")
+				for k, v := range hdr {
+					req.Header[http.CanonicalHeaderKey(k)] = []string{v}
+				}
+				rr := httptest.NewRecorder()
+				srv.Handler().ServeHTTP(rr, req)
+				if rr.Code != http.StatusUnauthorized {
+					t.Errorf("offer %d: status %d, want 401", i, rr.Code)
+				}
+			}
+			if n := len(up.hits()); n != 0 {
+				t.Fatalf("%d requests reached the upstream, want 0", n)
+			}
+		})
+	}
+
+	// Control: the same request path reaches the upstream once a real token is set,
+	// so the 401s above are the token check and not a Host or route refusal.
+	up := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) { w.WriteHeader(http.StatusOK) })
+	u, _ := url.Parse(up.srv.URL)
+	addr := freeAddr(t)
+	srv, err := New(Config{Addr: addr, DeferToken: true, baseURL: u, badTokenGap: -1, APIKey: "FAKE-key-for-test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.SetToken(testToken)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"m","max_tokens":1,"messages":[]}`))
+	req.Host = addr
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(TokenHeader, testToken)
+	rr := httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code == http.StatusUnauthorized || len(up.hits()) != 1 {
+		t.Fatalf("control: status %d, upstream hits %d; want the request admitted", rr.Code, len(up.hits()))
 	}
 }

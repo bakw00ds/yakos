@@ -11,29 +11,26 @@ package anthropic
 // sessions (401 until they are relaunched).
 
 import (
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/hex"
 	"errors"
-	"fmt"
 	"net/http"
-	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
-	"github.com/bakw00ds/yakos/internal/statepath"
-	"github.com/bakw00ds/yakos/internal/winsec"
+	"github.com/bakw00ds/yakos/internal/gateway/gwtoken"
 )
 
 const (
 	tokenFile  = "gateway-token"
-	tokenBytes = 32
+	tokenBytes = gwtoken.Bytes
 	// TokenHeader carries the gateway token when Authorization is taken by a
 	// subscription OAuth bearer (--gateway-passthrough-subscription).
 	TokenHeader = "X-Yakos-Gateway-Token"
 )
+
+// store is the gateway token file. The file handling (private file, atomic
+// replace, symlink refusal, constant-time compare) lives in gwtoken, shared with
+// the OpenAI-compatible endpoint's own token (K-174).
+var store = gwtoken.Store{File: tokenFile, Label: "anthropic gateway"}
 
 // ErrNoToken means no usable gateway token exists in the state directory.
 var ErrNoToken = errors.New("no gateway token (start the gateway with `yakos serve --gateway` first)")
@@ -45,111 +42,45 @@ func TokenPath(stateDir string) string { return filepath.Join(stateDir, tokenFil
 // by the current user with no group or other access; anything else is refused
 // rather than trusted.
 func ReadToken(stateDir string) (string, error) {
-	p := TokenPath(stateDir)
-	fi, err := os.Lstat(p)
-	if err != nil {
+	tok, err := store.Read(stateDir)
+	if errors.Is(err, gwtoken.ErrNoToken) {
 		return "", ErrNoToken
 	}
-	if !fi.Mode().IsRegular() || !statepath.OwnedByCurrentUser(fi) ||
-		(runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0) {
-		return "", errors.New("the gateway token file is not private to this user; delete it and restart `yakos serve --gateway`")
-	}
-	b, err := os.ReadFile(p) //nolint:gosec // path is under the state dir
-	if err != nil {
-		return "", ErrNoToken
-	}
-	tok := strings.TrimSpace(string(b))
-	if !validToken(tok) {
-		return "", ErrNoToken
-	}
-	return tok, nil
+	return tok, err
 }
 
 // LoadOrCreateToken returns the token, minting one when none usable exists. A
 // token file with loose permissions is treated as exposed and replaced.
-func LoadOrCreateToken(stateDir string) (string, error) {
-	if err := statepath.SecureDir(stateDir); err != nil {
-		return "", fmt.Errorf("anthropic gateway: state dir: %w", err)
-	}
-	if tok, err := ReadToken(stateDir); err == nil {
-		return tok, nil
-	}
-	return mintToken(stateDir)
-}
+func LoadOrCreateToken(stateDir string) (string, error) { return store.LoadOrCreate(stateDir) }
 
 // RotateToken mints a fresh token and atomically replaces the file (0600, same
 // path), whatever is there. The gateway calls it on every start; the previous
 // token stops working the moment the new daemon serves.
-func RotateToken(stateDir string) (string, error) {
-	if err := statepath.SecureDir(stateDir); err != nil {
-		return "", fmt.Errorf("anthropic gateway: state dir: %w", err)
-	}
-	return mintToken(stateDir)
-}
+func RotateToken(stateDir string) (string, error) { return store.Rotate(stateDir) }
 
-func mintToken(stateDir string) (string, error) {
-	buf := make([]byte, tokenBytes)
-	if _, err := rand.Read(buf); err != nil {
-		return "", fmt.Errorf("anthropic gateway: generate token: %w", err)
-	}
-	tok := hex.EncodeToString(buf)
-	p := TokenPath(stateDir)
-	tmp, err := os.CreateTemp(stateDir, ".gateway-token-*")
-	if err != nil {
-		return "", fmt.Errorf("anthropic gateway: write token: %w", err)
-	}
-	defer os.Remove(tmp.Name()) //nolint:errcheck // gone after the rename
-	if err := tmp.Chmod(0o600); err != nil && runtime.GOOS != "windows" {
-		_ = tmp.Close()
-		return "", fmt.Errorf("anthropic gateway: write token: %w", err)
-	}
-	if _, err := tmp.WriteString(tok + "\n"); err != nil {
-		_ = tmp.Close()
-		return "", fmt.Errorf("anthropic gateway: write token: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return "", fmt.Errorf("anthropic gateway: write token: %w", err)
-	}
-	if err := os.Rename(tmp.Name(), p); err != nil {
-		return "", fmt.Errorf("anthropic gateway: write token: %w", err)
-	}
-	if err := winsec.SecureFile(p); err != nil {
-		return "", fmt.Errorf("anthropic gateway: secure token file: %w", err)
-	}
-	return tok, nil
-}
-
-func validToken(t string) bool {
-	if len(t) != tokenBytes*2 {
-		return false
-	}
-	for _, c := range t {
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
-			return false
-		}
-	}
-	return true
-}
+func validToken(t string) bool { return gwtoken.Valid(t) }
 
 // tokenOK reports whether the request carries the gateway token, as
-// `Authorization: Bearer <token>` or in TokenHeader. Both sides are hashed so
-// the comparison is constant-time whatever the length of the offered value.
+// `Authorization: Bearer <token>` or in TokenHeader. The comparison is constant
+// time whatever the length of the offered value, and it fails closed when the
+// configured token is unset or shorter than gwtoken.MinLen, whichever path
+// serves the request (Handler() included): an empty offered value must never
+// equal an empty configured one.
 func (s *Server) tokenOK(h http.Header) bool {
-	want := sha256.Sum256([]byte(s.cfg.GatewayToken))
-	ok := 0
-	check := func(got string) {
-		g := sha256.Sum256([]byte(got))
-		ok |= subtle.ConstantTimeCompare(want[:], g[:])
+	want := s.cfg.GatewayToken
+	if !gwtoken.Usable(want) {
+		return false
 	}
+	ok := false
 	for _, v := range h.Values(TokenHeader) {
-		check(strings.TrimSpace(v))
+		ok = gwtoken.Match(want, strings.TrimSpace(v)) || ok
 	}
 	for _, v := range h.Values("Authorization") {
 		if len(v) > 7 && strings.EqualFold(v[:7], "bearer ") {
-			check(strings.TrimSpace(v[7:]))
+			ok = gwtoken.Match(want, strings.TrimSpace(v[7:])) || ok
 		}
 	}
-	return ok == 1
+	return ok
 }
 
 // isGatewayBearer reports whether an Authorization value is the gateway token.

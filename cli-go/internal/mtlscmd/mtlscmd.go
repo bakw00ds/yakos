@@ -87,6 +87,9 @@ func ValidateClientName(name string) error {
 	// Reserved prefixes: "op-" and "lbop-" (case-insensitive) are used by the
 	// console's loopback owner-identity system.  Blocking these here ensures no
 	// cert CN can collide with a legacy random token or a stable loopback ID.
+	if netid.IsReservedOwner(name) {
+		return fmt.Errorf("client name %q is reserved", name)
+	}
 	lower := strings.ToLower(name)
 	if strings.HasPrefix(lower, "op-") {
 		return fmt.Errorf("client name %q is invalid: names starting with 'op-' are reserved", name)

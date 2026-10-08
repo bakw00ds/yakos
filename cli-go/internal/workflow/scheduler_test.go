@@ -247,7 +247,7 @@ func TestScheduler_SkipsWhileRunning(t *testing.T) {
 	ctx := context.Background()
 	defer func() { // let the run finish before the temp dir is removed
 		close(release)
-		waitFor(t, "the run to finish", func() bool { return !s.Engine.RunActive("nightly") })
+		waitFor(t, "the run to finish", func() bool { return s.Engine.ActiveRuns() == 0 })
 	}()
 
 	day := time.Date(2026, 6, 1, 8, 59, 0, 0, time.UTC)

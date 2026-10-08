@@ -60,6 +60,7 @@ complete -c yakos -n '__fish_use_subcommand' -a 'models'        -d 'provider-awa
 complete -c yakos -n '__fish_use_subcommand' -a 'router'        -d 'explain how the router routes a dispatch'
 complete -c yakos -n '__fish_use_subcommand' -a 'plan'           -d 'score and correlate plan quality'
 complete -c yakos -n '__fish_use_subcommand' -a 'work'           -d 'record plan outcome and close work session'
+complete -c yakos -n '__fish_use_subcommand' -a 'flows'         -d 'enable or disable a workflow trigger (schedule enable, disable)'
 complete -c yakos -n '__fish_use_subcommand' -a 'workflow'       -d 'run a named multi-step workflow'
 complete -c yakos -n '__fish_use_subcommand' -a 'hooks'         -d 'translate yakOS hooks to runtime-native config'
 complete -c yakos -n '__fish_use_subcommand' -a 'supervise'     -d 'manage the live shadow-agent supervisor'
