@@ -17,7 +17,8 @@ const (
 	triggerMaxTrackedNames = 1024
 	// triggerReplayWindow is how far a request timestamp may be from now.
 	triggerReplayWindow = 5 * time.Minute
-	// triggerNonceCacheSize is how many accepted signatures are remembered.
+	// triggerNonceCacheSize is how many live accepted signatures are remembered;
+	// past it new requests are refused, never an older entry evicted.
 	triggerNonceCacheSize = 1000
 )
 
@@ -80,11 +81,23 @@ func (g *triggerGuard) fresh(ts time.Time) bool {
 	return d <= triggerReplayWindow
 }
 
-// firstUse records sig and reports true the first time it is seen. Call it
-// only for a signature that already verified, so unauthenticated traffic
-// cannot fill the cache. The oldest entry is evicted past the size bound; the
-// rate limit keeps the volume inside the window far below it.
-func (g *triggerGuard) firstUse(sig string) bool {
+// replayed reports whether sig was already accepted. It never records, so a
+// request that is later refused (rate limit) leaves the cache untouched.
+func (g *triggerGuard) replayed(sig string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	_, dup := g.seen[sig]
+	return dup
+}
+
+// record remembers sig for a request that is proceeding and reports false if
+// the signature was already recorded (a concurrent duplicate) or the cache is
+// full of live entries. Call it only for a signature that verified and passed
+// the rate limit. Entries older than twice the replay window are dropped (a
+// timestamp may be skewed either way, so a signature can stay replayable that
+// long); a live entry is never evicted. If the cache is still full the
+// request fails closed (404) rather than making room.
+func (g *triggerGuard) record(sig string) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.seen == nil {
@@ -93,11 +106,16 @@ func (g *triggerGuard) firstUse(sig string) bool {
 	if _, dup := g.seen[sig]; dup {
 		return false
 	}
-	g.seen[sig] = g.clock()
-	g.order = append(g.order, sig)
-	if len(g.order) > triggerNonceCacheSize {
+	now := g.clock()
+	cut := now.Add(-2 * triggerReplayWindow)
+	for len(g.order) > 0 && !g.seen[g.order[0]].After(cut) {
 		delete(g.seen, g.order[0])
 		g.order = g.order[1:]
 	}
+	if len(g.order) >= triggerNonceCacheSize {
+		return false
+	}
+	g.seen[sig] = now
+	g.order = append(g.order, sig)
 	return true
 }

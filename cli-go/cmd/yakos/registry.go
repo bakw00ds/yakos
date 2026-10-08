@@ -280,6 +280,11 @@ var commandRegistry = []commandEntry{
 		},
 	},
 	{
+		Name:   "flows",
+		Specs:  specSet("flows", "--cron", "--webhook", "--project"),
+		HelpFn: printFlowsHelp,
+	},
+	{
 		Name:   "git-hooks",
 		Specs:  specSet("git-hooks", "--force", "--promotion-gate"),
 		HelpFn: githooks.PrintHelp,
