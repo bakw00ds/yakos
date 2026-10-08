@@ -422,9 +422,17 @@ func TestShellWritesGatedByPathAllowlist(t *testing.T) {
 		{"backend", "cp a ../outside", true},
 		{"backend", "cd .. && echo hi > a", true},
 		{"backend", "echo hi > /tmp/scratch", true},
-		{"backend", "echo hi > $OUT", true},      // undecidable target under a policy
-		{"backend", "echo hi > $(mktemp)", true}, // undecidable target under a policy
-		{"backend", "echo 'echo x' | sh", true},  // script read from stdin
+		{"backend", "echo hi > $OUT", true},         // undecidable target under a policy
+		{"backend", "echo hi > $(mktemp)", true},    // undecidable target under a policy
+		{"backend", "echo 'echo x' | sh", true},     // script read from stdin
+		{"backend", "cd src; echo hi > a.go", true}, // a failed cd would leave the shell elsewhere
+		{"backend", "echo $(( $(echo hi > README.md; echo 1) + 1 ))", true},
+		{"reviewer", "cd .claude && echo '{}' > path-allowlist.json", false}, // .claude/path-allowlist.json is not in this deny list
+		{"reviewer", "echo hi > .en?", true},
+		{"reviewer", "echo hi > $\".env\"", true},
+		{"reviewer", "echo hi >! .env", true},
+		{"reviewer", "rm .env", true},
+		{"reviewer", "gofmt -w .env", true},
 		{"backend", "echo hi > /dev/null", false},
 		{"backend", "go test ./... 2>&1 | tail -5", false},
 		{"nobody-listed", "echo hi > .env", false}, // no policy for this agent: as on claude

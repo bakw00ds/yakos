@@ -111,6 +111,17 @@ type shAnalyzer struct {
 	cwd    string // "" = project root
 	cwdDyn bool
 	tokens int
+
+	// Conservative tracking of the shell's state (see cd and assign): only an
+	// unconditional first command of a && chain may change the directory or
+	// define a variable the decoder will trust.
+	chainAnd   bool // every operator since the statement began is &&
+	chainFirst bool // this command is the first of its statement
+	lead       bool // led by then/do/else/{ ...: may not run, may repeat
+	cdPending  bool // a static cd applies until the statement ends
+	evalDepth  int  // inside eval: its effects reach the caller's shell
+	noVars     bool // arithmetic or let: no variable is trusted any more
+	wrapShift  bool // the current command runs in a directory env -C / sudo -D chose
 }
 
 func cleanDir(d string) string {
@@ -259,9 +270,11 @@ func (l *shLexer) run() {
 			case strings.HasPrefix(s[l.i:], "&>>"):
 				l.toks = append(l.toks, shTok{kind: tokRedir, op: "&>>"})
 				l.i += 3
+				l.skipZshForce()
 			case strings.HasPrefix(s[l.i:], "&>"):
 				l.toks = append(l.toks, shTok{kind: tokRedir, op: "&>"})
 				l.i += 2
+				l.skipZshForce()
 			default:
 				l.toks = append(l.toks, shTok{kind: tokOp, op: "&"})
 				l.i++
@@ -317,6 +330,9 @@ func (l *shLexer) readRedir() {
 		}
 	}
 	l.i += len(op)
+	if strings.HasPrefix(op, ">") && l.i < len(s) && s[l.i] == '!' {
+		l.i++ // zsh: >! >>! >&! force the redirect over noclobber
+	}
 	t := shTok{kind: tokRedir, op: op}
 	if op == "<<" || op == "<<-" {
 		l.skipBlanks()
@@ -336,6 +352,13 @@ func (l *shLexer) readRedir() {
 		l.pending = append(l.pending, hd)
 	}
 	l.toks = append(l.toks, t)
+}
+
+// skipZshForce consumes the "!" or "|" of zsh's &>! and &>| forms.
+func (l *shLexer) skipZshForce() {
+	if l.i < len(l.s) && (l.s[l.i] == '!' || l.s[l.i] == '|') {
+		l.i++
+	}
 }
 
 func (l *shLexer) skipBlanks() {
@@ -409,6 +432,18 @@ func (l *shLexer) scanWord() *shWord {
 			body, n := balanced(s[l.i+2:], '(', ')')
 			w.parts = append(w.parts, shPart{kind: partSub, text: body})
 			l.i += 2 + n
+			continue
+		}
+		if c == '(' && len(w.parts) > 0 && l.i > start {
+			// word immediately followed by "(": a zsh glob qualifier or
+			// alternation (.en(v|x)), "=(cmd)" or an array value. Not static.
+			body, n := balanced(s[l.i+1:], '(', ')')
+			if s[l.i-1] == '=' {
+				w.parts = append(w.parts, shPart{kind: partSub, text: body})
+			}
+			w.parts = append(w.parts, shPart{kind: partDyn, text: "(" + body + ")"})
+			addSubs(w, body, false)
+			l.i += 1 + n
 			continue
 		}
 		if isWordBreak(c) {
@@ -537,8 +572,10 @@ func (l *shLexer) scanDollar(w *shWord, lit func(string, bool), quoted bool) {
 	case n == '(':
 		body, k := balanced(s[l.i+2:], '(', ')')
 		if strings.HasPrefix(body, "(") && strings.HasSuffix(body, ")") {
-			// $(( ... )) is arithmetic, not a command: its > and < compare.
+			// $(( ... )) is arithmetic, not a command: its > and < compare. But
+			// a substitution inside it still runs.
 			w.parts = append(w.parts, shPart{kind: partDyn, text: "$(" + body + ")", quoted: quoted})
+			addSubs(w, body, quoted)
 		} else {
 			w.parts = append(w.parts, shPart{kind: partSub, text: body, quoted: quoted})
 		}
@@ -550,7 +587,18 @@ func (l *shLexer) scanDollar(w *shWord, lit func(string, bool), quoted bool) {
 			kind = partVar
 		}
 		w.parts = append(w.parts, shPart{kind: kind, text: body, quoted: quoted})
+		addSubs(w, body, quoted) // ${F:-$(cmd)} runs cmd
 		l.i += 2 + k
+	case n == '[':
+		body, k := balanced(s[l.i+2:], '[', ']') // old arithmetic: $[ ... ]
+		w.parts = append(w.parts, shPart{kind: partDyn, text: "$[" + body + "]", quoted: quoted})
+		addSubs(w, body, quoted)
+		l.i += 2 + k
+	case n == '"' && !quoted:
+		// $"..." is a locale-translated string: the text may change at run
+		// time. Dynamic; the quoted string itself is lexed next.
+		w.parts = append(w.parts, shPart{kind: partDyn, text: "$\"", quoted: false})
+		l.i++
 	case n == '\'' && !quoted:
 		end := l.i + 2
 		for end < len(s) && s[end] != '\'' {
@@ -579,6 +627,14 @@ func (l *shLexer) scanDollar(w *shWord, lit func(string, bool), quoted bool) {
 	default:
 		lit("$", quoted)
 		l.i++
+	}
+}
+
+// addSubs appends one substitution part for every command substitution that
+// text contains.
+func addSubs(w *shWord, text string, quoted bool) {
+	for _, inner := range substitutionsIn(text) {
+		w.parts = append(w.parts, shPart{kind: partSub, text: inner, quoted: quoted})
 	}
 }
 
@@ -751,9 +807,10 @@ func backtick(s string) (string, int) {
 // ---- analysis ---------------------------------------------------------------
 
 type shState struct {
-	cwd    string
-	cwdDyn bool
-	vars   map[string]shVar
+	cwd       string
+	cwdDyn    bool
+	cdPending bool
+	vars      map[string]shVar
 }
 
 func (a *shAnalyzer) save() shState {
@@ -761,10 +818,12 @@ func (a *shAnalyzer) save() shState {
 	for k, x := range a.vars {
 		v[k] = x
 	}
-	return shState{a.cwd, a.cwdDyn, v}
+	return shState{a.cwd, a.cwdDyn, a.cdPending, v}
 }
 
-func (a *shAnalyzer) restore(s shState) { a.cwd, a.cwdDyn, a.vars = s.cwd, s.cwdDyn, s.vars }
+func (a *shAnalyzer) restore(s shState) {
+	a.cwd, a.cwdDyn, a.cdPending, a.vars = s.cwd, s.cwdDyn, s.cdPending, s.vars
+}
 
 func (a *shAnalyzer) script(src string, depth int) {
 	if depth > maxShellDepth {
@@ -774,34 +833,62 @@ func (a *shAnalyzer) script(src string, depth int) {
 	toks := a.lex(src)
 	var stack []shState
 	var cmd []shTok
+	chainAnd, first := true, true
 	flush := func() {
 		if len(cmd) > 0 {
+			a.chainAnd, a.chainFirst = chainAnd, first
 			a.command(cmd, depth)
 			cmd = nil
 		}
 	}
+	prevOpen := false
 	for _, t := range toks {
 		if t.kind == tokOp {
+			flush()
 			switch t.op {
 			case "(":
-				flush()
+				a.boundary()
+				if prevOpen {
+					a.noVars = true // "((": an arithmetic command assigns
+				}
 				stack = append(stack, a.save())
+				chainAnd, first = true, true
+				prevOpen = true
 				continue
 			case ")":
-				flush()
+				a.boundary()
 				if n := len(stack); n > 0 {
 					a.restore(stack[n-1])
 					stack = stack[:n-1]
 				}
-				continue
-			default:
-				flush()
-				continue
+				a.cdPending = false
+				chainAnd, first = false, false
+			case "&&":
+				first = false
+			case ";", "\n":
+				a.boundary()
+				chainAnd, first = true, true
+			default: // || | &
+				a.boundary()
+				chainAnd, first = false, false
 			}
+			prevOpen = false
+			continue
 		}
+		prevOpen = false
 		cmd = append(cmd, t)
 	}
 	flush()
+	a.boundary()
+}
+
+// boundary ends a && chain: a cd that applied inside it may have failed, so
+// whatever runs next is in an unknown directory.
+func (a *shAnalyzer) boundary() {
+	if a.cdPending {
+		a.cwdDyn = true
+		a.cdPending = false
+	}
 }
 
 // resolved is a word after variable resolution.
@@ -828,7 +915,7 @@ func (a *shAnalyzer) resolve(w *shWord) resolved {
 			}
 		case partVar:
 			raw.WriteString("$" + p.text)
-			if v, ok := a.vars[p.text]; ok && v.ok {
+			if v, ok := a.vars[p.text]; ok && v.ok && !a.noVars {
 				val.WriteString(v.val)
 			} else {
 				r.dyn = true
@@ -878,6 +965,8 @@ type shArg struct {
 }
 
 func (a *shAnalyzer) command(toks []shTok, depth int) {
+	// Nested scripts (substitutions) overwrite the chain context; keep ours.
+	chainAnd, chainFirst := a.chainAnd, a.chainFirst
 	var words []shArg
 	var heredocs []*shHeredoc
 	var herestr []string
@@ -918,6 +1007,7 @@ func (a *shAnalyzer) command(toks []shTok, depth int) {
 			}
 		}
 	}
+	a.chainAnd, a.chainFirst = chainAnd, chainFirst
 	a.simple(words, heredocs, herestr, depth)
 }
 
@@ -936,25 +1026,33 @@ func isFDWord(s string) bool {
 	return true
 }
 
-// scanSubsIn analyses $(...) and `...` inside an unquoted here-document body.
-func (a *shAnalyzer) scanSubsIn(body string, depth int) {
-	for i := 0; i < len(body); i++ {
+// substitutionsIn returns the bodies of the $(...) and `...` substitutions in
+// text, outermost only (each body is analysed recursively as a script).
+func substitutionsIn(text string) []string {
+	var out []string
+	for i := 0; i < len(text); i++ {
 		switch {
-		case body[i] == '\\':
+		case text[i] == '\\':
 			i++
-		case body[i] == '$' && i+1 < len(body) && body[i+1] == '(':
-			inner, n := balanced(body[i+2:], '(', ')')
-			st := a.save()
-			a.script(inner, depth+1)
-			a.restore(st)
+		case text[i] == '$' && i+1 < len(text) && text[i+1] == '(':
+			inner, n := balanced(text[i+2:], '(', ')')
+			out = append(out, inner)
 			i += 1 + n
-		case body[i] == '`':
-			inner, n := backtick(body[i+1:])
-			st := a.save()
-			a.script(inner, depth+1)
-			a.restore(st)
+		case text[i] == '`':
+			inner, n := backtick(text[i+1:])
+			out = append(out, inner)
 			i += n
 		}
+	}
+	return out
+}
+
+// scanSubsIn analyses the substitutions inside an unquoted here-document body.
+func (a *shAnalyzer) scanSubsIn(body string, depth int) {
+	for _, inner := range substitutionsIn(body) {
+		st := a.save()
+		a.script(inner, depth+1)
+		a.restore(st)
 	}
 }
 
@@ -1070,7 +1168,7 @@ var wrapperArgs = map[string]string{
 	"caffeinate": "t w",
 }
 
-var shells = map[string]bool{"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "mksh": true}
+var shells = map[string]bool{"fish": true, "sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "mksh": true}
 
 func baseName(s string) string {
 	if i := strings.LastIndexByte(s, '/'); i >= 0 {
@@ -1082,22 +1180,38 @@ func baseName(s string) string {
 var reservedLead = map[string]bool{"if": true, "then": true, "else": true, "elif": true, "while": true, "until": true,
 	"do": true, "!": true, "{": true, "}": true, "coproc": true}
 
+var extAssignRE = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_]*)(\[[^\]]*\])?\+?=`)
+
 func (a *shAnalyzer) simple(all []shArg, heredocs []*shHeredoc, herestr []string, depth int) {
 	words := all
 	// reserved words that lead a command
+	a.lead = false
 	for len(words) > 0 && !words[0].dyn && reservedLead[words[0].val] {
+		if words[0].val != "!" {
+			a.lead = true
+		}
 		words = words[1:]
+	}
+	// for/select define their loop variable
+	if len(words) > 1 && !words[0].dyn && (words[0].val == "for" || words[0].val == "select") && !words[1].dyn && isSimpleName(words[1].val) {
+		a.vars[words[1].val] = shVar{ok: false}
 	}
 	// assignments
 	assigns := 0
 	for assigns < len(words) {
-		name, rest, ok := isAssign(words[assigns].w)
-		if !ok {
-			break
+		w := words[assigns].w
+		if _, _, ok := isAssign(w); ok {
+			assigns++
+			continue
 		}
-		_ = name
-		_ = rest
-		assigns++
+		// NAME+=x and NAME[i]=x: not a plain assignment; the name goes dynamic
+		if len(w.parts) > 0 && w.parts[0].kind == partLit && !w.parts[0].quoted {
+			if extAssignRE.MatchString(w.parts[0].text) {
+				assigns++ // assign() makes the name dynamic
+				continue
+			}
+		}
+		break
 	}
 	if assigns == len(words) {
 		for _, w := range words {
@@ -1109,17 +1223,36 @@ func (a *shAnalyzer) simple(all []shArg, heredocs []*shHeredoc, herestr []string
 	a.dispatch(words, heredocs, herestr, depth)
 }
 
+// assign records NAME=value. Only a plain NAME=literal that is the first
+// command of its statement, outside eval and conditional constructs, and the
+// first assignment of that name, is trusted; every other form makes the name
+// dynamic from then on.
 func (a *shAnalyzer) assign(w *shWord) {
 	name, rest, ok := isAssign(w)
 	if !ok {
+		if len(w.parts) > 0 && w.parts[0].kind == partLit {
+			if m := extAssignRE.FindStringSubmatch(w.parts[0].text); m != nil {
+				a.vars[m[1]] = shVar{ok: false}
+			}
+		}
 		return
 	}
 	r := a.resolve(rest)
-	if r.dyn {
+	_, seen := a.vars[name]
+	if r.dyn || seen || !a.chainFirst || a.lead || a.evalDepth > 0 {
 		a.vars[name] = shVar{ok: false}
 		return
 	}
 	a.vars[name] = shVar{val: r.val, ok: true}
+}
+
+// dynVars makes every plain-name operand a dynamic variable (read, mapfile...).
+func (a *shAnalyzer) dynVars(args []shArg) {
+	for _, x := range args {
+		if !x.dyn && isSimpleName(x.val) {
+			a.vars[x.val] = shVar{ok: false}
+		}
+	}
 }
 
 // stripWrappers peels sudo/env/nohup/... and returns the remaining words.
@@ -1151,6 +1284,9 @@ func (a *shAnalyzer) stripWrappers(words []shArg) []shArg {
 				words = words[1:]
 				goto next
 			case strings.HasPrefix(x.val, "--"):
+				if (name == "env" || name == "sudo") && strings.HasPrefix(x.val, "--chdir") {
+					a.wrapShift = true
+				}
 				words = words[1:]
 				if !strings.Contains(x.val, "=") && len(words) > 0 && consume[strings.TrimPrefix(x.val, "--")] {
 					words = words[1:]
@@ -1158,6 +1294,9 @@ func (a *shAnalyzer) stripWrappers(words []shArg) []shArg {
 			case strings.HasPrefix(x.val, "-") && len(x.val) > 1:
 				words = words[1:]
 				last := x.val[len(x.val)-1:]
+				if (name == "env" && last == "C") || (name == "sudo" && last == "D") {
+					a.wrapShift = true
+				}
 				if consume[last] && len(words) > 0 {
 					words = words[1:]
 				}
@@ -1187,7 +1326,15 @@ func looksDuration(s string) bool {
 }
 
 func (a *shAnalyzer) dispatch(words []shArg, heredocs []*shHeredoc, herestr []string, depth int) {
+	a.wrapShift = false
 	words = a.stripWrappers(words)
+	if a.wrapShift {
+		// env -C / sudo -D: the command runs in a directory we cannot track.
+		saved := a.cwdDyn
+		a.cwdDyn = true
+		defer func() { a.cwdDyn = saved }()
+		a.wrapShift = false
+	}
 	if len(words) == 0 {
 		return
 	}
@@ -1197,11 +1344,26 @@ func (a *shAnalyzer) dispatch(words []shArg, heredocs []*shHeredoc, herestr []st
 	name := baseName(words[0].val)
 	args := words[1:]
 	switch {
-	case name == "cd" || name == "pushd":
+	case name == "cd":
 		a.cd(args)
+	case name == "pushd" || name == "popd":
+		a.cwdDyn = true
 	case name == "export" || name == "declare" || name == "local" || name == "readonly" || name == "typeset":
 		for _, x := range args {
+			if !x.dyn && (x.val == "-n" || x.val == "+n") {
+				a.noVars = true // a nameref: any name may now alias another
+			}
 			a.assign(x.w)
+		}
+	case name == "read" || name == "mapfile" || name == "readarray" || name == "getopts" || name == "unset":
+		a.dynVars(args)
+	case name == "let":
+		a.noVars = true
+	case name == "printf":
+		for i, x := range args {
+			if !x.dyn && x.val == "-v" && i+1 < len(args) {
+				a.dynVars(args[i+1 : i+2])
+			}
 		}
 	case shells[name]:
 		a.shell(args, heredocs, herestr, depth)
@@ -1230,6 +1392,27 @@ func (a *shAnalyzer) dispatch(words []shArg, heredocs []*shHeredoc, herestr []st
 		a.optTarget(args, "O", "output-document")
 	case name == "find":
 		a.find(args, depth)
+	case name == "rm" || name == "unlink" || name == "shred" || name == "truncate" || name == "touch" || name == "sponge" || name == "gofmt" || name == "goimports" || name == "prettier":
+		a.operandTargets(name, args)
+	case name == "uniq":
+		_, ops, _ := splitOpts(args, "f s w", "skip-fields skip-chars check-chars")
+		if len(ops) >= 2 {
+			a.target(ops[1])
+		}
+	case name == "xxd":
+		_, ops, _ := splitOpts(args, "c g l s o", "cols groupsize len seek")
+		if len(ops) >= 2 {
+			a.target(ops[1])
+		}
+	case name == "ditto":
+		a.copyLike("cp", args)
+	case name == "yq":
+		opts, ops, _ := splitOpts(args, "", "")
+		if _, ok := hasOpt(opts, "i", "inplace"); ok && len(ops) > 1 {
+			for _, f := range ops[1:] {
+				a.target(f)
+			}
+		}
 	case name == "sort":
 		opts, _, _ := splitOpts(args, "o t k T S", "output field-separator key temporary-directory buffer-size")
 		for _, o := range opts {
@@ -1244,6 +1427,11 @@ func (a *shAnalyzer) dispatch(words []shArg, heredocs []*shHeredoc, herestr []st
 	}
 }
 
+// cd tracks a directory change only when it is certain: a plain cd to a static
+// literal that is not led by then/do/else/{, not inside eval, and in a chain of
+// && only. It then applies until the statement ends (boundary), because a
+// failed cd leaves the shell where it was. Anything else makes later relative
+// targets dynamic.
 func (a *shAnalyzer) cd(args []shArg) {
 	var ops []shArg
 	for _, x := range args {
@@ -1252,8 +1440,8 @@ func (a *shAnalyzer) cd(args []shArg) {
 		}
 		ops = append(ops, x)
 	}
-	if len(ops) == 0 {
-		a.cwd, a.cwdDyn = "", true // cd with no operand goes home
+	if len(ops) == 0 || !a.chainAnd || a.lead || a.evalDepth > 0 {
+		a.cwdDyn = true
 		return
 	}
 	d := ops[0]
@@ -1261,12 +1449,16 @@ func (a *shAnalyzer) cd(args []shArg) {
 		a.cwdDyn = true
 		return
 	}
+	a.cdPending = true
 	if strings.HasPrefix(d.val, "/") {
 		a.cwd, a.cwdDyn = cleanDir(d.val), false
 		if a.cwd == "" {
 			a.cwd = "/"
 		}
 		return
+	}
+	if a.cwdDyn {
+		return // a relative step from an unknown directory stays unknown
 	}
 	if a.cwd == "" {
 		a.cwd = cleanDir(d.val)
@@ -1339,9 +1531,12 @@ func (a *shAnalyzer) evalArgs(args []shArg, depth int) {
 		}
 		parts = append(parts, x.val)
 	}
-	st := a.save()
+	// eval runs in the caller's shell: its cd and assignments persist, so they
+	// are made dynamic (evalDepth) rather than saved and restored.
+	a.evalDepth++
 	a.script(strings.Join(parts, " "), depth+1)
-	a.restore(st)
+	a.evalDepth--
+	a.cwdDyn = a.cwdDyn || a.cdPending
 }
 
 // optSpec splits args into option words and operands for a command whose
@@ -1699,4 +1894,29 @@ func (a *shAnalyzer) awk(args []shArg, depth int) {
 		}
 	}
 	a.callsShell(prog.val, reAwkSystem, depth, false)
+}
+
+// operandTargets records the file operands of commands that modify the file
+// they are given: rm, unlink, shred, truncate, touch, sponge, and the
+// formatters gofmt/goimports/prettier (only with -w / --write).
+func (a *shAnalyzer) operandTargets(name string, args []shArg) {
+	shortArg, longArg := "", ""
+	switch name {
+	case "truncate":
+		shortArg, longArg = "s r", "size reference"
+	case "touch":
+		shortArg, longArg = "t d r", "date reference time"
+	case "shred":
+		shortArg, longArg = "n s", "iterations size"
+	}
+	opts, ops, _ := splitOpts(args, shortArg, longArg)
+	switch name {
+	case "gofmt", "goimports", "prettier":
+		if _, ok := hasOpt(opts, "w", "write"); !ok {
+			return
+		}
+	}
+	for _, f := range ops {
+		a.target(f)
+	}
 }
