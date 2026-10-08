@@ -38,12 +38,18 @@ import (
 // task text to dispatch. For claude it changes nothing. A skill invoked as the
 // task's first word is appended to the task's tail.
 func (ch *chatHandlers) nonClaudeTurn(rt, conversationID, operatorID, agent, task string) (block, taskOut string) {
+	return nonClaudeTurn(ch.transcripts, ch.yakosRoot, ch.workspaceRoot, rt, conversationID, operatorID, agent, task)
+}
+
+// nonClaudeTurn is the method's body over any transcript store and roots; the
+// OpenAI-compatible endpoint (K-150) calls it through NonClaudeTurn.
+func nonClaudeTurn(tr *Transcripts, yakosRoot, workspaceRoot, rt, conversationID, operatorID, agent, task string) (block, taskOut string) {
 	if rt == "claude" {
 		return "", task
 	}
 	taskOut = task
 	if slug, ok := skillSlug(task); ok {
-		tail, err := knowledge.SkillText(ch.yakosRoot, ch.workspaceRoot, slug)
+		tail, err := knowledge.SkillText(yakosRoot, workspaceRoot, slug)
 		switch {
 		case err == nil:
 			taskOut = task + tail
@@ -52,15 +58,15 @@ func (ch *chatHandlers) nonClaudeTurn(rt, conversationID, operatorID, agent, tas
 			slog.Warn("consoleui: skill not appended", "skill", slug, "err", err)
 		}
 	}
-	if ch.yakosRoot == "" {
+	if yakosRoot == "" {
 		return "", taskOut
 	}
-	pack, err := ch.transcripts.EnsureKnowledge(conversationID, operatorID, func() knowledge.Pack {
+	pack, err := tr.EnsureKnowledge(conversationID, operatorID, func() knowledge.Pack {
 		p := knowledge.Compose(knowledge.Options{
-			YakosRoot: ch.yakosRoot,
-			Project:   ch.workspaceRoot,
+			YakosRoot: yakosRoot,
+			Project:   workspaceRoot,
 			Agent:     agent,
-			AgentBody: resolveAgentSystemPrompt(ch.yakosRoot, ch.workspaceRoot, agent),
+			AgentBody: resolveAgentSystemPrompt(yakosRoot, workspaceRoot, agent),
 		})
 		for _, w := range p.Warnings {
 			slog.Warn("consoleui: knowledge pack", "note", w)

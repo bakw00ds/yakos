@@ -78,6 +78,7 @@ func runServe(yakosRoot string, args []string) {
 	requireConsole := false
 	consoleStructuredQuestions := false
 	shareTerminal := false
+	openAIEndpoint := false
 
 	// YAKOS_ROOT env override mirrors runValidate / runRefresh behavior:
 	// when the binary is not installed at <root>/bin/yakos (e.g. in tests or
@@ -113,6 +114,7 @@ func runServe(yakosRoot string, args []string) {
 		{Name: "--require-console", Kind: cliflag.Bool, Bool: &requireConsole},
 		{Name: "--console-structured-questions", Kind: cliflag.Bool, Bool: &consoleStructuredQuestions},
 		{Name: "--share-terminal", Kind: cliflag.Bool, Bool: &shareTerminal},
+		{Name: "--openai-endpoint", Kind: cliflag.Bool, Bool: &openAIEndpoint},
 		{Name: "--ide-root", Kind: cliflag.String, Str: &ideRoot, ValueDesc: "a path"},
 		{Name: "--detach", Kind: cliflag.Bool, Bool: &detach},
 	}}
@@ -214,6 +216,7 @@ func runServe(yakosRoot string, args []string) {
 		RequireConsole:             requireConsole,
 		ConsoleStructuredQuestions: consoleStructuredQuestions,
 		ShareTerminal:              shareTerminal,
+		OpenAIEndpoint:             openAIEndpoint,
 		HooksRun: func(ctx context.Context, shape, name string, body []byte) hookio.Response {
 			return shaperun.Run(ctx, shape, name, body, shapeDeps(yakosRoot))
 		},
@@ -625,6 +628,11 @@ Flags:
   --no-console              Disable the unified console server.
   --require-console         Exit with an error when the console cannot bind its port
                             (default: log it and run without a console).
+  --openai-endpoint         Serve the OpenAI-compatible endpoint (/v1/models,
+                            /v1/chat/completions) on 127.0.0.1:7898, loopback only,
+                            bearer = the REST write token. Same as openai_endpoint: true
+                            in ~/.yakos-state/router-policy.yml. See
+                            docs/openai-compatible-endpoint.md.
   --perf-addr <addr>        Standalone performance dashboard address (default 127.0.0.1:7895).
                             Only used when --no-console is set.
   --no-perf                 Disable the standalone performance dashboard.
