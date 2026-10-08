@@ -26,10 +26,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"mime"
 	"net/http"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -354,7 +354,7 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	defer s.release(conv)
 
 	t := &turn{
-		s: s, conv: conv, sess: "oai-s-" + randHex(8), model: echoModel(req.Model), id: "chatcmpl-" + randHex(12),
+		s: s, conv: conv, sess: "oai-s-" + randHex(8), model: tg.id, id: "chatcmpl-" + randHex(12),
 		created: time.Now().Unix(), pinned: "router",
 	}
 	if tg.runtime != "" {
@@ -373,10 +373,20 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set(HeaderConversation, conv)
 	includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
 	if req.Stream {
-		t.sse = &sseWriter{w: w, rc: http.NewResponseController(w), includeUsage: includeUsage}
+		timeout := s.cfg.StreamWriteTimeout
+		if timeout <= 0 {
+			timeout = DefaultStreamWriteTimeout
+		}
+		t.sse = &sseWriter{w: w, rc: http.NewResponseController(w), includeUsage: includeUsage, timeout: timeout}
 	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	if t.sse != nil {
+		t.sse.cancel = cancel
+		t.sse.onAbort = func() {
+			slog.Info("openai gateway: stream write failed, turn cancelled", "conversation", conv)
+		}
+	}
 	stopKeepalive := t.keepalive(ctx)
 	res, runErr := s.cfg.Service.RunStream(ctx, params, t.onChunk)
 	stopKeepalive()
@@ -392,6 +402,11 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	t.finish(w, runErr)
+	if t.sse != nil {
+		// The deadline would otherwise outlive this response on a kept-alive
+		// connection and fail the next request's write after it idles.
+		_ = t.sse.rc.SetWriteDeadline(time.Time{})
+	}
 }
 
 // buildParams assembles the dispatch Params for the turn and the native session
@@ -642,6 +657,46 @@ type sseWriter struct {
 	rc           *http.ResponseController
 	includeUsage bool
 	begun        bool
+
+	// timeout is the deadline given to each write and its flush.
+	timeout time.Duration
+	// cancel ends the turn when a write fails; onAbort (tests) observes it.
+	cancel  context.CancelFunc
+	onAbort func()
+	// broken is set by the first failed write; later writes are dropped.
+	broken bool
+}
+
+// put writes one SSE frame under a fresh write deadline and flushes it. A write
+// or flush that fails (the client stopped reading, or went away) cancels the
+// turn, which kills the runtime and releases its dispatch slot, instead of
+// leaving the reader blocked on a socket nobody drains. A connection that
+// cannot take a deadline at all (a test recorder) is written without one.
+func (s *sseWriter) put(frame string) {
+	if s.broken {
+		return
+	}
+	err := s.rc.SetWriteDeadline(time.Now().Add(s.timeout))
+	if err != nil && !errors.Is(err, http.ErrNotSupported) {
+		s.abort()
+		return
+	}
+	if _, err = io.WriteString(s.w, frame); err == nil {
+		err = s.rc.Flush()
+	}
+	if err != nil && !errors.Is(err, http.ErrNotSupported) {
+		s.abort()
+	}
+}
+
+func (s *sseWriter) abort() {
+	s.broken = true
+	if s.cancel != nil {
+		s.cancel()
+	}
+	if s.onAbort != nil {
+		s.onAbort()
+	}
 }
 
 func (s *sseWriter) write(v any) {
@@ -649,14 +704,10 @@ func (s *sseWriter) write(v any) {
 	if err != nil {
 		return
 	}
-	_, _ = fmt.Fprintf(s.w, "data: %s\n\n", b)
-	_ = s.rc.Flush()
+	s.put("data: " + string(b) + "\n\n")
 }
 
-func (s *sseWriter) comment() {
-	_, _ = fmt.Fprint(s.w, ": keepalive\n\n")
-	_ = s.rc.Flush()
-}
+func (s *sseWriter) comment() { s.put(": keepalive\n\n") }
 
 // begin sends the headers and the opening role chunk, once.
 func (s *sseWriter) begin(t *turn) {
@@ -702,8 +753,7 @@ func (s *sseWriter) end(t *turn) {
 		u.Usage = usageFrom(t.usage)
 		s.write(u)
 	}
-	_, _ = fmt.Fprint(s.w, "data: [DONE]\n\n")
-	_ = s.rc.Flush()
+	s.put("data: [DONE]\n\n")
 }
 
 // fail ends a stream that already began with an error frame and [DONE].
@@ -711,20 +761,5 @@ func (s *sseWriter) fail(code, msg string) {
 	var b errorBody
 	b.Error.Message, b.Error.Type, b.Error.Code = msg, "server_error", code
 	s.write(b)
-	_, _ = fmt.Fprint(s.w, "data: [DONE]\n\n")
-	_ = s.rc.Flush()
-}
-
-// modelEchoRE bounds what is echoed back as the response model.
-var modelEchoRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,127}$`)
-
-// echoModel trims the requested model and echoes it only when it is short and
-// plain; resolve has already matched it against the catalog, so anything else
-// is replaced by a fixed label rather than reflected.
-func echoModel(m string) string {
-	m = strings.TrimSpace(m)
-	if len(m) > 128 || !modelEchoRE.MatchString(m) {
-		return "yakos/auto"
-	}
-	return m
+	s.put("data: [DONE]\n\n")
 }

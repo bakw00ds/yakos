@@ -29,21 +29,37 @@ carries on without the endpoint.
 
 ## Authenticate
 
-The bearer token is the REST write token, `~/.yakos-state/rest-write-token`. It is
-the same token that guards `yakos.dispatch` over REST and MCP, so the endpoint adds
-no new credential, but it is a powerful one: **the bearer grants runs with
+The bearer is the endpoint's own token, `~/.yakos-state/openai-endpoint-token`: 32
+random bytes, mode 0600, owner only. `yakos serve` mints it on the first start with
+the endpoint on and keeps it across restarts. A symlink, a file owned by someone
+else or a file others can read is never trusted, and the endpoint answers 401 until
+the file is replaced. The REST write token is **not** accepted here, and this token
+does not open the REST or MCP write surfaces, so a leak from a chat client is
+revoked by rotating this file alone. The token is never logged, printed or written
+to the ledger; the start-up banner names the file only.
+
+It is still a powerful credential: **the bearer grants runs with
 `--permission-mode bypassPermissions` as the lead agent**, so whoever holds it can
-have an agent read and write the workspace and run commands without any prompt. The
-token is the REST write token, not a gateway-specific one: it also authorizes every
-other REST and MCP write the console exposes (dispatch, kanban and other state
-writes). Treat it like a shell on the host, and never put it in a client that is
-reachable from another machine. The OpenAI `tools` field is refused because the
-agent brings its own.
+have an agent read and write the workspace and run commands without any prompt.
+Treat it like a shell on the host, and never put it in a client that is reachable
+from another machine. The OpenAI `tools` field is refused because the agent brings
+its own.
 
 ```
-TOKEN=$(cat ~/.yakos-state/rest-write-token)
+TOKEN=$(cat ~/.yakos-state/openai-endpoint-token)
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:7898/v1/models
 ```
+
+### Rotate the token
+
+```
+yakos serve --rotate-openai-token
+```
+
+This writes a new token to the same file, prints the file path (not the token) and
+exits. A running endpoint reads the file on every request, so the old token is
+rejected from that moment with no restart. Update each client with the new value.
+Deleting the file also locks every client out until the next start mints a new one.
 
 The `Host` header must be `127.0.0.1`, `localhost` or `[::1]` with port 7898, and a
 request with an `Origin` header must carry this server's own loopback origin
@@ -127,17 +143,19 @@ An error after a stream has started is an `error` frame followed by `[DONE]`.
 ## Open WebUI
 
 Admin settings, Connections, OpenAI API: URL `http://127.0.0.1:7898/v1`, key = the
-write token. Open WebUI's backend makes the calls, so Host and Origin checks pass.
+endpoint token (`cat ~/.yakos-state/openai-endpoint-token`). Open WebUI's backend makes the calls, so Host and Origin checks pass.
 This setup has not been verified against a live Open WebUI.
 
-Anyone who can log in to Open WebUI can spend that token's power, so keep Open WebUI
+Open WebUI stores the token in its database. Anyone who can log in to Open WebUI can
+spend that token's power, so keep Open WebUI
 itself on loopback:
 
 - Docker: publish only on loopback, `-p 127.0.0.1:8080:8080`. Do not use host
   networking and do not publish on `0.0.0.0`. Inside a container `127.0.0.1` is the
   container, not the host, so the loopback-only endpoint is not reachable from a
-  default Docker network; use the pip install instead, or a deliberate loopback
-  forward you control.
+  default Docker network; use the pip install instead, or a deliberate forward you
+  control that listens on 127.0.0.1 only. A forwarder that binds a Docker bridge or
+  LAN address re-exposes the endpoint.
 - pip: `open-webui serve --host 127.0.0.1`.
 - Create the admin account first, then set `ENABLE_SIGNUP=false` and restart, so no
   one else can register.

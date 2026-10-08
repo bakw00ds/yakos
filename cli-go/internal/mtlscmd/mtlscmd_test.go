@@ -279,6 +279,20 @@ func TestValidateClientName(t *testing.T) {
 	}
 }
 
+// TestValidateClientName_RejectsOpenAICompatOwner: the OpenAI-compatible
+// endpoint's owner label cannot be a certificate name (K-174).
+func TestValidateClientName_RejectsOpenAICompatOwner(t *testing.T) {
+	t.Parallel()
+	for _, n := range []string{"openai-compat", "OpenAI-Compat"} {
+		if err := mtlscmd.ValidateClientName(n); err == nil {
+			t.Errorf("ValidateClientName(%q): expected error", n)
+		}
+	}
+	if err := mtlscmd.ValidateClientName("openai-compat2"); err != nil {
+		t.Errorf("ValidateClientName(openai-compat2): %v", err)
+	}
+}
+
 // TestValidateClientName_ReservedPrefixes verifies that cert CNs beginning with
 // "op-" or "lbop-" (case-insensitive) are rejected.  These prefixes are
 // reserved for the console's loopback owner-identity tokens; allowing a real
