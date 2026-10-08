@@ -178,18 +178,36 @@ func writeAtomic(dir, path string, data []byte) error {
 	return nil
 }
 
+// openLockFile creates the lock file exclusively. A variable so a test can model
+// the transient refusals a platform gives while a removed lock is going away.
+var openLockFile = func(lock string) (*os.File, error) {
+	return os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // state dir, checked above
+}
+
 // lockEdit takes the sibling lock file with O_EXCL, waiting up to editLockWait
 // and breaking a lock older than editLockStale (its holder died).
 func lockEdit(lock string) (func(), error) {
 	deadline := time.Now().Add(editLockWait)
 	for {
-		f, err := os.OpenFile(lock, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) //nolint:gosec // state dir, checked above
+		f, err := openLockFile(lock)
 		if err == nil {
 			_ = f.Close()
 			return func() { _ = os.Remove(lock) }, nil
 		}
-		if !errors.Is(err, fs.ErrExist) {
+		// On Windows a lock its holder has just removed stays in the directory,
+		// delete-pending, until the last handle closes, and creating the name in
+		// that window fails with access denied or a sharing violation, not "exists".
+		// That is the holder letting go, so it waits like contention does; only a
+		// refusal that outlasts the wait is reported as a failure.
+		if !errors.Is(err, fs.ErrExist) && !lockReleasePending(err) {
 			return nil, errors.New("statepath: cannot take the edit lock")
+		}
+		if !errors.Is(err, fs.ErrExist) {
+			if time.Now().After(deadline) {
+				return nil, errors.New("statepath: cannot take the edit lock")
+			}
+			time.Sleep(5 * time.Millisecond)
+			continue
 		}
 		if fi, serr := os.Lstat(lock); serr == nil && (time.Since(fi.ModTime()) > editLockStale || fi.Mode()&os.ModeSymlink != 0) {
 			breakStale(lock)

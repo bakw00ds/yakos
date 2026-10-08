@@ -11,7 +11,6 @@ package consoleui_test
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -320,24 +319,7 @@ func TestResumePane_AtAHardStopIsRefusedBeforeTheHarnessRuns(t *testing.T) {
 // ledger writes land before the test's TempDir is removed (K-130 cleanup race).
 func (f resumeFixture) closeAndSettle(conv string) {
 	f.mgr.Close(conv)
-	last, stable := "", 0
-	for i := 0; i < 100 && stable < 4; i++ {
-		var sig strings.Builder
-		_ = filepath.WalkDir(f.workDir, func(p string, d os.DirEntry, err error) error {
-			if err == nil && !d.IsDir() {
-				if info, ierr := d.Info(); ierr == nil {
-					fmt.Fprintf(&sig, "%s:%d:%d;", p, info.Size(), info.ModTime().UnixNano())
-				}
-			}
-			return nil
-		})
-		if sig.String() == last {
-			stable++
-		} else {
-			last, stable = sig.String(), 0
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	settleDirs(f.workDir)
 }
 
 func TestResumePane_DispatchToAnotherEngineKindIs409(t *testing.T) {

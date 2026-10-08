@@ -16,6 +16,7 @@ import (
 	"strings"
 
 	"github.com/bakw00ds/yakos/internal/cliflag"
+	"github.com/bakw00ds/yakos/internal/decision"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/policywrite"
 	"github.com/bakw00ds/yakos/internal/router"
@@ -266,7 +267,7 @@ func explainRun(stdout, stderr io.Writer, env explainEnv, a explainArgs, cmd str
 		_, _ = fmt.Fprintf(stderr, "%s: %s\n", cmd, sanitizeForTerminal(msg))
 		return code
 	}
-	v := router.ExplainView{Agent: a.Agent, Decision: d}
+	v := router.ExplainView{Agent: a.Agent, Decision: d, JevShadow: jevShadowState(env, a.Project)}
 	if rt != "" {
 		v.Overrides = append(v.Overrides, "runtime")
 	}
@@ -288,6 +289,27 @@ func explainRun(stdout, stderr io.Writer, env explainEnv, a explainArgs, cmd str
 	}
 	router.WriteExplain(stdout, v)
 	return 0
+}
+
+// jevShadowState is "on" or "off": whether the K-177 Jev routing shadow would
+// send task text for a dispatch in project. It reads the same trusted policy and
+// project opt-outs the dispatcher does.
+func jevShadowState(env explainEnv, project string) string {
+	if project == "" && env.cwd != nil {
+		project, _ = env.cwd()
+	}
+	getenv := func(k string) string {
+		for _, kv := range env.environ() {
+			if strings.HasPrefix(kv, k+"=") {
+				return kv[len(k)+1:]
+			}
+		}
+		return ""
+	}
+	if decision.ResolveRoutingShadow(env.stateDir(), project, getenv).Enabled {
+		return "on"
+	}
+	return "off"
 }
 
 func routerpolicyKnowsClass(c string) bool {

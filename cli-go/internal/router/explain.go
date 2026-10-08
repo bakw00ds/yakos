@@ -36,6 +36,9 @@ type ExplainView struct {
 	// EnvClass and Env are set when the class is a Claude Code request class.
 	EnvClass string
 	Env      []EnvAlias
+	// JevShadow is "on" or "off": whether the K-177 Jev routing shadow would run
+	// for this project. Empty leaves it out (callers that do not know).
+	JevShadow string
 }
 
 func (v ExplainView) overrides() []string {
@@ -90,6 +93,9 @@ func WriteExplain(w io.Writer, v ExplainView) {
 	p("fallback_from: %s\n", dash(d.FallbackFrom))
 	p("route_class: %s\n", dash(d.RouteClass))
 	p("policy_sha: %s\n", dash(d.PolicySHA))
+	if v.JevShadow != "" {
+		p("jev_shadow: %s\n", v.JevShadow)
+	}
 	for _, s := range d.Skipped {
 		if s.Cooling {
 			p("skipped: %s (cooling)\n", s.Runtime)
@@ -134,6 +140,7 @@ type jsonExplain struct {
 	Skipped        []jsonSkip `json:"skipped"`
 	EnvClass       string     `json:"env_class,omitempty"`
 	Env            []EnvAlias `json:"env,omitempty"`
+	JevShadow      string     `json:"jev_shadow,omitempty"`
 }
 
 // ExplainJSON returns the JSON form, one object and a newline. Every array is
@@ -144,7 +151,7 @@ func ExplainJSON(v ExplainView) ([]byte, error) {
 		Agent: v.Agent, Runtime: d.Runtime, Model: d.ModelID, Provider: d.Provider,
 		Rule: v.rule(), Overrides: v.overrides(), Chain: append([]string{}, d.Chain...),
 		Reason: d.Reason, FallbackFrom: d.FallbackFrom, RouteClass: d.RouteClass,
-		PolicySHA: d.PolicySHA, Skipped: []jsonSkip{}, EnvClass: v.EnvClass, Env: v.Env,
+		PolicySHA: d.PolicySHA, Skipped: []jsonSkip{}, EnvClass: v.EnvClass, Env: v.Env, JevShadow: v.JevShadow,
 	}
 	if len(v.Overrides) > 0 {
 		j.UnderlyingRule = d.RuleID
