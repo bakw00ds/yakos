@@ -44,20 +44,42 @@ func TestK173Fix2_WholeAuthorizationValueAndCookieShapes(t *testing.T) {
 	}
 }
 
-// 1 MiB of header-like text redacts in linear time.
+// The scan is linear in the input. Absolute budgets are not portable (a
+// -race build on a loaded runner is 20x slower than a plain one), so the test
+// compares shapes: for each pathological input, quadrupling the size must cost
+// at most 8x (a quadratic scan costs 16x), and the input must cost no more than
+// a few times what the same size of plain text costs.
 func TestK173Fix2_RedactionStaysLinear(t *testing.T) {
+	scan := func(unit string, size int) time.Duration {
+		text := strings.Repeat(unit, size/len(unit)+1)[:size]
+		best := time.Duration(1<<62 - 1)
+		for i := 0; i < 2; i++ {
+			start := time.Now()
+			consoleui.ScanSecretsForTest(text)
+			if d := time.Since(start); d < best {
+				best = d
+			}
+		}
+		return best
+	}
+	const small, big = 32 << 10, 128 << 10
+	base := scan("a", big)
 	for _, unit := range []string{
-		"Authorization: " + strings.Repeat("a", 64) + "\n",
-		strings.Repeat("authorization:[", 8) + "\n",
+		"curl -b ",
+		"-b ",
 		"curl " + strings.Repeat("-b ", 20) + "\n",
-		strings.Repeat("authorization=", 1000),
-		strings.Repeat("_", 4096),
+		"Authorization: ",
+		"authorization=",
+		"&sig=",
+		"HTTP_COOKIE=",
+		"_",
 	} {
-		text := strings.Repeat(unit, (1<<20)/len(unit)+1)[:1<<20]
-		start := time.Now()
-		consoleui.ScanSecretsForTest(text)
-		if d := time.Since(start); d > 20*time.Second {
-			t.Errorf("%.30q...: 1 MiB took %v", unit, d)
+		lo, hi := scan(unit, small), scan(unit, big)
+		if hi > 8*lo+100*time.Millisecond {
+			t.Errorf("%.20q: 4x the input cost %v -> %v, not linear", unit, lo, hi)
+		}
+		if hi > 6*base+200*time.Millisecond {
+			t.Errorf("%.20q: %v for %d bytes, plain text costs %v", unit, hi, big, base)
 		}
 	}
 }
