@@ -617,3 +617,45 @@ func TestUnreadableShellCommandRefusedUnderPolicy(t *testing.T) {
 		}
 	}
 }
+
+// A tool_input workdir (agy Cwd, codex workdir) must not hide an untracked cd,
+// a function, an alias or a reassigned variable.
+func TestShellBypassesWithAWorkdir(t *testing.T) {
+	const policy = `{"backend":{"allow":["**"],"deny":[".claude/**",".env"]}}`
+	cases := []struct {
+		cmd  string
+		deny bool
+	}{
+		{"pushd .claude; echo x > path-allowlist.json", true},
+		{"eval 'cd .claude'; echo x > path-allowlist.json", true},
+		{"if true; then cd .claude; fi; echo x > path-allowlist.json", true},
+		{"env -C .claude tee path-allowlist.json", true},
+		{"cd nosuch; echo x > .claude/path-allowlist.json", true},
+		{"f() { cd .claude; }; f; echo x > path-allowlist.json", true},
+		{"function f { cd .claude; }; f; echo x > path-allowlist.json", true},
+		{"alias c='cd .claude'; c; echo x > path-allowlist.json", true},
+		{"trap 'cd .claude' DEBUG; echo x > path-allowlist.json", true},
+		{"source /dev/stdin <<< 'cd .claude'; echo x > path-allowlist.json", true},
+		{"F=a; for i in 1 2; do echo x > $F; F=.env; done", true},
+		{"F=; : ${F:=.env}; echo x > $F", true},
+		{"cd .claude && echo x > path-allowlist.json", true},
+		{"echo x > src/a.go", false},
+		{"cd src && echo x > a.go", false},
+		{"F=src/a.go; echo x > $F", false},
+	}
+	for _, withDir := range []bool{false, true} {
+		for _, c := range cases {
+			d := shellDeps(t, "backend", policy)
+			cfg, _ := d.Resolve("")
+			ti := map[string]any{"command": c.cmd}
+			if withDir {
+				ti["workdir"] = cfg.ProjectDir
+			}
+			b, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": ti})
+			r := Run(context.Background(), "codex", "path-allowlist", b, d)
+			if denied(r) != c.deny {
+				t.Errorf("workdir=%v %q: denied=%v, want %v", withDir, c.cmd, denied(r), c.deny)
+			}
+		}
+	}
+}

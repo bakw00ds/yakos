@@ -73,6 +73,29 @@ const (
 	maxRawPath           = 200
 )
 
+// reNoVars finds constructs that assign or alias variables in ways the
+// pre-scan cannot count: arithmetic commands, let, namerefs.
+var reNoVars = regexp.MustCompile(`\(\(|(^|[^A-Za-z0-9_])let\s|(declare|typeset|local)\s+-[A-Za-z]*n`)
+
+// assignCount counts the places in the whole command that may assign name,
+// over-approximately: NAME=, NAME+=, NAME[i]=, ${NAME:=...}, ${NAME=...} and
+// the loop/read-style commands that name it. A variable is trusted only when
+// it is assigned exactly once.
+func (a *shAnalyzer) assignCount(name string) int {
+	q := regexp.QuoteMeta(name)
+	n := 0
+	for _, pat := range []string{
+		`(?:^|[^A-Za-z0-9_])` + q + `(?:\[[^\]]*\])?\+?=`,
+		`\$\{` + q + `(?::?=)`,
+		`\b(?:for|select)\s+` + q + `\b`,
+		`\b(?:read|mapfile|readarray|getopts|unset)\b[^;&|\n]*?\b` + q + `\b`,
+		`printf\s+-v\s+` + q + `\b`,
+	} {
+		n += len(regexp.MustCompile(pat).FindAllStringIndex(a.src, 8))
+	}
+	return n
+}
+
 // shellDecodeFault is a test seam: it lets a test prove that a decoder panic is
 // reported as a dynamic write.
 var shellDecodeFault func()
@@ -90,7 +113,13 @@ func DecodeShellWrites(cmd, startDir string) (out []ShellWrite) {
 	if shellDecodeFault != nil {
 		shellDecodeFault()
 	}
-	a := &shAnalyzer{seen: map[string]bool{}, vars: map[string]shVar{}, cwd: cleanDir(startDir)}
+	a := &shAnalyzer{seen: map[string]bool{}, vars: map[string]shVar{}, cwd: cleanDir(startDir), src: cmd}
+	if strings.Contains(cmd, "CDPATH") {
+		a.tainted = true // cd may land anywhere
+	}
+	if reNoVars.MatchString(cmd) {
+		a.noVars = true
+	}
 	if len(cmd) > MaxShellCommandBytes {
 		a.add(ShellWrite{Path: "<command too long to analyse>", Dynamic: true})
 		return a.out
@@ -122,6 +151,14 @@ type shAnalyzer struct {
 	evalDepth  int  // inside eval: its effects reach the caller's shell
 	noVars     bool // arithmetic or let: no variable is trusted any more
 	wrapShift  bool // the current command runs in a directory env -C / sudo -D chose
+	sawXargs   bool // the current command is run by xargs: its file operands come from stdin
+
+	// tainted is set once the command defines a function, alias or trap, or
+	// sources a script: any command word may then run code the decoder cannot
+	// see, so relative targets are dynamic and no variable is trusted. It is
+	// never restored by a subshell boundary.
+	tainted bool
+	src     string // the whole command, for the assignment pre-scan
 }
 
 func cleanDir(d string) string {
@@ -842,11 +879,14 @@ func (a *shAnalyzer) script(src string, depth int) {
 		}
 	}
 	prevOpen := false
-	for _, t := range toks {
+	for ti, t := range toks {
 		if t.kind == tokOp {
 			flush()
 			switch t.op {
 			case "(":
+				if ti > 0 && toks[ti-1].kind == tokWord && ti+1 < len(toks) && toks[ti+1].kind == tokOp && toks[ti+1].op == ")" {
+					a.tainted = true // "name ( )": a function definition
+				}
 				a.boundary()
 				if prevOpen {
 					a.noVars = true // "((": an arithmetic command assigns
@@ -915,7 +955,7 @@ func (a *shAnalyzer) resolve(w *shWord) resolved {
 			}
 		case partVar:
 			raw.WriteString("$" + p.text)
-			if v, ok := a.vars[p.text]; ok && v.ok && !a.noVars {
+			if v, ok := a.vars[p.text]; ok && v.ok && !a.noVars && !a.tainted {
 				val.WriteString(v.val)
 			} else {
 				r.dyn = true
@@ -1008,6 +1048,14 @@ func (a *shAnalyzer) command(toks []shTok, depth int) {
 		}
 	}
 	a.chainAnd, a.chainFirst = chainAnd, chainFirst
+	for _, w := range words {
+		// "f()" glued: the lexer keeps "()" as a dynamic part of the word
+		for _, p := range w.w.parts {
+			if p.kind == partDyn && p.text == "()" {
+				a.tainted = true
+			}
+		}
+	}
 	a.simple(words, heredocs, herestr, depth)
 }
 
@@ -1087,12 +1135,16 @@ func (a *shAnalyzer) addPath(p string) {
 	if strings.HasPrefix(p, "/dev/fd/") {
 		return
 	}
-	if !strings.HasPrefix(p, "/") && a.cwd != "" {
-		p = a.cwd + "/" + p
-	}
-	if !strings.HasPrefix(p, "/") && a.cwdDyn {
-		a.add(ShellWrite{Path: p, Dynamic: true})
-		return
+	if !strings.HasPrefix(p, "/") {
+		// Decide "unknown directory" BEFORE joining a known start directory: an
+		// absolute workdir must not hide an untracked cd.
+		if a.cwdDyn || a.tainted {
+			a.add(ShellWrite{Path: p, Dynamic: true})
+			return
+		}
+		if a.cwd != "" {
+			p = a.cwd + "/" + p
+		}
 	}
 	a.add(ShellWrite{Path: p})
 }
@@ -1166,7 +1218,14 @@ var wrapperArgs = map[string]string{
 	"exec":       "a",
 	"setsid":     "",
 	"caffeinate": "t w",
+	"busybox":    "",
 }
+
+// xargsWriters are commands whose file operands, run under xargs, come from
+// stdin and cannot be known.
+var xargsWriters = map[string]bool{"tee": true, "cp": true, "mv": true, "rm": true, "touch": true, "truncate": true,
+	"sed": true, "install": true, "ln": true, "sponge": true, "shred": true, "unlink": true, "dd": true,
+	"gofmt": true, "goimports": true, "prettier": true, "perl": true, "yq": true}
 
 var shells = map[string]bool{"fish": true, "sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "mksh": true}
 
@@ -1239,7 +1298,7 @@ func (a *shAnalyzer) assign(w *shWord) {
 	}
 	r := a.resolve(rest)
 	_, seen := a.vars[name]
-	if r.dyn || seen || !a.chainFirst || a.lead || a.evalDepth > 0 {
+	if r.dyn || r.val == "" || seen || !a.chainFirst || a.lead || a.evalDepth > 0 || a.tainted || a.assignCount(name) != 1 {
 		a.vars[name] = shVar{ok: false}
 		return
 	}
@@ -1272,6 +1331,9 @@ func (a *shAnalyzer) stripWrappers(words []shArg) []shArg {
 			consume[f] = true
 		}
 		words = words[1:]
+		if name == "xargs" {
+			a.sawXargs = true
+		}
 		for len(words) > 0 {
 			x := words[0]
 			if x.dyn {
@@ -1326,8 +1388,11 @@ func looksDuration(s string) bool {
 }
 
 func (a *shAnalyzer) dispatch(words []shArg, heredocs []*shHeredoc, herestr []string, depth int) {
-	a.wrapShift = false
+	a.wrapShift, a.sawXargs = false, false
 	words = a.stripWrappers(words)
+	if a.sawXargs && len(words) > 0 && !words[0].dyn && xargsWriters[baseName(words[0].val)] {
+		a.add(ShellWrite{Path: "<file names supplied on stdin to xargs " + baseName(words[0].val) + ">", Dynamic: true})
+	}
 	if a.wrapShift {
 		// env -C / sudo -D: the command runs in a directory we cannot track.
 		saved := a.cwdDyn
@@ -1344,6 +1409,19 @@ func (a *shAnalyzer) dispatch(words []shArg, heredocs []*shHeredoc, herestr []st
 	name := baseName(words[0].val)
 	args := words[1:]
 	switch {
+	case name == "function" || name == "trap" || name == "source" || name == ".":
+		a.tainted = true // code the decoder cannot follow now runs or is defined
+		if (name == "source" || name == ".") && len(args) > 0 && !args[0].dyn && args[0].val == "/dev/stdin" {
+			for _, hd := range heredocs {
+				a.evalBody(hd.body, depth)
+			}
+			for _, h := range herestr {
+				a.evalBody(h, depth)
+			}
+		}
+	case name == "alias":
+		a.tainted = true
+		a.add(ShellWrite{Path: "<alias defined: later command words may be writers>", Dynamic: true})
 	case name == "cd":
 		a.cd(args)
 	case name == "pushd" || name == "popd":
@@ -1440,7 +1518,7 @@ func (a *shAnalyzer) cd(args []shArg) {
 		}
 		ops = append(ops, x)
 	}
-	if len(ops) == 0 || !a.chainAnd || a.lead || a.evalDepth > 0 {
+	if len(ops) == 0 || !a.chainAnd || a.lead || a.evalDepth > 0 || a.tainted {
 		a.cwdDyn = true
 		return
 	}
@@ -1531,10 +1609,14 @@ func (a *shAnalyzer) evalArgs(args []shArg, depth int) {
 		}
 		parts = append(parts, x.val)
 	}
-	// eval runs in the caller's shell: its cd and assignments persist, so they
-	// are made dynamic (evalDepth) rather than saved and restored.
+	a.evalBody(strings.Join(parts, " "), depth)
+}
+
+// evalBody runs text in the caller's shell: its cd and assignments persist, so
+// they are made dynamic (evalDepth) rather than saved and restored.
+func (a *shAnalyzer) evalBody(text string, depth int) {
 	a.evalDepth++
-	a.script(strings.Join(parts, " "), depth+1)
+	a.script(text, depth+1)
 	a.evalDepth--
 	a.cwdDyn = a.cwdDyn || a.cdPending
 }
