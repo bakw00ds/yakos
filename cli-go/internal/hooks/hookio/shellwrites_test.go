@@ -141,7 +141,9 @@ func TestDecodeShellWritesLargeInputIsBounded(t *testing.T) {
 		n := MaxShellCommandBytes / len(unit)
 		_ = DecodeShellWrites(strings.Repeat(unit, n), "")
 	}
-	if d := time.Since(start); d > 5*time.Second {
+	// A generous bound: this only catches a hang or quadratic blow-up, and the
+	// race detector on a loaded host is several times slower.
+	if d := time.Since(start); d > 60*time.Second {
 		t.Errorf("decoding took %v", d)
 	}
 }
