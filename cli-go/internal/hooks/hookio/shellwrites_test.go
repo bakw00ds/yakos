@@ -7,6 +7,9 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 )
 
 type shellCase struct {
@@ -106,5 +109,90 @@ func TestDecodeShellWritesNeverPanics(t *testing.T) {
 			b.WriteByte(alpha[int(x>>24)%len(alpha)])
 		}
 		_ = DecodeShellWrites(b.String(), "")
+	}
+}
+
+func TestDecodeShellWritesComplexityCapIsReported(t *testing.T) {
+	cmd := strings.Repeat("a ", 25000) + "; echo x > .env"
+	if len(cmd) > MaxShellCommandBytes {
+		t.Fatal("test command is over the byte cap; it must hit the token cap")
+	}
+	got := DecodeShellWrites(cmd, "")
+	found := false
+	for _, w := range got {
+		if w.Dynamic && strings.Contains(w.Path, "too complex") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("token cap hit silently: %+v", got)
+	}
+}
+
+func TestDecodeShellWritesLargeInputIsBounded(t *testing.T) {
+	start := time.Now()
+	big := "echo x > a " + strings.Repeat("y", 1<<20)
+	got := DecodeShellWrites(big, "")
+	if len(got) != 1 || !got[0].Dynamic {
+		t.Errorf("1 MiB command: %+v", got)
+	}
+	// the largest command that is analysed, in several hostile shapes
+	for _, unit := range []string{"$(", "'", "\"", "<<E\n", "a|", "`", "$'\\x", "[[ "} {
+		n := MaxShellCommandBytes / len(unit)
+		_ = DecodeShellWrites(strings.Repeat(unit, n), "")
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Errorf("decoding took %v", d)
+	}
+}
+
+func TestDecodeShellWritesRecoversFromAPanic(t *testing.T) {
+	shellDecodeFault = func() { panic("boom") }
+	defer func() { shellDecodeFault = nil }()
+	got := DecodeShellWrites("echo x", "")
+	if len(got) != 1 || !got[0].Dynamic || !strings.Contains(got[0].Path, "decoder failed") {
+		t.Errorf("panic became %+v", got)
+	}
+}
+
+func TestShellWriteInputsUnreadableCommandIsDynamic(t *testing.T) {
+	mk := func(cmd any) []hooktype.HookInput {
+		return []hooktype.HookInput{{Event: "PreToolUse", Tool: "Bash", Payload: map[string]any{"tool_input": map[string]any{"command": cmd}}}}
+	}
+	for name, cmd := range map[string]any{
+		"object":          map[string]any{"a": "echo x > f"},
+		"number":          7.0,
+		"bool":            true,
+		"argv non-string": []any{"tee", "f", 5.0},
+		"argv nested":     []any{"bash", []any{"-c"}},
+	} {
+		got := ShellWriteInputs(mk(cmd))
+		if len(got) != 1 || !strings.Contains(ToolFilePath(got[0]), "cannot be read") || got[0].Payload["tool_input"].(map[string]any)[ShellDynamicKey] != true {
+			t.Errorf("%s: %+v", name, got)
+		}
+	}
+	for name, cmd := range map[string]any{"empty": "", "nil": nil} {
+		if got := ShellWriteInputs(mk(cmd)); len(got) != 0 {
+			t.Errorf("%s: produced %+v", name, got)
+		}
+	}
+	// the command may arrive under codex's "cmd" or agy's "CommandLine" too
+	for _, key := range []string{"cmd", "CommandLine"} {
+		in := []hooktype.HookInput{{Event: "PreToolUse", Tool: "Bash", Payload: map[string]any{"tool_input": map[string]any{key: "echo x > f"}}}}
+		if got := ShellWriteInputs(in); len(got) != 1 || ToolFilePath(got[0]) != "f" {
+			t.Errorf("%s: %+v", key, got)
+		}
+	}
+}
+
+// agy's run_command reaches the shell decoder through DecodeShape.
+func TestAgyRunCommandIsAShellTool(t *testing.T) {
+	ins, err := DecodeShape(ShapeAgy, []byte(`{"workspacePaths":["/w"],"toolCall":{"name":"run_command","args":{"CommandLine":"echo x > .env"}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := ShellWriteInputs(ins)
+	if len(got) != 1 || ToolFilePath(got[0]) != ".env" || got[0].Tool != "Write" {
+		t.Errorf("agy run_command: %+v", got)
 	}
 }

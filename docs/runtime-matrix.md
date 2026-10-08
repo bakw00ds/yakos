@@ -243,10 +243,14 @@ sandbox.
 |---|---|
 | `>` `>>` `>\|` `&>` `<>` `N>` `>&file`; `cat <<EOF > f`; here-strings and here-documents fed to a shell or interpreter | a script or program that does the write: `python3 build.py`, `make`, `npm run x`, `sh script.sh`, `source f`, a binary |
 | `$(...)`, backticks, `<(...)`, anywhere in a word, recursively (depth 6, 64 KiB) | a command word built at run time (`$EDITOR f`) |
-| `tee`, `cp`, `mv` (source too), `install` (`-t`, `-d`), `ln`, `sed -i`, `perl -i`, `dd of=`, `curl -o`, `wget -O`, `find -exec <writer> {}`, `find -fprint` | `touch`, `truncate`, `chmod`, `rm`, `mkdir`; `tar -x`, `unzip`, `git checkout/apply/restore`, `patch`, `rsync`, `scp`, `curl -O`, `awk -i inplace` |
+| `tee`, `cp`, `mv` (source too), `install` (`-t`, `-d`), `ln`, `sed -i`, `perl -i`, `dd of=`, `sort -o`, `curl -o`, `wget -O`, `find -exec <writer> {}`, `find -fprint`; `awk` programs that redirect to a quoted file name or call `system("...")` | `touch`, `truncate`, `chmod`, `rm`, `mkdir`; `tar -x`, `unzip`, `git checkout/apply/restore`, `patch`, `rsync`, `scp`, `curl -O`, `awk -i inplace` |
 | `sh/bash/zsh -c`, `eval`, wrappers (`sudo`, `env`, `nohup`, `time`, `timeout`, `nice`, `command`, `exec`, `xargs`) and `VAR=x` prefixes | output files chosen by the tool, and anything where this lexer and the real shell disagree |
-| static `VAR=x`, `export`, `cd DIR` (and `( ... )` scoping), literal brace lists | a variable assigned from a command, a loop variable, an unset variable (reported dynamic, below) |
+| static `VAR=x`, `export`, `cd DIR` (and `( ... )` scoping), literal brace lists, `$'\x2e'`-style quoting (octal, `\x`, `\u`, `\U` and the usual escapes) | a variable assigned from a command, a loop variable, an unset variable, an unquoted glob (`> .en?`, `tee .en*`: the shell picks the file), an unknown ANSI-C escape, `$(( ))` arithmetic (all reported dynamic, below) |
 | literal-path write calls in `python -c`, `node -e`, `perl -e`, `ruby -e`, `php -r` and their here-documents, and literal shell strings passed to `os.system`, `subprocess`, `exec`, `system` | a path computed at run time inside the program (reported dynamic when the call is recognisable) |
+
+`[[ a > b ]]` and `$(( a > b ))` are comparisons, not redirections. `awk` redirections to anything but a quoted literal look like comparisons and are not caught. A command longer than 64 KiB, more than 20,000 tokens, nesting deeper than 6, more than 32 targets, a decoder fault, or a command field that is not a string (an object, a number, an argv array with a non-string element) is reported as dynamic, never as "no writes".
+
+Policy and hooks files: `.claude/path-allowlist.json` and `.agents/hooks.json` are ordinary project paths. An allow-list that covers them (`**`) lets a shell redirect rewrite them, exactly as a Write tool call could; list them in `deny` (`.claude/**`, `.agents/**`) to stop it. The codex profile `hooks.json` is outside the project and is refused as an absolute path.
 
 A target that is recognised as a write but cannot be resolved (`> $OUT`,
 `> $(mktemp)`, `> ~/x`, `echo ... \| sh`, `bash -c "$CMD"`) is dynamic:

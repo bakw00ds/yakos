@@ -563,3 +563,49 @@ func TestShellWriteFromSubdirectoryCwd(t *testing.T) {
 		t.Errorf("redirect from the project root blocked: %+v", r)
 	}
 }
+
+// Probe (K-170 b): the policy file and the agy hooks file are ordinary project
+// paths. An allow-list that covers them lets a shell redirect rewrite them, as
+// the Write tool could; listing them in deny stops it. The codex profile
+// hooks.json lives outside the project and is refused as absolute.
+func TestShellWritesToPolicyAndHooksFiles(t *testing.T) {
+	targets := []string{".claude/path-allowlist.json", ".agents/hooks.json"}
+	for _, tc := range []struct {
+		name, policy string
+		deny         bool
+	}{
+		{"allow everything", `{"backend":{"allow":["**"]}}`, false},
+		{"allow src only", `{"backend":{"allow":["src/**"]}}`, true},
+		{"deny listed", `{"backend":{"allow":["**"],"deny":[".claude/**",".agents/**"]}}`, true},
+	} {
+		for _, tgt := range targets {
+			d := shellDeps(t, "backend", tc.policy)
+			r := Run(context.Background(), "codex", "path-allowlist", shellEnvelope("codex", "echo '{}' > "+tgt, nil), d)
+			if denied(r) != tc.deny {
+				t.Errorf("%s: write to %s denied=%v, want %v", tc.name, tgt, denied(r), tc.deny)
+			}
+		}
+	}
+	d := shellDeps(t, "backend", `{"backend":{"allow":["**"]}}`)
+	r := Run(context.Background(), "codex", "path-allowlist", shellEnvelope("codex", "echo '{}' > /home/u/.yakos-state/codex-home/hooks.json", nil), d)
+	if !denied(r) {
+		t.Errorf("absolute hooks.json outside the project allowed: %+v", r)
+	}
+}
+
+// A command field the decoder cannot read is refused under a policy.
+func TestUnreadableShellCommandRefusedUnderPolicy(t *testing.T) {
+	d := shellDeps(t, "backend", `{"backend":{"deny":[".env"]}}`)
+	for name, cmd := range map[string]any{"object": map[string]any{"x": 1}, "number": 5, "argv with a number": []any{"tee", ".env", 1}} {
+		b, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": map[string]any{"command": cmd}})
+		if r := Run(context.Background(), "codex", "path-allowlist", b, d); !denied(r) {
+			t.Errorf("%s: not refused: %+v", name, r)
+		}
+	}
+	// and a glob target is, too
+	for _, c := range []string{"echo K=1 > .en?", "tee .en*", "echo x > $'\\x2e\\x65\\x6e\\x76'"} {
+		if r := Run(context.Background(), "codex", "path-allowlist", shellEnvelope("codex", c, nil), d); !denied(r) {
+			t.Errorf("%q not refused: %+v", c, r)
+		}
+	}
+}

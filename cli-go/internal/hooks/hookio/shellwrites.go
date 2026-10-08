@@ -73,10 +73,23 @@ const (
 	maxRawPath           = 200
 )
 
+// shellDecodeFault is a test seam: it lets a test prove that a decoder panic is
+// reported as a dynamic write.
+var shellDecodeFault func()
+
 // DecodeShellWrites returns the files cmd is decoded as writing. startDir is
 // the command's working directory when it is known and absolute ("" = the
 // project root, the harness's cwd).
-func DecodeShellWrites(cmd, startDir string) []ShellWrite {
+func DecodeShellWrites(cmd, startDir string) (out []ShellWrite) {
+	defer func() {
+		if recover() != nil {
+			// A decoder bug must never become "no writes".
+			out = []ShellWrite{{Path: "<shell decoder failed on this command>", Dynamic: true}}
+		}
+	}()
+	if shellDecodeFault != nil {
+		shellDecodeFault()
+	}
 	a := &shAnalyzer{seen: map[string]bool{}, vars: map[string]shVar{}, cwd: cleanDir(startDir)}
 	if len(cmd) > MaxShellCommandBytes {
 		a.add(ShellWrite{Path: "<command too long to analyse>", Dynamic: true})
@@ -188,6 +201,7 @@ type shTok struct {
 }
 
 type shLexer struct {
+	inTest  bool // inside [[ ... ]]: < and > compare, they do not redirect
 	s       string
 	i       int
 	toks    []shTok
@@ -198,6 +212,11 @@ type shLexer struct {
 func (a *shAnalyzer) lex(src string) []shTok {
 	l := &shLexer{s: src, steps: &a.tokens}
 	l.run()
+	if l.i < len(src) {
+		// The step cap stopped the lexer: the rest is unread, so it could hold a
+		// write. Say so instead of silently allowing it.
+		a.add(ShellWrite{Path: "<command too complex to analyse>", Dynamic: true})
+	}
 	return l.toks
 }
 
@@ -267,6 +286,9 @@ func (l *shLexer) run() {
 			l.i++
 		case (c == '<' || c == '>') && l.i+1 < len(s) && s[l.i+1] == '(':
 			l.readWord()
+		case (c == '<' || c == '>') && l.inTest:
+			l.toks = append(l.toks, shTok{kind: tokWord, word: &shWord{parts: []shPart{{kind: partLit, text: string(c), quoted: true}}}})
+			l.i++
 		case c == '>' || c == '<':
 			l.readRedir()
 		default:
@@ -352,6 +374,16 @@ func (l *shLexer) readHeredocBodies() {
 
 func (l *shLexer) readWord() {
 	if w := l.scanWord(); w != nil {
+		if len(w.parts) == 1 && w.parts[0].kind == partLit && !w.parts[0].quoted {
+			switch w.parts[0].text {
+			case "[[":
+				if n := len(l.toks); n == 0 || l.toks[n-1].kind == tokOp {
+					l.inTest = true
+				}
+			case "]]":
+				l.inTest = false
+			}
+		}
 		l.toks = append(l.toks, shTok{kind: tokWord, word: w})
 	}
 }
@@ -504,7 +536,12 @@ func (l *shLexer) scanDollar(w *shWord, lit func(string, bool), quoted bool) {
 	switch {
 	case n == '(':
 		body, k := balanced(s[l.i+2:], '(', ')')
-		w.parts = append(w.parts, shPart{kind: partSub, text: body, quoted: quoted})
+		if strings.HasPrefix(body, "(") && strings.HasSuffix(body, ")") {
+			// $(( ... )) is arithmetic, not a command: its > and < compare.
+			w.parts = append(w.parts, shPart{kind: partDyn, text: "$(" + body + ")", quoted: quoted})
+		} else {
+			w.parts = append(w.parts, shPart{kind: partSub, text: body, quoted: quoted})
+		}
 		l.i += 2 + k
 	case n == '{':
 		body, k := balanced(s[l.i+2:], '{', '}')
@@ -516,31 +553,18 @@ func (l *shLexer) scanDollar(w *shWord, lit func(string, bool), quoted bool) {
 		l.i += 2 + k
 	case n == '\'' && !quoted:
 		end := l.i + 2
-		var b strings.Builder
 		for end < len(s) && s[end] != '\'' {
 			if s[end] == '\\' && end+1 < len(s) {
 				end++
-				switch s[end] {
-				case 'n':
-					b.WriteByte('\n')
-				case 't':
-					b.WriteByte('\t')
-				case 'x':
-					if end+2 < len(s) {
-						if v, ok := hexByte(s[end+1 : end+3]); ok {
-							b.WriteByte(v)
-							end += 2
-						}
-					}
-				default:
-					b.WriteByte(s[end])
-				}
-			} else {
-				b.WriteByte(s[end])
 			}
 			end++
 		}
-		lit(b.String(), true)
+		raw := s[l.i+2 : min(end, len(s))]
+		if v, ok := ansiC(raw); ok {
+			lit(v, true)
+		} else {
+			w.parts = append(w.parts, shPart{kind: partDyn, text: "$'" + raw + "'", quoted: true})
+		}
 		l.i = end + 1
 	case isNameStart(n):
 		j := l.i + 1
@@ -556,6 +580,86 @@ func (l *shLexer) scanDollar(w *shWord, lit func(string, bool), quoted bool) {
 		lit("$", quoted)
 		l.i++
 	}
+}
+
+// ansiC decodes the body of $'...'. An escape it does not decode exactly makes
+// the whole word dynamic (ok false): a wrong static path would be worse than an
+// unknown one.
+func ansiC(raw string) (string, bool) {
+	var b strings.Builder
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if c != '\\' {
+			b.WriteByte(c)
+			continue
+		}
+		i++
+		if i >= len(raw) {
+			return "", false
+		}
+		switch e := raw[i]; e {
+		case 'a':
+			b.WriteByte(7)
+		case 'b':
+			b.WriteByte(8)
+		case 'e', 'E':
+			b.WriteByte(27)
+		case 'f':
+			b.WriteByte(12)
+		case 'n':
+			b.WriteByte('\n')
+		case 'r':
+			b.WriteByte('\r')
+		case 't':
+			b.WriteByte('\t')
+		case 'v':
+			b.WriteByte(11)
+		case '\\', '\'', '"', '?':
+			b.WriteByte(e)
+		case 'x':
+			n := 0
+			for n < 2 && i+1+n < len(raw) && isHex(raw[i+1+n]) {
+				n++
+			}
+			if n == 0 {
+				return "", false
+			}
+			v, _ := hexByte(raw[i+1 : i+1+n])
+			b.WriteByte(v)
+			i += n
+		case '0', '1', '2', '3', '4', '5', '6', '7':
+			v, n := 0, 0
+			for n < 3 && i+n < len(raw) && raw[i+n] >= '0' && raw[i+n] <= '7' {
+				v = v*8 + int(raw[i+n]-'0')
+				n++
+			}
+			b.WriteByte(byte(v))
+			i += n - 1
+		case 'u', 'U':
+			max := 4
+			if e == 'U' {
+				max = 8
+			}
+			n, r := 0, rune(0)
+			for n < max && i+1+n < len(raw) && isHex(raw[i+1+n]) {
+				v, _ := hexByte("0" + raw[i+1+n:i+2+n])
+				r = r<<4 | rune(v)
+				n++
+			}
+			if n == 0 || r > 0x10FFFF {
+				return "", false
+			}
+			b.WriteRune(r)
+			i += n
+		default:
+			return "", false // \cX and anything else
+		}
+	}
+	return b.String(), true
+}
+
+func isHex(c byte) bool {
+	return c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F'
 }
 
 func hexByte(s string) (byte, bool) {
@@ -718,6 +822,9 @@ func (a *shAnalyzer) resolve(w *shWord) resolved {
 			raw.WriteString(p.text)
 			if !p.quoted {
 				r.quoted = false
+				if strings.ContainsAny(p.text, "*?[") {
+					r.dyn = true // a glob: the shell picks the file(s), not us
+				}
 			}
 		case partVar:
 			raw.WriteString("$" + p.text)
@@ -1123,6 +1230,15 @@ func (a *shAnalyzer) dispatch(words []shArg, heredocs []*shHeredoc, herestr []st
 		a.optTarget(args, "O", "output-document")
 	case name == "find":
 		a.find(args, depth)
+	case name == "sort":
+		opts, _, _ := splitOpts(args, "o t k T S", "output field-separator key temporary-directory buffer-size")
+		for _, o := range opts {
+			if (o.name == "o" || o.name == "output") && o.has {
+				a.target(o.val)
+			}
+		}
+	case name == "awk" || name == "gawk" || name == "mawk" || name == "nawk":
+		a.awk(args, depth)
 	case interpreterKind(name) != "":
 		a.interpreter(name, args, heredocs, herestr, depth)
 	}
@@ -1493,11 +1609,18 @@ func ShellWriteInputs(ins []hooktype.HookInput) []hooktype.HookInput {
 			continue
 		}
 		ti := ToolInput(in)
-		cmd, dir := shellCommandOf(ti)
-		if cmd == "" {
+		cmd, dir, readable := shellCommandOf(ti)
+		var writes []ShellWrite
+		if !readable {
+			// A command field we cannot read is not "no command": refuse it
+			// under a policy rather than let it through.
+			writes = []ShellWrite{{Path: "<shell command in a form that cannot be read>", Dynamic: true}}
+		} else if cmd == "" {
 			continue
+		} else {
+			writes = DecodeShellWrites(cmd, dir)
 		}
-		for _, w := range DecodeShellWrites(cmd, dir) {
+		for _, w := range writes {
 			nti := map[string]any{"file_path": w.Path, "content": cmd}
 			if w.Dynamic {
 				nti[ShellDynamicKey] = true
@@ -1520,8 +1643,17 @@ func ShellWriteInputs(ins []hooktype.HookInput) []hooktype.HookInput {
 // shellCommandOf reads the command (a string, or an argv array rendered as a
 // quoted command line) and an absolute working directory from a shell tool's
 // tool_input.
-func shellCommandOf(ti map[string]any) (cmd, dir string) {
-	switch v := ti["command"].(type) {
+func shellCommandOf(ti map[string]any) (cmd, dir string, readable bool) {
+	var raw any
+	for _, k := range []string{"command", "cmd", "CommandLine"} {
+		if v, ok := ti[k]; ok && v != nil {
+			raw = v
+			break
+		}
+	}
+	switch v := raw.(type) {
+	case nil:
+		return "", "", true // no command field at all
 	case string:
 		cmd = v
 	case []any:
@@ -1529,11 +1661,13 @@ func shellCommandOf(ti map[string]any) (cmd, dir string) {
 		for _, e := range v {
 			s, ok := e.(string)
 			if !ok {
-				return "", ""
+				return "", "", false
 			}
 			parts = append(parts, "'"+strings.ReplaceAll(s, "'", `'\''`)+"'")
 		}
 		cmd = strings.Join(parts, " ")
+	default:
+		return "", "", false // an object, number or bool
 	}
 	for _, k := range []string{"workdir", "cwd", "Cwd", "working_directory"} {
 		if s, ok := ti[k].(string); ok && strings.HasPrefix(s, "/") {
@@ -1541,5 +1675,28 @@ func shellCommandOf(ti map[string]any) (cmd, dir string) {
 			break
 		}
 	}
-	return cmd, dir
+	return cmd, dir, true
+}
+
+var reAwkRedir = regexp.MustCompile(`>>?\s*("(?:\\.|[^"\\])*")`)
+var reAwkSystem = regexp.MustCompile(`\bsystem\s*\(`)
+
+// awk reads the program text for output redirections to a quoted file name
+// (print 1 > "f") and system("...") calls. A redirection to anything but a
+// quoted literal is indistinguishable from a comparison and is not caught.
+func (a *shAnalyzer) awk(args []shArg, depth int) {
+	opts, ops, _ := splitOpts(args, "F v f e i", "field-separator assign file source include")
+	if _, ok := hasOpt(opts, "f", "file"); ok || len(ops) == 0 {
+		return // the program is in a file
+	}
+	prog := ops[0]
+	if prog.dyn {
+		return
+	}
+	for _, m := range reAwkRedir.FindAllStringSubmatch(prog.val, 16) {
+		if v, ok := strLit(m[1]); ok {
+			a.addPath(v)
+		}
+	}
+	a.callsShell(prog.val, reAwkSystem, depth, false)
 }
