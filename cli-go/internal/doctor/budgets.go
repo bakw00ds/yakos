@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"github.com/bakw00ds/yakos/internal/budget"
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 // checkAgentBudgets lists agents whose budget, in tokens or in dollars, is at the
@@ -45,12 +46,21 @@ func (r *runner) checkAgentBudgets() {
 			rows = append(rows, row{st: st})
 		}
 	}
-	if len(rows) == 0 && perr == nil {
+	// A refused project file (a symlink, not a regular file, over the size cap,
+	// unreadable) is read as absent, so its agent_budgets: and its supervisor name are
+	// off. The operator would not otherwise learn that their limits are not applied. The
+	// line is fixed text keyed off a structured answer; it names no path and carries
+	// nothing from the file.
+	refused := budget.ProjectRefused(project)
+	if len(rows) == 0 && perr == nil && !refused {
 		return
 	}
 	writeln(r, "Agent budgets")
 	if perr != nil {
 		r.warn(SectionAgentBudgets, "%v", perr)
+	}
+	if refused {
+		r.warn(SectionAgentBudgets, ".yakos.yml was not read (a symlink, not a regular file, over %d bytes, or unreadable): its agent_budgets and supervisor name are ignored, so the built-in budgets apply", projfile.MaxBytes)
 	}
 	for _, x := range rows {
 		st := x.st

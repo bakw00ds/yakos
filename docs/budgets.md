@@ -256,6 +256,14 @@ applied, so a project can lower a limit or give an unlimited agent one, never an
 unbounded one. A project cannot change the window or the warning percentage. The
 user-level file is the only place to raise or disable a limit.
 
+The project file is read only if it is a regular file of at most 1 MiB. A symlink,
+a FIFO, a device or a larger file is refused with a warning (it names no path), and
+a refused file is treated as absent everywhere: the project contributes no limits
+and no supervisor name, and the supervisor keeps its own name and its built-in
+budget and ceiling. Both supervisor hook twins apply the same refusal before they
+read the name, so a refused file cannot rename the supervisor to an agent the budget
+does not know. `yakos doctor` says when the file was refused.
+
 A project can also name the agent its supervisor runs as:
 
 ```yaml
@@ -291,8 +299,10 @@ monthly one becomes $100 lifetime. For example, a project that names `backend`
 changes nothing for an operator who gave `backend` a limit of $5 (it stays $5 with a
 $5 stop), nothing for the librarian (it stays $40 and 13,000,000 tokens, with no
 doubled stop), and gives an agent that had no limit the supervisor's $100 and
-33,000,000 tokens with the supervisor's stop and its monthly window, even when a
-`default:` entry names a lifetime one. `yakos budget check`, `status`,
+33,000,000 tokens with the supervisor's stop and the supervisor's window. That is
+monthly for the built-in supervisor budget, and lifetime only if the operator's
+`supervisor:` entry says lifetime. A `default:` entry that names a lifetime window
+does not matter to such an agent, because it has no limit of its own to count. `yakos budget check`, `status`,
 `doctor` and `reset` all use the combined limit, and `check --json` prints it, so the
 two hooks, the console and `dispatch` agree. Both hooks read the name (the Go hook as
 YAML, the bash hook with a line scan), and every name either of them arrives at is

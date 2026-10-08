@@ -33,6 +33,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/decision"
 	"github.com/bakw00ds/yakos/internal/modelreg"
+	"github.com/bakw00ds/yakos/internal/projfile"
 	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
@@ -690,6 +691,7 @@ func tighterI(a, b int64) int64 {
 type projectConfig struct {
 	limits     map[string]float64 // agent_budgets:
 	warn       string             // set when the file could not be parsed
+	refused    bool               // the file exists but projfile refused it (treated as absent)
 	supervisor []string           // supervisor: agent: (see readProjectConfig)
 }
 
@@ -732,8 +734,9 @@ func (c *projectConfig) addSupervisor(name string) {
 	c.supervisor = append(c.supervisor, name)
 }
 
-// readProjectConfig reads <project>/.yakos.yml. A missing file or key yields the
-// zero config; a malformed file sets warn and no limits.
+// readProjectConfig reads <project>/.yakos.yml through projfile (a regular
+// file of at most projfile.MaxBytes, never a link). A missing file or key yields
+// the zero config; a malformed or refused file sets warn and no limits.
 //
 // The supervisor's agent name is a project setting: the supervisor hook launches
 // `yakos dispatch <name>` and its budget is keyed on that name, so a project that
@@ -748,8 +751,18 @@ func readProjectConfig(project string) projectConfig {
 	if project == "" {
 		return c
 	}
-	data, err := os.ReadFile(filepath.Join(project, ".yakos.yml")) //nolint:gosec
+	data, err := projfile.Read(project)
 	if err != nil {
+		if projfile.IsRefused(err) {
+			// A refused file is ABSENT everywhere (the hook twins refuse it too, through
+			// projfile and its bash counterpart), so the supervisor keeps the name
+			// "supervisor" and its built-in budget and ceiling: a refused file never
+			// turns a budget off.
+			c.refused = true
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			c.warn = projfile.Notice(err)
+		}
 		return c
 	}
 	var doc struct {
@@ -802,6 +815,12 @@ func scanSupervisorAgent(data []byte) string {
 	}
 	return ""
 }
+
+// ProjectRefused reports whether <project>/.yakos.yml exists and was refused (a
+// symlink, not a regular file, over projfile.MaxBytes, or unreadable). Such a file
+// is treated as absent: its limits and its supervisor name are off. It is a
+// structured answer, so a caller never decides from warning text.
+func ProjectRefused(project string) bool { return readProjectConfig(project).refused }
 
 // ProjectLimits reads the `agent_budgets:` map from <project>/.yakos.yml. A
 // missing file or key yields nil; a malformed one yields a warning string.

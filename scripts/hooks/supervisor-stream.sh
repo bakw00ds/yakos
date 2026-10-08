@@ -46,6 +46,23 @@ fi
 # keys. grep -A would match nested 'enabled: false' (e.g. pre_filter.enabled).
 project_dir="${CLAUDE_PROJECT_DIR:-$PWD}"
 yakos_yml="$project_dir/.yakos.yml"
+# K-164: a project file the budget package refuses (a symlink, anything that is not
+# a regular file, or one over 1 MiB) is treated as ABSENT here too. The supervisor's
+# agent name is read from this file below, and its budget is keyed on that name; a
+# name the budget cannot see would run the supervisor unbudgeted. The Go twin
+# (internal/projfile) applies the same refusal. The message names no path.
+_yakos_yml_refusal=""
+if [ -L "$yakos_yml" ]; then
+    _yakos_yml_refusal="is a symlink, which is not followed"
+elif [ -e "$yakos_yml" ] && [ ! -f "$yakos_yml" ]; then
+    _yakos_yml_refusal="is not a regular file"
+elif [ -f "$yakos_yml" ] && [ "$(wc -c <"$yakos_yml" 2>/dev/null | tr -d '[:space:]')" -gt 1048576 ] 2>/dev/null; then
+    _yakos_yml_refusal="is larger than 1048576 bytes"
+fi
+if [ -n "$_yakos_yml_refusal" ]; then
+    echo "supervisor-stream: .yakos.yml ignored: $_yakos_yml_refusal; its project settings are off" >&2
+    yakos_yml="/nonexistent/.yakos.yml"
+fi
 _supervisor_enabled() {
     # Extracts only the direct-child keys of supervisor: (those with exactly
     # 2-space indent). Returns "false" if enabled: false, "true" otherwise.

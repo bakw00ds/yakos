@@ -30,6 +30,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/bakw00ds/yakos/internal/projfile"
 	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
@@ -260,7 +261,7 @@ func DefaultConfig() Config {
 // "provider unavailable", never as "enabled").
 func LoadConfig(path string) (Config, error) {
 	cfg := DefaultConfig()
-	data, err := os.ReadFile(path) //nolint:gosec // operator-supplied config path
+	data, err := projfile.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return cfg, nil
