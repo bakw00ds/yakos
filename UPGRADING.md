@@ -6,7 +6,7 @@ current release, what survives, and how to fully uninstall when needed.
 This doc is the **upgrade authority** — `yakos --help`, README, and
 CHANGELOG point here. Last updated for v0.39.
 
-## Unreleased: the multi-harness router wave, in one place (K-139 to K-155)
+## v0.63.0.0: the multi-harness router wave, in one place (K-139 to K-155)
 
 Read this first; the sections below have the detail. Everything marked
 **behavior change** alters what runs after you upgrade; the rest is opt-in.
@@ -37,9 +37,10 @@ against, an agy that is not signed in, a policy file that is ignored and why, an
 `YAKOS_IMPL=bash` that skips the sandbox flags, and a hooks file that no longer
 points at an existing binary. Not built in this release, on purpose: local model
 providers (a documented slot only), routing Claude Code to non-Claude models, any
-OAuth proxying, and the Jev tier-suggestion shadow. Rationale: ADR-0010.
+OAuth proxying, and any Jev role beyond the opt-in routing shadow (built, default
+off, see "Upgrading to v0.63.0.0"). Rationale: ADR-0010.
 
-## Unreleased: the Anthropic gateway and `yakos start --routed` (K-151)
+## v0.63.0.0: the Anthropic gateway and `yakos start --routed` (K-151)
 
 New and optional; nothing changes until you turn it on. Every command in this
 section (`yakos serve --gateway`, `yakos start --routed`) needs `YAKOS_IMPL=go`.
@@ -69,7 +70,7 @@ section (`yakos serve --gateway`, `yakos start --routed`) needs `YAKOS_IMPL=go`.
 - Anything else that calls the gateway needs the token as
   `Authorization: Bearer <token>`; without it the reply is 401.
 
-## Unreleased: `yakos start` opens the yakOS REPL (K-154)
+## v0.63.0.0: `yakos start` opens the yakOS REPL (K-154)
 
 With `YAKOS_IMPL=go`, `yakos start` on a terminal now opens the yakOS REPL
 instead of exec-ing the vendor TUI. It talks to the console daemon (started for
@@ -93,7 +94,7 @@ project that started it, then retry. This is deliberate: the console token is
 never sent to a daemon that cannot prove, over its owner-only socket, that it
 serves this workspace and this build.
 
-## Unreleased: `yakos dispatch` is Go by default
+## v0.63.0.0: `yakos dispatch` is Go by default
 
 `yakos dispatch` now runs the Go dispatcher when `YAKOS_IMPL` is unset. Before,
 a checkout with the bash tree sent it to `cli/lib/dispatch.sh`. What changes on
@@ -112,7 +113,7 @@ The way back works on Linux and on macOS with GNU coreutils: `dispatch.sh` used
 to fail there with exit 127 (`timeout` cannot run a shell function), and now
 enforces its own deadline (K-169, below).
 
-## Unreleased: bash dispatch deadline, model ceiling and `promote` fixes (K-168, K-169)
+## v0.63.0.0: bash dispatch deadline, model ceiling and `promote` fixes (K-168, K-169)
 
 - **`dispatch.sh` enforces its deadline everywhere.** The adapter runs under a
   shell-native deadline (exit 124 on expiry), so it no longer depends on a
@@ -143,7 +144,7 @@ enforces its own deadline (K-169, below).
   file is refused before any write, and the path is checked again just before the
   rename. A promote or a rollback no longer turns a 0644 agent file into 0600.
 
-## Unreleased: model ceilings across runtimes, `--extends` (K-139c)
+## v0.63.0.0: model ceilings across runtimes, `--extends` (K-139c)
 
 - **Ceilinged codex agents are refused until you map codex aliases.** A
   `max_model` ceiling is a cost class that now governs every runtime. The registry
@@ -156,6 +157,45 @@ enforces its own deadline (K-169, below).
 - **`yakos agent --extends` no longer accepts a project agent**, and `yakos agent
   lint` errors on a project-local `extends:`. Only a bare id under the framework's
   `lib/agents` is read. Copy the template into the agent instead of extending it.
+
+## Upgrading to v0.63.0.0
+
+v0.63.0.0 is a minor release. A v0.62.0.0 binary upgrades in place with
+`yakos upgrade`. Then refresh every project once, so the hooks pick up the codex
+and agy write gates:
+
+```sh
+yakos refresh --project <path>      # or: yakos refresh --all
+```
+
+Four things to know before you turn anything on:
+
+- **Gateway credential model (ADR-0011, approved 2026-10-08).** The Anthropic
+  gateway is off by default; once on, it holds your `ANTHROPIC_API_KEY` and attaches
+  it upstream, clients authenticate with a gateway token re-minted on every gateway
+  start, and a daemon restart ends running `yakos start --routed` sessions with a 401.
+- **OpenAI-endpoint token (K-174), behavior change.** The endpoint on 7898 accepts
+  only the contents of `~/.yakos-state/openai-endpoint-token`, so a client that still
+  sends the REST write token gets 401 until you switch it; `yakos serve
+  --rotate-openai-token` rotates the token.
+- **Console model writes (K-175).** The Models & Providers tab stays read-only
+  unless the daemon runs with `yakos serve --console-model-writes`, which is off by
+  default.
+- **Jev routing shadow (K-177).** Off by default and enabled only by `routing_shadow:
+  true` in your user-level `decision-policy.yml`; when on, the agent name, the route
+  class and the first 2 KiB of the task (never a sensitive one) go off-host to
+  `*.typesafe.ai`, and the answer is recorded but never changes a route.
+
+Rolling back a binary install to v0.62.0.0:
+
+- Run the installer pinned to the old version. It also re-points the framework
+  links:
+  `curl -fsSL https://raw.githubusercontent.com/bakw00ds/yakos/main/scripts/install.sh | sh -s -- --version 0.62.0.0`
+- If a release has to be withdrawn, mark its GitHub release as a pre-release. The
+  `latest` release, which `yakos upgrade` and the installer follow, is then v0.62.0.0
+  again.
+- A v0.62.0.0 binary does not read `openai-endpoint-token` (it still expects the REST
+  write token) and does not know the console-writes flag.
 
 ## Upgrading to v0.62.0.0
 

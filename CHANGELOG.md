@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.63.0.0] — 2026-10-08
+
+Minor release: the multi-harness router program lands in full (K-139 to K-156).
+Routing rules, pins, fallbacks and a sensitive class run at the one dispatch
+chokepoint; codex and agy get stream parsers, hooks, resumed panes and a
+knowledge pack; new surfaces are routed console Chat, an OpenAI-compatible
+endpoint, an Anthropic gateway with `yakos start --routed`, Flows triggers with
+`yakos flows schedule enable|disable`, the Models & Providers tab with opt-in
+browser writes, and the REPL. Follow-ups K-163 to K-177 harden the bounded
+config reader, the codex and agy hooks and the endpoint and gateway tokens, and
+add the opt-in Jev routing shadow. Behavior changes are marked in UPGRADING.md.
+
 ### Added
 
 The multi-harness router program (K-139 to K-155) in one list; the behavior
