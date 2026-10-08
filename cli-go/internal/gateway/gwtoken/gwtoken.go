@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -28,7 +29,13 @@ const (
 	// MinLen is the shortest configured token a server will compare against. A
 	// shorter (or empty) value is a misconfiguration and matches nothing.
 	MinLen = 32
+	// MaxFileBytes caps how much of a token file is read. The file is consulted on
+	// every request, so it must not be a way to make the server read without end.
+	MaxFileBytes = 4096
 )
+
+// afterLstat is a test seam: it runs between the Lstat and the open.
+var afterLstat func()
 
 // ErrNoToken means no usable token exists in the state directory.
 var ErrNoToken = errors.New("no usable token file")
@@ -47,7 +54,21 @@ func (s Store) Path(dir string) string { return filepath.Join(dir, s.File) }
 // than trusted. A missing, unreadable or malformed file is ErrNoToken.
 func (s Store) Read(dir string) (string, error) {
 	p := s.Path(dir)
-	fi, err := os.Lstat(p)
+	if _, err := os.Lstat(p); err != nil {
+		return "", ErrNoToken
+	}
+	if afterLstat != nil {
+		afterLstat()
+	}
+	// The handle is the authority, not the earlier Lstat: a path swapped for a
+	// symlink in between is refused by O_NOFOLLOW, and the checks below run on
+	// the opened file, so what is read is what was checked.
+	f, err := openToken(p)
+	if err != nil {
+		return "", ErrNoToken
+	}
+	defer f.Close() //nolint:errcheck // read-only
+	fi, err := f.Stat()
 	if err != nil {
 		return "", ErrNoToken
 	}
@@ -55,8 +76,10 @@ func (s Store) Read(dir string) (string, error) {
 		(runtime.GOOS != "windows" && fi.Mode().Perm()&0o077 != 0) {
 		return "", fmt.Errorf("the %s token file is not private to this user; delete it and restart `yakos serve`", s.Label)
 	}
-	b, err := os.ReadFile(p) //nolint:gosec // path is under the state dir
-	if err != nil {
+	// A token is 65 bytes; read one byte past the cap so an oversized file is
+	// refused, not truncated into something that might parse.
+	b, err := io.ReadAll(io.LimitReader(f, MaxFileBytes+1))
+	if err != nil || len(b) > MaxFileBytes {
 		return "", ErrNoToken
 	}
 	tok := strings.TrimSpace(string(b))

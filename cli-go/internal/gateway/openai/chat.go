@@ -372,12 +372,13 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set(HeaderConversation, conv)
 	includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
+	timeout := s.cfg.StreamWriteTimeout
+	if timeout <= 0 {
+		timeout = DefaultStreamWriteTimeout
+	}
+	rc := http.NewResponseController(w)
 	if req.Stream {
-		timeout := s.cfg.StreamWriteTimeout
-		if timeout <= 0 {
-			timeout = DefaultStreamWriteTimeout
-		}
-		t.sse = &sseWriter{w: w, rc: http.NewResponseController(w), includeUsage: includeUsage, timeout: timeout}
+		t.sse = &sseWriter{w: w, rc: rc, includeUsage: includeUsage, timeout: timeout}
 	}
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -401,12 +402,17 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 			consoleui.ForgetDeadResume(s.cfg.Transcripts, conv, OperatorID, rt, res)
 		}
 	}
-	t.finish(w, runErr)
-	if t.sse != nil {
-		// The deadline would otherwise outlive this response on a kept-alive
-		// connection and fail the next request's write after it idles.
-		_ = t.sse.rc.SetWriteDeadline(time.Time{})
+	if t.sse == nil {
+		// A non-stream body is one write after the turn ends; a client that has
+		// stopped reading must not hold the handler on a full socket.
+		if err := rc.SetWriteDeadline(time.Now().Add(timeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			slog.Warn("openai gateway: cannot arm the response write deadline", "conversation", conv)
+		}
 	}
+	t.finish(w, runErr)
+	// The deadline would otherwise outlive this response on a kept-alive
+	// connection and fail the next request's write after it idles.
+	_ = rc.SetWriteDeadline(time.Time{})
 }
 
 // buildParams assembles the dispatch Params for the turn and the native session

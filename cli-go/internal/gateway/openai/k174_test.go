@@ -231,3 +231,41 @@ func TestK174_LogSink_NoTokenAnywhere(t *testing.T) {
 		}
 	}
 }
+
+// The write deadline set for a response must not outlive it: on a kept-alive
+// connection it would fail the next request's write after the connection idles.
+// A stream arms one per frame; a plain response arms one for its single body.
+func TestK174_WriteDeadlineIsArmedAndThenClearedAfterEveryResponse(t *testing.T) {
+	for _, stream := range []bool{true, false} {
+		name := "plain"
+		if stream {
+			name = "stream"
+		}
+		t.Run(name, func(t *testing.T) {
+			f := newFixture(t)
+			w := &stallWriter{okWrites: 1 << 20}
+			body := map[string]any{"model": "yakos/auto", "messages": []map[string]any{user("hi")}}
+			if stream {
+				body["stream"] = true
+			}
+			f.srv.Handler().ServeHTTP(w, f.streamRequest(body, nil))
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			if w.body.Len() == 0 {
+				t.Fatal("nothing was written")
+			}
+			if len(w.deadlines) < 2 {
+				t.Fatalf("deadline events %v: want an armed deadline and a clear", w.deadlines)
+			}
+			if d := time.Until(w.deadlines[0]); d <= 0 || d > 31*time.Second {
+				t.Errorf("first write deadline %v ahead, want about 30 s", d)
+			}
+			if last := w.deadlines[len(w.deadlines)-1]; !last.IsZero() {
+				t.Errorf("the last deadline set on the writer is %v; it must be cleared (zero) after the response", last)
+			}
+			if w.events[0] != "deadline" {
+				t.Errorf("events %v: the deadline must be set before the first write", w.events)
+			}
+		})
+	}
+}

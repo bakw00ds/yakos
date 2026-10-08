@@ -86,3 +86,53 @@ func TestStoreMintsPrivateFileAndRefusesUntrustedOnes(t *testing.T) {
 		t.Error("Read accepted a malformed token")
 	}
 }
+
+func TestReadRefusesASymlinkSwappedInAfterLstat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("no O_NOFOLLOW on Windows")
+	}
+	dir := filepath.Join(t.TempDir(), "state")
+	good, err := testStore.LoadOrCreate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := testStore.Path(dir)
+	// A private, valid token elsewhere: following the link would pass every check.
+	other := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.WriteFile(other, []byte(good+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	afterLstat = func() {
+		_ = os.Remove(p)
+		_ = os.Symlink(other, p)
+	}
+	t.Cleanup(func() { afterLstat = nil })
+	if tok, err := testStore.Read(dir); err == nil {
+		t.Fatalf("Read followed a symlink swapped in after Lstat and returned %q", tok)
+	}
+}
+
+func TestReadCapsTheFileAtFourKiB(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	good, err := testStore.LoadOrCreate(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := testStore.Path(dir)
+	// A valid token followed by padding past the cap is refused, not truncated.
+	body := good + "\n" + strings.Repeat(" ", MaxFileBytes)
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := testStore.Read(dir); err == nil {
+		t.Error("Read accepted a file over 4 KiB")
+	}
+	// Just under the cap still reads.
+	body = good + "\n" + strings.Repeat(" ", MaxFileBytes-len(good)-1)
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := testStore.Read(dir); err != nil || got != good {
+		t.Errorf("Read of a file at the cap = %q, %v", got, err)
+	}
+}

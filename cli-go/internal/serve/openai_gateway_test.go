@@ -15,6 +15,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/gateway/openai"
+	"github.com/bakw00ds/yakos/internal/restapi"
 	"github.com/bakw00ds/yakos/internal/routerpolicy"
 )
 
@@ -107,10 +108,20 @@ func TestStartOpenAIGatewayServesAndStops(t *testing.T) {
 	if got := get(tok); got != http.StatusOK {
 		t.Errorf("token: %d", got)
 	}
-	// The REST write token is a different credential and is not accepted here.
-	restWrite := "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
-	if got := get(restWrite); got != http.StatusUnauthorized {
-		t.Errorf("a REST write token: %d, want 401", got)
+	// The REST tokens are different credentials, minted by the real writer in the
+	// same state dir, and are not accepted here.
+	rest, err := restapi.LoadOrGenerateTokens(tokDir)
+	if err != nil || rest.Write == "" || rest.Read == "" {
+		t.Fatalf("LoadOrGenerateTokens = %+v, %v", rest, err)
+	}
+	if rest.Write == tok || rest.Read == tok {
+		t.Fatal("the REST tokens equal the endpoint token")
+	}
+	if got := get(rest.Write); got != http.StatusUnauthorized {
+		t.Errorf("the REST write token: %d, want 401", got)
+	}
+	if got := get(rest.Read); got != http.StatusUnauthorized {
+		t.Errorf("the REST read token: %d, want 401", got)
 	}
 	// Rotating the file revokes the old token on the running endpoint at once.
 	next, err := openai.RotateToken(tokDir)

@@ -38,6 +38,16 @@ does not open the REST or MCP write surfaces, so a leak from a chat client is
 revoked by rotating this file alone. The token is never logged, printed or written
 to the ledger; the start-up banner names the file only.
 
+**Upgrading from the first release of this endpoint (K-150).** It used to accept the
+REST write token. It no longer does: a client still sending that token gets `401`
+on every route until it is switched to the contents of
+`~/.yakos-state/openai-endpoint-token`. Read it with
+`cat ~/.yakos-state/openai-endpoint-token` and rotate it with
+`yakos serve --rotate-openai-token` (see below). Nothing is migrated: the REST
+tokens are untouched, and a user already named `openai-compat` in the console user
+store is not renamed or merged (the label is now reserved, so that name cannot be
+created again).
+
 It is still a powerful credential: **the bearer grants runs with
 `--permission-mode bypassPermissions` as the lead agent**, so whoever holds it can
 have an agent read and write the workspace and run commands without any prompt.
@@ -60,6 +70,15 @@ This writes a new token to the same file, prints the file path (not the token) a
 exits. A running endpoint reads the file on every request, so the old token is
 rejected from that moment with no restart. Update each client with the new value.
 Deleting the file also locks every client out until the next start mints a new one.
+
+The rotation command resolves the state directory the way the daemon does: the
+`YAKOS_DISPATCH_LOG` directory when that variable is set, otherwise
+`~/.yakos-state`. Run it in a shell with the same environment as the daemon, or it
+rotates a different file than the running endpoint reads.
+
+Every response, streamed or not, is written under a 30 second write deadline that is
+cleared once the response ends, so a client that stops reading cannot hold a
+connection or a conversation slot open.
 
 The `Host` header must be `127.0.0.1`, `localhost` or `[::1]` with port 7898, and a
 request with an `Origin` header must carry this server's own loopback origin
