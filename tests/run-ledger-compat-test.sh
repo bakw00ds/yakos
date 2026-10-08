@@ -437,16 +437,10 @@ yk_rt_mock_ledger_dispatch() {
 RUNTIMEEOF
 chmod +x "$H8/.yakos/plugins/mock-ledger/runtime.sh"
 LOG8="$H8/.yakos-state/dispatch-log.ndjson"
-# dispatch.sh hands its adapter FUNCTION to ct_timeout, which passes it to timeout(1)
-# when one is installed (Linux, or macOS with coreutils), and timeout cannot run a
-# function: "failed to run command 'yk_rt_dispatch'", exit 127. That is not what this
-# section tests, so the dispatch runs with a timeout function of the same name, which
-# the child bash imports and which runs its command directly (as on a bare macOS).
-( timeout() { shift; "$@"; }; export -f timeout
-  run_in "$H8" env YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$REPO_ROOT/cli/lib" \
+# dispatch.sh runs its adapter function under a shell-native deadline, so a
+# timeout(1) on PATH (Linux, or macOS with coreutils) no longer matters (K-169).
+run_in "$H8" env YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$REPO_ROOT/cli/lib" \
     "$BASH_BIN" "$REPO_ROOT/cli/lib/dispatch.sh" test-agent "dummy task" --runtime mock-ledger --project "$PROJ8" --timeout 30
-  printf '%s' "$RC" > "$TMP/rc8" )
-RC="$(cat "$TMP/rc8")"
 [ "$RC" = 0 ] && ok "bash dispatch next to ledger rows: exit 0" || bad "bash dispatch: exit $RC: $(tail -3 "$ERR")"
 if jq -e . "$LOG8" >/dev/null 2>&1; then ok "the shared log is still valid NDJSON"; else bad "the shared log no longer parses"; fi
 eq "the bash dispatch appended a started and a finished row" "22 dispatch_started dispatch_finished" \

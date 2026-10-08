@@ -899,11 +899,28 @@ _mr_strip_candidate() {
 # Atomically rewrites the model: line in a YAML frontmatter block.
 # Strategy: awk identifies the line within the ---...--- block and
 # replaces only that line, preserving all other bytes byte-for-byte.
-# Writes to a tempfile then mv over original (atomic).
+# Writes to a tempfile then mv over original (atomic). The replacement is a copy
+# of the original (cp -p) with its content swapped in place, so the file keeps its
+# mode: a bare mv of a mktemp file left it 0600 (K-168).
+#
+# Optional <agents-dir> <ident> (project agents): immediately before the rename,
+# re-check that the file, its directory and .claude are still not links and that
+# the directory is still the one the promote's guard looked at (same `ls -di`
+# inode). Without this a link swapped in after the guard made the rename land
+# outside the project (K-168, sec-364). The window left is the rename itself.
+_mr_confined() {
+    local file="$1" agents_dir="$2" ident="$3"
+    [ -n "$agents_dir" ] || return 0
+    [ ! -L "$file" ] && [ -f "$file" ] \
+        && [ ! -L "$agents_dir" ] && [ ! -L "$(dirname -- "$agents_dir")" ] \
+        && [ "$(ls -di -- "$agents_dir" 2>/dev/null)" = "$ident" ]
+}
+
 _mr_rewrite_model_frontmatter() {
-    local file="$1" new_model="$2"
-    local tmp
+    local file="$1" new_model="$2" agents_dir="${3:-}" ident="${4:-}"
+    local tmp out
     tmp="$(mktemp -t yakos-mr-rewrite.XXXXXX)"
+    out="$(mktemp -t yakos-mr-rewrite.XXXXXX)"
     awk -v new_model="$new_model" '
         BEGIN { in_fm=0; done=0 }
         NR==1 && /^---[[:space:]]*$/ { in_fm=1; print; next }
@@ -914,7 +931,13 @@ _mr_rewrite_model_frontmatter() {
         }
         { print }
     ' "$file" > "$tmp"
-    mv "$tmp" "$file"
+    if cp -p "$file" "$out" 2>/dev/null && cat "$tmp" > "$out" && _mr_confined "$file" "$agents_dir" "$ident"; then
+        mv "$out" "$file"
+    else
+        rm -f "$tmp" "$out"
+        return 1
+    fi
+    rm -f "$tmp"
 }
 
 # _mr_graveyard_count <agent-id> <suggested-model>
@@ -959,6 +982,21 @@ cmd_promote() {
 Pass --global to promote a framework-shipped agent (rewrites lib/agents/${agent_id}.md under YAKOS_ROOT)."
     fi
 
+    # 2b. Symlink guard (K-168 / sec-339b L3). A project agent reached through a
+    # linked .claude, .claude/agents or agent file would be written through the
+    # link, outside the project. Refuse before any write (backup included), as
+    # the Go implementation does. The message carries no path.
+    local agents_dir="" agents_ident=""
+    if [ "$is_framework" -eq 0 ]; then
+        local claude_dir
+        agents_dir="$(dirname -- "$agent_file")"
+        claude_dir="$(dirname -- "$agents_dir")"
+        if [ -L "$claude_dir" ] || [ -L "$agents_dir" ] || [ -L "$agent_file" ]; then
+            ct_die "model-routing promote: agent file refused: a symlinked directory or file is not followed"
+        fi
+        agents_ident="$(ls -di -- "$agents_dir" 2>/dev/null)"
+    fi
+
     # 3. Find the most recent candidate.
     local cand
     cand="$(_mr_latest_candidate "$agent_id")"
@@ -979,7 +1017,8 @@ Pass --global to promote a framework-shipped agent (rewrites lib/agents/${agent_
     cp "$agent_file" "$backup_file"
 
     # 5. Atomic frontmatter rewrite (tempfile + mv).
-    _mr_rewrite_model_frontmatter "$agent_file" "$suggested_model"
+    _mr_rewrite_model_frontmatter "$agent_file" "$suggested_model" "$agents_dir" "$agents_ident" \
+        || ct_die "model-routing promote: agent file refused: the path changed during the promote (a link was swapped in); nothing was written"
 
     # 6. Validate. If validation fails, restore from backup and exit non-zero.
     local validate_target
@@ -990,8 +1029,10 @@ Pass --global to promote a framework-shipped agent (rewrites lib/agents/${agent_
     fi
     if ! bash "$YAKOS_LIB/validate.sh" --strict "$validate_target" >/dev/null 2>&1; then
         ct_log "model-routing promote: validate --strict failed; restoring backup"
+        _mr_confined "$agent_file" "$agents_dir" "$agents_ident" \
+            || ct_die "model-routing promote: validation failed and the agent path changed, so the original was NOT restored; it is in the backup"
         cp "$backup_file" "$agent_file"
-        ct_die "model-routing promote: validation failed after rewrite; original restored from $backup_file"
+        ct_die "model-routing promote: validation failed after rewrite; the original was restored from the backup"
     fi
 
     # 7. Append history entry.
