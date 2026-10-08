@@ -204,6 +204,11 @@ jobs:
       - name: Check the bash readers on ledger rows
         run: |
           ./tests/run-ledger-compat-test.sh
+      # K-169: dispatch.sh runs its adapter function under a deadline that works
+      # with GNU coreutils timeout on PATH (ubuntu has it).
+      - name: Check the bash dispatch deadline
+        run: |
+          ./tests/run-dispatch-timeout-test.sh
 
   e2e:
     name: end-to-end smoke (every subcommand)

@@ -711,6 +711,124 @@ else
 fi
 
 # ============================================================
+# Test 11: K-168 — promote keeps the file mode on rollback, refuses a linked
+# .claude, and its refusals carry no absolute path
+# ============================================================
+echo
+echo "Test 11: promote file mode, symlink refusal, path-free errors (K-168)"
+
+mode_of() { stat -c '%a' "$1" 2>/dev/null || stat -f '%Lp' "$1"; }
+inode_of() { stat -c '%i' "$1" 2>/dev/null || stat -f '%i' "$1"; }
+
+# run_promote <dir> <lib> <agent>: runs promote with state under <dir>/state.
+run_promote() {
+    local dir="$1" lib="$2" agent="$3"
+    HOME="$FAKE_HOME" \
+    YAKOS_ROOT="$REPO_ROOT" \
+    YAKOS_PROJECT_DIR="$dir/project" \
+    YAKOS_MR_CANDIDATES="$dir/state/model-routing-candidates.ndjson" \
+    YAKOS_MR_HISTORY="$dir/state/model-routing-history.ndjson" \
+    YAKOS_MR_GRAVEYARD="$dir/state/model-routing-graveyard.ndjson" \
+    YAKOS_MR_BACKUPS_DIR="$dir/state/model-routing-backups" \
+    env YAKOS_LIB="$lib" bash "$YAKOS_LIB/model-routing.sh" promote "$agent" 2>&1
+}
+
+# 11a: rollback leaves the mode alone (0644 must not become 0600).
+T11A="$WORKDIR/t11a"
+mkdir -p "$T11A/project/.claude/agents" "$T11A/state"
+make_agent_file "$T11A/project/.claude/agents/mode-agent.md" "opus"
+chmod 644 "$T11A/project/.claude/agents/mode-agent.md"
+make_candidate "mode-agent" "opus" "haiku" > "$T11A/state/model-routing-candidates.ndjson"
+T11A_RC=0
+T11A_OUT="$(run_promote "$T11A" "$MOCK_FAIL_LIB" mode-agent)" || T11A_RC=$?
+[ "$T11A_RC" -ne 0 ] && ok "rollback case exits non-zero" || fail "rollback case should exit non-zero"
+T11A_MODE="$(mode_of "$T11A/project/.claude/agents/mode-agent.md")"
+[ "$T11A_MODE" = "644" ] && ok "mode unchanged (644) after a rolled-back promote" || fail "mode became $T11A_MODE after rollback"
+if printf '%s' "$T11A_OUT" | grep -q "$WORKDIR"; then
+    fail "rollback error leaks an absolute path: $T11A_OUT"
+else
+    ok "rollback error carries no absolute path"
+fi
+
+# 11b: a successful promote keeps the mode too.
+T11B="$WORKDIR/t11b"
+mkdir -p "$T11B/project/.claude/agents" "$T11B/state"
+make_agent_file "$T11B/project/.claude/agents/mode-agent.md" "opus"
+chmod 644 "$T11B/project/.claude/agents/mode-agent.md"
+make_candidate "mode-agent" "opus" "haiku" > "$T11B/state/model-routing-candidates.ndjson"
+run_promote "$T11B" "$MOCK_PASS_LIB" mode-agent >/dev/null || true
+[ "$(mode_of "$T11B/project/.claude/agents/mode-agent.md")" = "644" ] && ok "mode unchanged (644) after a successful promote" || fail "mode changed after a successful promote"
+grep -q '^model: haiku$' "$T11B/project/.claude/agents/mode-agent.md" && ok "successful promote still rewrites the model" || fail "model not rewritten"
+
+# 11c/11d: a linked .claude, and a linked .claude/agents, are refused before any
+# write: the outside file keeps content, mode and inode, no backups dir appears.
+for variant in claude agents file; do
+    TL="$WORKDIR/t11-link-$variant"
+    mkdir -p "$TL/state" "$TL/project" "$TL/outside/agents"
+    make_agent_file "$TL/outside/agents/link-agent.md" "opus"
+    chmod 644 "$TL/outside/agents/link-agent.md"
+    if [ "$variant" = claude ]; then
+        ln -s "$TL/outside" "$TL/project/.claude"
+    elif [ "$variant" = agents ]; then
+        mkdir -p "$TL/project/.claude"
+        ln -s "$TL/outside/agents" "$TL/project/.claude/agents"
+    else
+        # the agent FILE is the link; the directories are real
+        mkdir -p "$TL/project/.claude/agents"
+        ln -s "$TL/outside/agents/link-agent.md" "$TL/project/.claude/agents/link-agent.md"
+    fi
+    make_candidate "link-agent" "opus" "haiku" > "$TL/state/model-routing-candidates.ndjson"
+    before_sum="$(cksum < "$TL/outside/agents/link-agent.md")"
+    before_ino="$(inode_of "$TL/outside/agents/link-agent.md")"
+    RC=0
+    OUT="$(run_promote "$TL" "$MOCK_PASS_LIB" link-agent)" || RC=$?
+    [ "$RC" -ne 0 ] && ok "linked $variant: promote exits non-zero" || fail "linked $variant: promote should refuse"
+    printf '%s' "$OUT" | grep -q 'symlinked' && ok "linked $variant: refusal says symlinked" || fail "linked $variant: refusal text: $OUT"
+    if printf '%s' "$OUT" | grep -q "$WORKDIR\|$HOME"; then
+        fail "linked $variant: refusal leaks a path: $OUT"
+    else
+        ok "linked $variant: refusal is path-free"
+    fi
+    [ "$(cksum < "$TL/outside/agents/link-agent.md")" = "$before_sum" ] && ok "linked $variant: outside file content unchanged" || fail "linked $variant: outside file changed"
+    [ "$(inode_of "$TL/outside/agents/link-agent.md")" = "$before_ino" ] && ok "linked $variant: outside inode unchanged" || fail "linked $variant: outside inode replaced"
+    [ "$(mode_of "$TL/outside/agents/link-agent.md")" = "644" ] && ok "linked $variant: outside mode unchanged" || fail "linked $variant: outside mode changed"
+    [ ! -e "$TL/state/model-routing-backups" ] && ok "linked $variant: no backup written" || fail "linked $variant: a backup dir was created"
+    [ -s "$TL/state/model-routing-history.ndjson" ] && fail "linked $variant: history written" || ok "linked $variant: no history row"
+    if [ "$variant" = file ]; then
+        [ -L "$TL/project/.claude/agents/link-agent.md" ] && ok "linked file: the link is still a link" || fail "linked file: the link was replaced"
+    fi
+done
+
+# 11e: a link swapped in AFTER the guard. A cat shim (the rewrite runs cat after it
+# copied the file and just before the rename) replaces .claude/agents with a link
+# to a directory outside the project, once; the re-check before the rename must
+# refuse, so nothing is written outside and the original file is not touched.
+TR="$WORKDIR/t11-race"
+mkdir -p "$TR/state" "$TR/project/.claude/agents" "$TR/outside" "$TR/shim"
+make_agent_file "$TR/project/.claude/agents/race-agent.md" "opus"
+make_candidate "race-agent" "opus" "haiku" > "$TR/state/model-routing-candidates.ndjson"
+REAL_CAT="$(command -v cat)"
+cat > "$TR/shim/cat" <<SHIMEOF
+#!/bin/sh
+"$REAL_CAT" "\$@"
+rc=\$?
+if [ ! -e "$TR/swapped" ] && [ -d "$TR/project/.claude/agents" ] && [ ! -L "$TR/project/.claude/agents" ]; then
+    : > "$TR/swapped"
+    mv "$TR/project/.claude/agents" "$TR/project/.claude/agents.moved"
+    ln -s "$TR/outside" "$TR/project/.claude/agents"
+fi
+exit \$rc
+SHIMEOF
+chmod +x "$TR/shim/cat"
+RC=0
+OUT="$(PATH="$TR/shim:$PATH" run_promote "$TR" "$MOCK_PASS_LIB" race-agent)" || RC=$?
+[ "$RC" -ne 0 ] && ok "swapped link: promote exits non-zero" || fail "swapped link: promote should refuse"
+printf '%s' "$OUT" | grep -q 'path changed' && ok "swapped link: refusal names the changed path" || fail "swapped link: refusal text: $OUT"
+if printf '%s' "$OUT" | grep -q "$WORKDIR"; then fail "swapped link: refusal leaks a path: $OUT"; else ok "swapped link: refusal is path-free"; fi
+[ -z "$(ls -A "$TR/outside")" ] && ok "swapped link: nothing was written outside the project" || fail "swapped link: wrote outside: $(ls -A "$TR/outside")"
+grep -q '^model: opus$' "$TR/project/.claude/agents.moved/race-agent.md" && ok "swapped link: the original agent is untouched" || fail "swapped link: the original changed"
+
+# ============================================================
 # Summary
 # ============================================================
 echo
