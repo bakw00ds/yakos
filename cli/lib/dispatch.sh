@@ -336,6 +336,13 @@ else
     RUNTIME_CHAIN="$(yk_rt_default)"
 fi
 PCFG_FALLBACK="$(yk_pcfg_get_list "$PROJECT" "default-fallback" || true)"
+# YAKOS_DISPATCH_NO_FALLBACK=1 (set by `yakos dispatch` for an agent under a
+# max_model ceiling): the chain is the one runtime chosen above. A fallback list
+# naming codex would otherwise run an unranked model when claude is absent (K-168).
+if [ "${YAKOS_DISPATCH_NO_FALLBACK:-}" = "1" ]; then
+    AGENT_FALLBACK=""
+    PCFG_FALLBACK=""
+fi
 if [ -n "$AGENT_FALLBACK" ]; then
     RUNTIME_CHAIN="$RUNTIME_CHAIN
 $AGENT_FALLBACK"

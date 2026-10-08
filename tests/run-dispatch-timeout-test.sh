@@ -209,12 +209,7 @@ signal_case TERM 5 nops
 # Ctrl-C on a real terminal: dispatch runs as the foreground job of a pty session
 # (python pty.fork, no new session of our own), the Ctrl-C character is typed into
 # the master, and the double-forked grandchild must die with the rest.
-echo "Test 6.6: Ctrl-C on a pty kills the adapter tree and exits 130"
 if command -v python3 >/dev/null 2>&1; then
-    s1=$((41000 + $$ % 1000)); s2=$((51000 + $$ % 1000))
-    export MOCK_TO_PIDFILE="$WORKDIR/pids6" MOCK_TO_SLEEP="$s1" MOCK_TO_SLEEP2="$s2"
-    : > "$MOCK_TO_PIDFILE"
-    rm -rf "$WORKDIR/dtmp"; mkdir -p "$WORKDIR/dtmp"
     cat > "$WORKDIR/pty-ctrlc.py" <<'PYEOF'
 import os, pty, sys, time
 pidfile = os.environ["MOCK_TO_PIDFILE"]
@@ -263,7 +258,14 @@ elif os.WIFEXITED(status):
 else:
     print(128 + os.WTERMSIG(status))
 PYEOF
-    prc="$(MOCK_TO_MODE=dfork PATH="$WORKDIR/mkt:$WORKDIR/stubbin:$PATH" TMPDIR="$WORKDIR/dtmp" python3 -I "$WORKDIR/pty-ctrlc.py" \
+    for variant in plain nops; do
+    echo "Test 6.6-$variant: Ctrl-C on a pty kills the adapter tree and exits 130 (ps: $variant)"
+    s1=$((41000 + $$ % 1000)); s2=$((51000 + $$ % 1000))
+    export MOCK_TO_PIDFILE="$WORKDIR/pids6" MOCK_TO_SLEEP="$s1" MOCK_TO_SLEEP2="$s2"
+    : > "$MOCK_TO_PIDFILE"
+    rm -rf "$WORKDIR/dtmp"; mkdir -p "$WORKDIR/dtmp"
+    PSDIR=""; [ "$variant" = nops ] && PSDIR="$WORKDIR/nops:"
+    prc="$(MOCK_TO_MODE=dfork PATH="$PSDIR$WORKDIR/mkt:$WORKDIR/stubbin:$PATH" TMPDIR="$WORKDIR/dtmp" python3 -I "$WORKDIR/pty-ctrlc.py" \
         bash "$YAKOS_LIB/dispatch.sh" test-agent task --runtime mock-to --project "$PROJ" --timeout 120 2>"$WORKDIR/pty.err" | tail -1)"
     [ "$prc" = 130 ] && ok "dispatch exited 130 on Ctrl-C" || bad "dispatch exited ${prc:-?}, want 130: $(tail -12 "$WORKDIR/pty.err" 2>/dev/null)"
     sleep 1
@@ -278,6 +280,7 @@ PYEOF
         pkill -KILL -f "sleep ($s1|$s2)\$" 2>/dev/null || true
     fi
     [ -z "$(ls -A "$WORKDIR/dtmp")" ] && ok "pty: scratch files removed" || bad "pty: scratch files left: $(ls "$WORKDIR/dtmp" | tr '\n' ' ')"
+    done
 else
     echo "  [skip] python3 not available"
 fi

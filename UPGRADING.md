@@ -126,15 +126,18 @@ enforces its own deadline (K-169, below).
   negative, a fraction (`1.5`), the word `infinity`, junk, and anything over 7 days
   (604800 s). An agent's `max-duration-s: 0` is refused too. Before, `0` ran with no
   deadline and a fraction or a suffix could abort after the job had started.
-- **A `max_model` ceiling on the bash path ranks the model bash will run.** An
-  agent with no `model:` runs the bash default (sonnet), and a `model-policy:` line
-  wins over `model:`; the ceiling now ranks that model, not the composed one. With
-  a ceiling and no `--model`, the dispatch is always pinned to the ranked model and
-  to `--runtime claude`, so a different agent file on disk cannot run a dearer one.
-  The runtime resolves from `--runtime`, the agent's `runtime:`, `.yakos.yml`,
-  `YAKOS_RUNTIME` and the state default before ranking. An explicit
-  `--runtime codex|agy` on a ceilinged agent is refused unless the overlay ranks its
-  model (as in the Go dispatcher), and so is an agent that resolves to one.
+- **A `max_model` ceiling on the bash path ranks the model bash will run, and
+  bash runs claude only.** An agent with no `model:` runs the bash default
+  (sonnet), and a `model-policy:` line wins over `model:`; the ceiling ranks that
+  model, not the composed one. With a ceiling, the dispatch always gets
+  `--model <ranked>` and then `--runtime claude` appended last (bash lets the last
+  one win), so a different agent file on disk, `--runtime auto`, or a flag-looking
+  value cannot change them, and its runtime-fallback lists are switched off: an
+  absent claude is an error, not codex. The runtime resolves from `--runtime`, the
+  agent's `runtime:`, `.yakos.yml`, `YAKOS_RUNTIME` and the state default; **a
+  ceilinged agent that resolves to codex or agy is refused on the bash path**,
+  even if the overlay ranks its model (the bash adapters cannot pin one). Use the
+  Go dispatcher for those agents.
 - **`yakos model-routing promote` refuses symlinks and keeps the file mode.** A
   project agent reached through a linked `.claude`, `.claude/agents` or agent
   file is refused before any write, and the path is checked again just before the

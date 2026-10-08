@@ -104,3 +104,98 @@ func TestCeilingBoundsBashRelayOnHostileAgentFiles(t *testing.T) {
 		})
 	}
 }
+
+// toolsWithout is e.tools minus the named commands, so "claude is not installed"
+// holds even on a host that has a real one.
+func toolsWithout(t *testing.T, e parityEnv, drop ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	ents, err := os.ReadDir(e.tools)
+	if err != nil {
+		t.Fatal(err)
+	}
+next:
+	for _, en := range ents {
+		for _, d := range drop {
+			if en.Name() == d {
+				continue next
+			}
+		}
+		if dst, err := os.Readlink(filepath.Join(e.tools, en.Name())); err == nil {
+			_ = os.Symlink(dst, filepath.Join(dir, en.Name()))
+		}
+	}
+	return dir
+}
+
+// K-168 sec-364b N1 to N4: bash must never run codex (unranked, sandbox bypassed)
+// for an agent under a sonnet ceiling, however the argv, the fallback lists or the
+// overlay are arranged, and where Go native refuses the dispatch bash must not run
+// anything dearer. The codex stub leaves a marker file when it is started.
+func TestCeilingNeverRunsCodexOnBashRelay(t *testing.T) {
+	e := newParityEnv(t)
+	cases := []struct {
+		name     string
+		fm       string
+		yml      string
+		extra    []string
+		noClaude bool
+		overlay  bool
+	}{
+		{name: "N1-claude-absent-agent-fallback", fm: "id: cx\nmodel: sonnet\nruntime-fallback: [codex]\n", extra: []string{"--runtime", "claude"}, noClaude: true},
+		{name: "N1-claude-absent-project-fallback", fm: "id: cx\nmodel: sonnet\n", yml: "default-fallback: [codex]\n", noClaude: true},
+		{name: "N2-runtime-auto", fm: "id: cx\nmodel: sonnet\nruntime-fallback: [codex]\n", extra: []string{"--runtime", "auto"}},
+		{name: "N3-eval-id-decoy", fm: "id: cx\nruntime: codex\nmodel: sonnet\n", extra: []string{"--eval-run-id", "--runtime=claude"}},
+		{name: "N4-overlay-ranked-codex-model", fm: "id: cx\nruntime: codex\nmodel: gpt-5.4-mini\n", overlay: true},
+		{name: "explicit-codex", fm: "id: cx\nmodel: sonnet\n", extra: []string{"--runtime", "codex"}, overlay: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			proj := t.TempDir()
+			mustWrite(t, filepath.Join(proj, ".claude", "agents", "cx.md"), "---\n"+c.fm+"---\n\n## Purpose\n\nx.\n")
+			if c.yml != "" {
+				mustWrite(t, filepath.Join(proj, ".yakos.yml"), c.yml)
+			}
+			for _, side := range []string{"go", "bash"} {
+				home := t.TempDir()
+				state := filepath.Join(home, ".yakos-state")
+				if err := budget.SetMaxModel(state, "cx", "sonnet"); err != nil {
+					t.Fatal(err)
+				}
+				if c.overlay {
+					if err := os.WriteFile(filepath.Join(state, "model-registry.yml"), []byte("aliases:\n  cheap: {codex: gpt-5.4-mini}\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				stubs := t.TempDir()
+				claudeOut, codexOut := filepath.Join(stubs, "claude.argv"), filepath.Join(stubs, "codex.argv")
+				for cli, out := range map[string]string{"claude": claudeOut, "codex": codexOut} {
+					if cli == "claude" && c.noClaude {
+						continue
+					}
+					body := "#!/bin/bash\nprintf '%s\\0' \"$@\" > '" + out + "'\nexit 0\n"
+					if err := os.WriteFile(filepath.Join(stubs, cli), []byte(body), 0o755); err != nil { //nolint:gosec
+						t.Fatal(err)
+					}
+				}
+				tools := e.tools
+				if c.noClaude {
+					tools = toolsWithout(t, e, "claude")
+				}
+				args := append([]string{"dispatch", "cx", "do the thing", "--project", proj}, c.extra...)
+				cmd := exec.Command(e.goBin, args...) //nolint:gosec // controlled test paths
+				cmd.Dir = proj
+				cmd.Env = []string{"HOME=" + home, "PATH=" + stubs + ":" + tools, "ANTHROPIC_API_KEY=x", "OPENAI_API_KEY=x", "TMPDIR=" + os.TempDir(), "YAKOS_IMPL=" + side}
+				out, _ := cmd.CombinedOutput()
+				if _, err := os.Stat(codexOut); err == nil && (side == "bash" || !c.overlay) {
+					t.Errorf("%s ran codex under a sonnet ceiling:\n%s", side, out)
+				}
+				for _, m := range claudeModels(readArgv(claudeOut)) {
+					if m != "sonnet" && m != "haiku" {
+						t.Errorf("%s ran model %q under a sonnet ceiling", side, m)
+					}
+				}
+			}
+		})
+	}
+}

@@ -32,11 +32,13 @@ never holds a login: ADR-0010. Detailed entries follow.
   deadline is stricter: `s`, `m`, `h`, `d` suffixes; leading zeros are decimal;
   0, negatives, fractions, junk and over 7 days are refused before the job starts.
   The `max_model` ceiling on the bash path now ranks the effective model of a
-  model-less or `model-policy:` agent, resolves the runtime before ranking, refuses
-  a ceilinged agent on `--runtime codex|agy` unless the overlay ranks its model,
-  and always pins `--model` and `--runtime claude` so bash cannot run a dearer
-  model from a different agent file. `yakos model-routing promote` refuses symlinked
-  agent paths (rechecked before the rename) and keeps the file mode. See UPGRADING.md.
+  model-less or `model-policy:` agent, resolves the runtime before ranking,
+  refuses a ceilinged agent that resolves to codex or agy (bash cannot pin their
+  models), switches the runtime-fallback lists off, and always appends `--model`
+  and `--runtime claude` last, so bash cannot run a dearer model or another
+  runtime whatever agent file or argv it reads. `yakos model-routing promote`
+  refuses symlinked agent paths (rechecked before the rename) and keeps the file
+  mode. See UPGRADING.md.
 - **docs: ADR-0010, the runtime-matrix rewrite and the routing map (K-155).**
   ADR-0010 records harness-native routing, the vendor-policy facts it rests on
   with dates, and the one assumption no source settles (spawning the unmodified
