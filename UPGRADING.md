@@ -6,7 +6,7 @@ current release, what survives, and how to fully uninstall when needed.
 This doc is the **upgrade authority** — `yakos --help`, README, and
 CHANGELOG point here. Last updated for v0.39.
 
-## v0.63.0.0: the multi-harness router wave, in one place (K-139 to K-155)
+## v0.63.0.0: the multi-harness router wave, in one place (K-139 to K-156)
 
 Read this first; the sections below have the detail. Everything marked
 **behavior change** alters what runs after you upgrade; the rest is opt-in.
