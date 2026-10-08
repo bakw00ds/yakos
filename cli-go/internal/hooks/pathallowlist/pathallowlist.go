@@ -216,6 +216,22 @@ func (c *ctx) run() {
 		return
 	}
 
+	// K-170 (b): a write decoded from a shell command whose real target cannot
+	// be known (a variable, a substitution, "~", a script read from stdin). A
+	// policy cannot be applied to a path nobody knows, so with a policy for this
+	// agent the call is refused. A matching exact bypass entry is honored.
+	if dyn, _ := hookio.ToolInputField(c.in, hookio.ShellDynamicKey).(bool); dyn {
+		if c.bypassedExact(relFile) {
+			c.log("WARN", "pass", "undecidable shell write but bypass active",
+				map[string]any{"agent_type": agent, "file_path": relFile, "bypass": true})
+			return
+		}
+		c.log("BLOCK", "block", "shell command writes a file whose path cannot be determined",
+			map[string]any{"agent_type": agent, "file_path": relFile})
+		c.block(fmt.Sprintf("agent '%s' ran a shell command that writes to a path that cannot be determined before it runs (%s); the path policy cannot be applied to it, so it is refused. Write to a literal project path instead", agent, relFile))
+		return
+	}
+
 	// R2-5: the path IS the project root.
 	if cpd != "" && relFile == cpd {
 		if c.bypassedExact(relFile) {
