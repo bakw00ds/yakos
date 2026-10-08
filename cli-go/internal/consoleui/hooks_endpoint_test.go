@@ -250,7 +250,7 @@ func TestHooksEndpointBindsProjectToNonce(t *testing.T) {
 		if w.Code != http.StatusForbidden {
 			t.Errorf("%s: status %d, want 403 (%s)", name, w.Code, w.Body)
 		}
-		for _, p := range []string{outside, f.project, "-evil"} {
+		for _, p := range []string{outside, f.project, "-evil", strings.ReplaceAll(outside, `\`, `\\`), strings.ReplaceAll(f.project, `\`, `\\`)} {
 			if strings.Contains(w.Body.String(), p) {
 				t.Errorf("%s: response leaks a path (%q): %s", name, p, w.Body)
 			}
@@ -269,8 +269,18 @@ func TestHooksEndpointBindsProjectToNonce(t *testing.T) {
 		"no cwd":     do("codex", codex("")),
 		"unparsable": do("codex", "PROJECT"),
 	} {
-		if w.Code != 200 || !strings.Contains(w.Body.String(), "project="+f.project) {
-			t.Errorf("%s: %d %s, want the bound project %s", name, w.Code, w.Body, f.project)
+		// Decode the body: JSON escapes the backslashes of a Windows path.
+		var d struct {
+			Stdout string `json:"stdout"`
+			Stderr string `json:"stderr"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &d)
+		// codex puts the reason on stderr, agy inside its stdout JSON (where a
+		// Windows path's backslashes are escaped once more).
+		got := d.Stderr + d.Stdout
+		esc := strings.ReplaceAll(f.project, `\`, `\\`)
+		if w.Code != 200 || !(strings.Contains(got, "project="+f.project) || strings.Contains(got, "project="+esc)) {
+			t.Errorf("%s: %d %s, want the bound project", name, w.Code, w.Body)
 		}
 	}
 }

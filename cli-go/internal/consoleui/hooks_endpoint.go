@@ -49,7 +49,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/bakw00ds/yakos/internal/dashauth"
@@ -94,7 +96,7 @@ type hooksHandler struct {
 // (without the role gate). A failure to persist the nonce leaves the endpoint
 // off rather than usable by nobody-knows-whom.
 func newHooksHandler(ep *HooksEndpoint, addr string) (http.Handler, error) {
-	if ep == nil || ep.Run == nil || ep.Known == nil || ep.NonceFile == "" || !filepath.IsAbs(ep.ProjectDir) {
+	if ep == nil || ep.Run == nil || ep.Known == nil || ep.NonceFile == "" || !isAbsFor(runtime.GOOS, ep.ProjectDir) {
 		return nil, errors.New("hooks endpoint: incomplete configuration")
 	}
 	project, err := resolveDir(ep.ProjectDir)
@@ -131,17 +133,47 @@ func resolveDir(dir string) (string, error) {
 
 // withinProject reports whether dir is the bound project or inside it.
 func (h *hooksHandler) withinProject(dir string) bool {
-	if !filepath.IsAbs(dir) {
+	if !isAbsFor(runtime.GOOS, dir) {
 		return false
 	}
 	d, err := resolveDir(dir)
 	if err != nil {
 		return false
 	}
-	if d == h.project {
+	return pathWithin(runtime.GOOS, h.project, d)
+}
+
+// canonPath is the comparison form of an absolute path on goos: separators
+// unified to "/", cleaned, and, on Windows, case-folded (its file systems are
+// case-insensitive). It is lexical; callers resolve symlinks first.
+func canonPath(goos, p string) string {
+	if goos == "windows" {
+		p = strings.ToLower(strings.ReplaceAll(p, `\`, "/"))
+	}
+	return path.Clean(p)
+}
+
+// isAbsFor reports whether p is absolute on goos: a rooted path, or on Windows
+// also a drive path ("C:\x", "c:/x") or a UNC path.
+func isAbsFor(goos, p string) bool {
+	if goos != "windows" {
+		return strings.HasPrefix(p, "/")
+	}
+	p = strings.ReplaceAll(p, `\`, "/")
+	if strings.HasPrefix(p, "//") {
 		return true
 	}
-	return strings.HasPrefix(d, strings.TrimRight(h.project, string(filepath.Separator))+string(filepath.Separator))
+	return len(p) >= 3 && p[1] == ':' && p[2] == '/' && (p[0]|0x20 >= 'a' && p[0]|0x20 <= 'z')
+}
+
+// pathWithin reports whether dir equals project or lies below it, comparing
+// canonical forms for goos. Both arguments must be absolute.
+func pathWithin(goos, project, dir string) bool {
+	p, d := canonPath(goos, project), canonPath(goos, dir)
+	if d == p {
+		return true
+	}
+	return strings.HasPrefix(d, strings.TrimRight(p, "/")+"/")
 }
 
 func writeNonceFile(path, nonce string) error {
