@@ -54,6 +54,8 @@ on:
       - 'tests/run-validator-fixtures.sh'
       - 'tests/run-supervisor-shadow-test.sh'
       - 'tests/run-supervisor-budget-test.sh'
+      - 'tests/run-dispatch-timeout-test.sh'
+      - 'cli/lib/dispatch.sh'
       - 'tests/run-ledger-compat-test.sh'
       - 'tests/fixtures/ledger-compat/**'
       - 'tests/fixtures/hooks/**'
@@ -72,6 +74,8 @@ on:
       - 'tests/run-validator-fixtures.sh'
       - 'tests/run-supervisor-shadow-test.sh'
       - 'tests/run-supervisor-budget-test.sh'
+      - 'tests/run-dispatch-timeout-test.sh'
+      - 'cli/lib/dispatch.sh'
       - 'tests/run-ledger-compat-test.sh'
       - 'tests/fixtures/ledger-compat/**'
       - 'tests/fixtures/hooks/**'
@@ -779,6 +783,14 @@ jobs:
         shell: bash
         timeout-minutes: 10
         run: /bin/bash tests/run-supervisor-budget-test.sh
+
+      # K-169: the dispatch deadline wrapper uses job control and traps, which differ
+      # most between bash 3.2 and 5. Runs with the stock /bin/bash and no coreutils
+      # timeout, as an unmodified Mac does.
+      - name: Dispatch deadline and signals under /bin/bash (3.2)
+        shell: bash
+        timeout-minutes: 5
+        run: /bin/bash tests/run-dispatch-timeout-test.sh
 
   # K-145: the codex/agy envelope decoders and deny shapes against the fixture
   # corpus under .github/fixtures/hooks-shape, plus the installer's byte

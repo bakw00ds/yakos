@@ -108,9 +108,35 @@ and the case that holds the two paths to the same resolution otherwise, is in
 To keep the old behavior for a shell or a project, set `YAKOS_IMPL=bash`
 (`yakos doctor` then warns, and `doctor --policy` flags it when codex or agy is
 installed). Nothing else needs doing: Go-only installs already ran the Go path.
-Known issue (K-169): on Linux with GNU coreutils `timeout` on PATH,
-`YAKOS_IMPL=bash yakos dispatch` fails in `dispatch.sh` (`ct_timeout` cannot run
-`yk_rt_dispatch`, exit 127), so the way back does not work there yet.
+The way back works on Linux and on macOS with GNU coreutils: `dispatch.sh` used
+to fail there with exit 127 (`timeout` cannot run a shell function), and now
+enforces its own deadline (K-169, below).
+
+## Unreleased: bash dispatch deadline, model ceiling and `promote` fixes (K-168, K-169)
+
+- **`dispatch.sh` enforces its deadline everywhere.** The adapter runs under a
+  shell-native deadline (exit 124 on expiry), so it no longer depends on a
+  `timeout` binary. Ctrl-C, SIGTERM and SIGHUP to `dispatch.sh` now stop the
+  adapter and everything it started (exit 130).
+- **The `--timeout` syntax is stricter (a break).** Whole seconds, with the
+  GNU suffixes `s`, `m`, `h` and `d` (`30`, `30s`, `2m`). Leading zeros are
+  decimal (`08` is 8). These are now refused before the job starts: `0`, a
+  negative, a fraction (`1.5`), the word `infinity`, junk, and anything over 7 days
+  (604800 s). An agent's `max-duration-s: 0` is refused too. Before, `0` ran with no
+  deadline and a fraction or a suffix could abort after the job had started.
+- **A `max_model` ceiling on the bash path ranks the model bash will run.** An
+  agent with no `model:` runs the bash default (sonnet), and a `model-policy:` line
+  wins over `model:`; the ceiling now ranks that model, not the composed one. With
+  a ceiling and no `--model`, the dispatch is always pinned to the ranked model and
+  to `--runtime claude`, so a different agent file on disk cannot run a dearer one.
+  The runtime resolves from `--runtime`, the agent's `runtime:`, `.yakos.yml`,
+  `YAKOS_RUNTIME` and the state default before ranking. An explicit
+  `--runtime codex|agy` on a ceilinged agent is refused unless the overlay ranks its
+  model (as in the Go dispatcher), and so is an agent that resolves to one.
+- **`yakos model-routing promote` refuses symlinks and keeps the file mode.** A
+  project agent reached through a linked `.claude`, `.claude/agents` or agent
+  file is refused before any write, and the path is checked again just before the
+  rename. A promote or a rollback no longer turns a 0644 agent file into 0600.
 
 ## Unreleased: model ceilings across runtimes, `--extends` (K-139c)
 

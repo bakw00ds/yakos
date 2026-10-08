@@ -25,6 +25,18 @@ never holds a login: ADR-0010. Detailed entries follow.
   the Anthropic gateway (K-151), Flows triggers (K-152), the Models & Providers
   tab and policy writers (K-153), the REPL (K-154).
 
+- **fix(dispatch): bash dispatch deadline, model ceiling and `promote` (K-168, K-169).**
+  `dispatch.sh` runs its adapter function under a shell-native deadline instead of
+  GNU `timeout` (which failed with exit 127 on Linux and on macOS with coreutils),
+  and INT, TERM and HUP stop the adapter's whole process group (exit 130). The
+  deadline is stricter: `s`, `m`, `h`, `d` suffixes; leading zeros are decimal;
+  0, negatives, fractions, junk and over 7 days are refused before the job starts.
+  The `max_model` ceiling on the bash path now ranks the effective model of a
+  model-less or `model-policy:` agent, resolves the runtime before ranking, refuses
+  a ceilinged agent on `--runtime codex|agy` unless the overlay ranks its model,
+  and always pins `--model` and `--runtime claude` so bash cannot run a dearer
+  model from a different agent file. `yakos model-routing promote` refuses symlinked
+  agent paths (rechecked before the rename) and keeps the file mode. See UPGRADING.md.
 - **docs: ADR-0010, the runtime-matrix rewrite and the routing map (K-155).**
   ADR-0010 records harness-native routing, the vendor-policy facts it rests on
   with dates, and the one assumption no source settles (spawning the unmodified

@@ -762,16 +762,20 @@ grep -q '^model: haiku$' "$T11B/project/.claude/agents/mode-agent.md" && ok "suc
 
 # 11c/11d: a linked .claude, and a linked .claude/agents, are refused before any
 # write: the outside file keeps content, mode and inode, no backups dir appears.
-for variant in claude agents; do
+for variant in claude agents file; do
     TL="$WORKDIR/t11-link-$variant"
     mkdir -p "$TL/state" "$TL/project" "$TL/outside/agents"
     make_agent_file "$TL/outside/agents/link-agent.md" "opus"
     chmod 644 "$TL/outside/agents/link-agent.md"
     if [ "$variant" = claude ]; then
         ln -s "$TL/outside" "$TL/project/.claude"
-    else
+    elif [ "$variant" = agents ]; then
         mkdir -p "$TL/project/.claude"
         ln -s "$TL/outside/agents" "$TL/project/.claude/agents"
+    else
+        # the agent FILE is the link; the directories are real
+        mkdir -p "$TL/project/.claude/agents"
+        ln -s "$TL/outside/agents/link-agent.md" "$TL/project/.claude/agents/link-agent.md"
     fi
     make_candidate "link-agent" "opus" "haiku" > "$TL/state/model-routing-candidates.ndjson"
     before_sum="$(cksum < "$TL/outside/agents/link-agent.md")"
@@ -790,7 +794,39 @@ for variant in claude agents; do
     [ "$(mode_of "$TL/outside/agents/link-agent.md")" = "644" ] && ok "linked $variant: outside mode unchanged" || fail "linked $variant: outside mode changed"
     [ ! -e "$TL/state/model-routing-backups" ] && ok "linked $variant: no backup written" || fail "linked $variant: a backup dir was created"
     [ -s "$TL/state/model-routing-history.ndjson" ] && fail "linked $variant: history written" || ok "linked $variant: no history row"
+    if [ "$variant" = file ]; then
+        [ -L "$TL/project/.claude/agents/link-agent.md" ] && ok "linked file: the link is still a link" || fail "linked file: the link was replaced"
+    fi
 done
+
+# 11e: a link swapped in AFTER the guard. A cat shim (the rewrite runs cat after it
+# copied the file and just before the rename) replaces .claude/agents with a link
+# to a directory outside the project, once; the re-check before the rename must
+# refuse, so nothing is written outside and the original file is not touched.
+TR="$WORKDIR/t11-race"
+mkdir -p "$TR/state" "$TR/project/.claude/agents" "$TR/outside" "$TR/shim"
+make_agent_file "$TR/project/.claude/agents/race-agent.md" "opus"
+make_candidate "race-agent" "opus" "haiku" > "$TR/state/model-routing-candidates.ndjson"
+REAL_CAT="$(command -v cat)"
+cat > "$TR/shim/cat" <<SHIMEOF
+#!/bin/sh
+"$REAL_CAT" "\$@"
+rc=\$?
+if [ ! -e "$TR/swapped" ] && [ -d "$TR/project/.claude/agents" ] && [ ! -L "$TR/project/.claude/agents" ]; then
+    : > "$TR/swapped"
+    mv "$TR/project/.claude/agents" "$TR/project/.claude/agents.moved"
+    ln -s "$TR/outside" "$TR/project/.claude/agents"
+fi
+exit \$rc
+SHIMEOF
+chmod +x "$TR/shim/cat"
+RC=0
+OUT="$(PATH="$TR/shim:$PATH" run_promote "$TR" "$MOCK_PASS_LIB" race-agent)" || RC=$?
+[ "$RC" -ne 0 ] && ok "swapped link: promote exits non-zero" || fail "swapped link: promote should refuse"
+printf '%s' "$OUT" | grep -q 'path changed' && ok "swapped link: refusal names the changed path" || fail "swapped link: refusal text: $OUT"
+if printf '%s' "$OUT" | grep -q "$WORKDIR"; then fail "swapped link: refusal leaks a path: $OUT"; else ok "swapped link: refusal is path-free"; fi
+[ -z "$(ls -A "$TR/outside")" ] && ok "swapped link: nothing was written outside the project" || fail "swapped link: wrote outside: $(ls -A "$TR/outside")"
+grep -q '^model: opus$' "$TR/project/.claude/agents.moved/race-agent.md" && ok "swapped link: the original agent is untouched" || fail "swapped link: the original changed"
 
 # ============================================================
 # Summary

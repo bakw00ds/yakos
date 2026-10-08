@@ -246,9 +246,11 @@ func TestPassthroughClampRanksTheBashEffectiveModel(t *testing.T) {
 	if err := budget.SetMaxModel(state, "pinned", "opus"); err != nil {
 		t.Fatal(err)
 	}
+	// Within the ceiling the model is still pinned (K-168 sec-364 H1): bash must
+	// not be left to resolve a dearer one from a file the clamp did not rank.
 	got, err = passthroughClamped([]string{"dispatch", "pinned", "t"}, "pinned", proj, root)
-	if err != nil || hasModelFlag(got) {
-		t.Errorf("opus policy under an opus ceiling must pass: %v %v", got, err)
+	if err != nil || strings.Join(got[len(got)-2:], " ") != "--model opus" {
+		t.Errorf("opus policy under an opus ceiling must be pinned to opus: %v %v", got, err)
 	}
 	// The built-in supervisor ceiling (sonnet) clamps a model-policy: opus line.
 	body := "---\nid: watchdog\nmodel: haiku\nmodel-policy: opus\n---\n\n## Purpose\n\nx.\n"
@@ -261,5 +263,92 @@ func TestPassthroughClampRanksTheBashEffectiveModel(t *testing.T) {
 	got, err = passthroughClamped([]string{"dispatch", "watchdog", "t", "--project", proj}, "watchdog", proj, root)
 	if err != nil || strings.Join(got[len(got)-2:], " ") != "--model sonnet" {
 		t.Errorf("renamed supervisor with model-policy: opus: %v %v", got, err)
+	}
+}
+
+// writeAgentFile writes a roster agent with the given frontmatter lines.
+func writeAgentFile(t *testing.T, dir, file, fm string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := "---\n" + fm + "---\n\n## Purpose\n\nx.\n"
+	if err := os.WriteFile(filepath.Join(dir, file), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// K-168 sec-364 H1: under a ceiling a dispatch with no --model always carries a
+// pin, so bash cannot run a dearer model from a file the clamp did not read.
+func TestPassthroughClampAlwaysPinsUnderCeiling(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("YAKOS_DISPATCH_LOG", state)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("YAKOS_RUNTIME", "")
+	root, proj := t.TempDir(), t.TempDir()
+	writeAgentFile(t, filepath.Join(root, "lib", "agents"), "backend.md", "id: backend\nmodel: haiku\n")
+	if err := budget.SetMaxModel(state, "backend", "sonnet"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := passthroughClamped([]string{"dispatch", "backend", "t"}, "backend", proj, root)
+	if err != nil || strings.Join(got[len(got)-2:], " ") != "--model haiku" || !strings.Contains(" "+strings.Join(got, " "), " --runtime claude ") {
+		t.Fatalf("a within-ceiling agent must be pinned to model and runtime: %v %v", got, err)
+	}
+	// An agent the roster does not hold (bash may find it elsewhere) is pinned too,
+	// to the model bash would default to.
+	if err := budget.SetMaxModel(state, "ghost", "haiku"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = passthroughClamped([]string{"dispatch", "ghost", "t"}, "ghost", proj, root)
+	if err != nil || strings.Join(got[len(got)-2:], " ") != "--model haiku" {
+		t.Fatalf("unknown agent under a ceiling must be pinned: %v %v", got, err)
+	}
+	// An explicit runtime is respected, not overwritten.
+	got, err = passthroughClamped([]string{"dispatch", "backend", "t", "--runtime", "claude"}, "backend", proj, root)
+	if err != nil || strings.Count(strings.Join(got, " "), "--runtime") != 1 {
+		t.Fatalf("explicit runtime duplicated: %v %v", got, err)
+	}
+}
+
+// K-168 sec-364 M1: the runtime resolves from frontmatter, .yakos.yml and
+// YAKOS_RUNTIME before ranking, so a codex agent is never ranked as claude.
+func TestPassthroughClampResolvesRuntimeBeforeRanking(t *testing.T) {
+	state := t.TempDir()
+	t.Setenv("YAKOS_DISPATCH_LOG", state)
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("YAKOS_RUNTIME", "")
+	root, proj := t.TempDir(), t.TempDir()
+	dir := filepath.Join(root, "lib", "agents")
+	writeAgentFile(t, dir, "cx-none.md", "id: cx-none\nruntime: codex\n")
+	writeAgentFile(t, dir, "cx-opus.md", "id: cx-opus\nruntime: codex\nmodel: opus\n")
+	writeAgentFile(t, dir, "cx-gpt.md", "id: cx-gpt\nruntime: codex\nmodel: gpt-5.5\n")
+	writeAgentFile(t, dir, "plain.md", "id: plain\nmodel: sonnet\nrole-domain: x\ndomain: dev\n")
+	for _, n := range []string{"cx-none", "cx-opus", "cx-gpt", "plain"} {
+		if err := budget.SetMaxModel(state, n, "sonnet"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, n := range []string{"cx-none", "cx-opus", "cx-gpt"} {
+		if got, err := passthroughClamped([]string{"dispatch", n, "t"}, n, proj, root); err == nil {
+			t.Errorf("%s: a codex agent under a ceiling must be refused, got %v", n, got)
+		}
+	}
+	// The same refusal from the project file and from the environment.
+	if err := os.WriteFile(filepath.Join(proj, ".yakos.yml"), []byte("per-domain:\n  dev: codex\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := passthroughClamped([]string{"dispatch", "plain", "t"}, "plain", proj, root); err == nil {
+		t.Errorf(".yakos.yml per-domain codex must be refused: %v", got)
+	}
+	if err := os.Remove(filepath.Join(proj, ".yakos.yml")); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("YAKOS_RUNTIME", "codex")
+	if got, err := passthroughClamped([]string{"dispatch", "plain", "t"}, "plain", proj, root); err == nil {
+		t.Errorf("YAKOS_RUNTIME=codex must be refused: %v", got)
+	}
+	t.Setenv("YAKOS_RUNTIME", "")
+	if _, err := passthroughClamped([]string{"dispatch", "plain", "t"}, "plain", proj, root); err != nil {
+		t.Errorf("a claude agent must pass: %v", err)
 	}
 }

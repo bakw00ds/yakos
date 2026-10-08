@@ -55,7 +55,8 @@ Flags:
                     dispatch-log. Does not affect the runtime selection.
   --project <path>  Project repo path. Defaults to inferring from cwd
                     (matches `yakos start`'s inference).
-  --timeout <secs>  Max time to wait. Default 600s.
+  --timeout <secs>  Max time to wait, 1 to 604800 s; optional suffix s, m, h
+                    or d (30, 30s, 2m). Default 600s. 0 and fractions are refused.
   --eval-run-id <id>
                     Mark this dispatch as part of a model-routing eval
                     run. Sets model_chosen_by:"eval" and eval_run_id in
@@ -70,6 +71,33 @@ Examples:
   yakos dispatch test-runner "run the suite" --model sonnet
   yakos dispatch researcher "deep dive" --model fable
 EOF
+}
+
+# _dispatch_deadline_secs <value>: prints the deadline in whole seconds. The value
+# is digits with an optional GNU timeout(1) suffix (s, m, h, d: 30, 30s, 2m, 1h).
+# Leading zeros are decimal (08 is 8, not a bad octal). A deadline of 0, a
+# negative or fractional or non-numeric one, and one over 7 days is refused (exit
+# 1, no output): a deadline that cannot be honoured must stop the dispatch before
+# the job starts, never run it unbounded (K-169). Fractions (1.5) and the
+# infinity word GNU accepted are the break; UPGRADING.md says so.
+_dispatch_deadline_secs() {
+    local v="$1" n unit=1
+    case "$v" in
+        *s) unit=1;     n="${v%?}" ;;
+        *m) unit=60;    n="${v%?}" ;;
+        *h) unit=3600;  n="${v%?}" ;;
+        *d) unit=86400; n="${v%?}" ;;
+        *)  n="$v" ;;
+    esac
+    case "$n" in ''|*[!0-9]*) return 1 ;; esac
+    n="${n#"${n%%[!0]*}"}"          # strip leading zeros (also all-zero -> empty)
+    [ -n "$n" ] || return 1         # zero
+    [ "${#n}" -le 7 ] || return 1   # bounds the arithmetic below
+    n=$((10#$n))
+    [ "$n" -le 604800 ] || return 1
+    n=$((n * unit))
+    [ "$n" -le 604800 ] || return 1
+    printf '%s\n' "$n"
 }
 
 AGENT_NAME=""
@@ -129,6 +157,10 @@ done
 
 [ -n "$AGENT_NAME" ] || { usage >&2; ct_die "dispatch: missing <agent-name>"; }
 [ -n "$TASK" ] || { usage >&2; ct_die "dispatch: missing <task-prompt>"; }
+
+TIMEOUT_ARG="$TIMEOUT"
+TIMEOUT="$(_dispatch_deadline_secs "$TIMEOUT_ARG")" \
+    || ct_die "dispatch: --timeout '$TIMEOUT_ARG' must be a whole number of seconds from 1 to 604800 (optional suffix s, m, h or d)"
 
 # ---- resolve project --------------------------------------------------------
 
@@ -262,14 +294,20 @@ if [ -n "$MODEL_OVERRIDE" ]; then
     MODEL_CHOSEN_BY="override"
 fi
 
-# Apply max-duration-s as the dispatch timeout if set and < TIMEOUT.
+# Apply max-duration-s as the dispatch timeout if set and < TIMEOUT. A zero is
+# refused (it would mean no deadline); a non-number is ignored with a warning; a
+# number over the 7-day cap cannot be below TIMEOUT, so it changes nothing.
 if [ -n "$AGENT_MAX_DURATION" ]; then
     case "$AGENT_MAX_DURATION" in
         *[!0-9]*) ct_log "WARN: agent max-duration-s '$AGENT_MAX_DURATION' is not numeric; ignoring" ;;
         *)
-            if [ "$AGENT_MAX_DURATION" -lt "$TIMEOUT" ]; then
-                TIMEOUT="$AGENT_MAX_DURATION"
-                ct_log "dispatch: applying agent max-duration-s=$TIMEOUT"
+            if AGENT_MAX_DURATION_S="$(_dispatch_deadline_secs "$AGENT_MAX_DURATION")"; then
+                if [ "$AGENT_MAX_DURATION_S" -lt "$TIMEOUT" ]; then
+                    TIMEOUT="$AGENT_MAX_DURATION_S"
+                    ct_log "dispatch: applying agent max-duration-s=$TIMEOUT"
+                fi
+            elif [ -z "${AGENT_MAX_DURATION#"${AGENT_MAX_DURATION%%[!0]*}"}" ]; then
+                ct_die "dispatch: agent max-duration-s '$AGENT_MAX_DURATION' must be positive; 0 would mean no deadline"
             fi
             ;;
     esac
@@ -379,8 +417,9 @@ epoch_start="$(ct_iso_to_epoch "$ts_start" 2>/dev/null || date +%s)"
 # with coreutils) execs its command and cannot run a function: "failed to run
 # command 'yk_rt_dispatch'", exit 127, before any runtime starts. ct_timeout is
 # right for an external command and wrong here, so a function gets a shell-native
-# deadline instead: it runs in a background subshell, the parent polls it, and on
-# expiry the subshell and its descendants get TERM, then KILL after a grace
+# deadline instead: it runs as a background job (its own process group when stdin
+# is not a terminal), the parent polls it, and on expiry, or on INT, TERM or HUP
+# to the parent, the job and every descendant get TERM, then KILL after a grace
 # period. Same contract as timeout(1): exit 124 on expiry, else the command's
 # own status. stdin is passed through (a background job would otherwise get
 # /dev/null). Any other command still goes through ct_timeout.
@@ -401,40 +440,64 @@ _dispatch_descendants() {
         }'
 }
 
+# _dispatch_kill_tree <pid> <group|walk>: TERM, a grace period, then KILL, for pid
+# and everything below it. In group mode pid leads its own process group (set -m),
+# which also holds a grandchild that double-forked and was reparented to init, so
+# the group is the kill; the ps-snapshot walk covers the tty case (no job control)
+# and a child that left the group.
+_dispatch_kill_tree() {
+    local pid="$1" mode="$2" victims grace=0
+    victims="$(_dispatch_descendants "$pid" | tr '\n' ' ')"
+    if [ "$mode" = group ]; then kill -TERM -- "-$pid" 2>/dev/null || true; fi
+    # shellcheck disable=SC2086  # a space-separated list of pids
+    kill -TERM "$pid" $victims 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null && [ "$grace" -lt 10 ]; do
+        sleep 0.2
+        grace=$((grace + 1))
+    done
+    if [ "$mode" = group ]; then kill -KILL -- "-$pid" 2>/dev/null || true; fi
+    # shellcheck disable=SC2086
+    kill -KILL "$pid" $victims 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+}
+
 _dispatch_run_bounded() {
     local secs="$1"; shift
     if [ "$(type -t "$1" 2>/dev/null)" != "function" ]; then
         ct_timeout "$secs" "$@"
         return $?
     fi
-    secs="${secs%s}"
-    case "$secs" in
-        ''|*[!0-9]*) ct_die "dispatch: timeout '$secs' is not a whole number of seconds" ;;
-    esac
-    local pid rc=0 deadline victims
+    local secs_arg="$secs"
+    secs="$(_dispatch_deadline_secs "$secs_arg")" \
+        || ct_die "dispatch: timeout '$secs_arg' must be a whole number of seconds from 1 to 604800"
+    local pid rc=0 deadline mode=walk
+    # Own process group for the job, so a kill reaches every descendant. Not with
+    # a terminal on stdin: a background group that reads the tty is stopped
+    # (SIGTTIN), and there the walk plus the tty's own SIGINT do the work.
+    if [ ! -t 0 ]; then
+        mode=group
+        set -m
+    fi
     "$@" <&0 &
     pid=$!
-    if [ "$secs" -gt 0 ]; then
-        deadline=$((SECONDS + secs))
-        while kill -0 "$pid" 2>/dev/null; do
-            if [ "$SECONDS" -ge "$deadline" ]; then
-                victims="$(_dispatch_descendants "$pid" | tr '\n' ' ')"
-                # shellcheck disable=SC2086  # a space-separated list of pids
-                kill -TERM "$pid" $victims 2>/dev/null || true
-                local grace=0
-                while kill -0 "$pid" 2>/dev/null && [ "$grace" -lt 10 ]; do
-                    sleep 0.2
-                    grace=$((grace + 1))
-                done
-                # shellcheck disable=SC2086
-                kill -KILL "$pid" $victims 2>/dev/null || true
-                wait "$pid" 2>/dev/null || true
-                return 124
-            fi
-            sleep 0.2
-        done
-    fi
+    if [ "$mode" = group ]; then set +m; fi
+    # A non-interactive shell leaves a background job deaf to SIGINT, so without
+    # these the adapter would outlive its caller, with no deadline and no ledger
+    # row. Kill the tree, drop the scratch files, exit 130.
+    # shellcheck disable=SC2064  # the pid and mode are fixed now, on purpose
+    trap "_dispatch_kill_tree $pid $mode; rm -f \"\${out_tmp:-}\" \"\${usage_tmp:-}\" \"\${stderr_tmp:-}\" 2>/dev/null; exit 130" INT TERM HUP
+    # SECONDS counts whole seconds, so +1 keeps the deadline from firing early.
+    deadline=$((SECONDS + secs + 1))
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$SECONDS" -ge "$deadline" ]; then
+            _dispatch_kill_tree "$pid" "$mode"
+            trap - INT TERM HUP
+            return 124
+        fi
+        sleep 0.2
+    done
     wait "$pid" || rc=$?
+    trap - INT TERM HUP
     return "$rc"
 }
 
