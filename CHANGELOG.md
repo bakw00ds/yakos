@@ -83,6 +83,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   command before its first write. A stale edit lock is broken by rename, so
   only one waiter wins.
 
+- **Read-only Models & Providers console tab (K-153).** Providers (installed,
+  signed in, cooldown, next step), the catalog with 30-day tokens per model, tier
+  aliases, pins and router rules, budgets, eval results, the sensitive class and
+  an explain playground, over `GET /api/models/overview`, `/api/models/explain`
+  and `/api/router/policy`. Browser writes are held for K-153b; see
+  `docs/routing.md`.
+
 ## [0.62.0.0] — 2026-10-06
 
 Minor release: the multi-harness routing wave. Go dispatch honors agent

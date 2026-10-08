@@ -98,6 +98,13 @@ func (s *cooldownSet) of(project string) *router.Cooldown {
 	return sc.cd
 }
 
+// RuntimeCooling reports whether the router is skipping runtime for project (three
+// failures in a row cool it for a minute) and for how much longer. It reads the
+// in-memory table of the running process; a fresh process reports nothing cooling.
+func RuntimeCooling(project, runtime string) (bool, time.Duration) {
+	return routerCooldown.of(project).Cooling(runtime)
+}
+
 // policyAction is a selected policy rule as the chain sees it.
 type policyAction struct {
 	rule         router.Rule
