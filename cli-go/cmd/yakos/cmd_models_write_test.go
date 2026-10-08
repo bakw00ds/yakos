@@ -171,11 +171,11 @@ func TestModelsPricing(t *testing.T) {
 	audit := ledgerFor(t)
 	r := newModelsRig(t)
 	code, out, errs := r.do("pricing", "claude-opus-5-5-high", "--input", "5", "--output", "25", "--cache-read", "0.5", "--billing", "api")
-	if code != 0 || strings.Count(out, "ok:") != 2 {
+	if code != 0 || strings.Count(out, "ok:") != 1 {
 		t.Fatalf("exit %d out=%q err=%q", code, out, errs)
 	}
-	if n := len(audit()); n != 2 {
-		t.Errorf("billing and price are two writes, %d audit lines", n)
+	if n := len(audit()); n != 1 {
+		t.Errorf("billing and price are one atomic write, %d audit lines", n)
 	}
 	_, show, _ := r.do("show", "claude-opus-5-5-high", "--harness", "agy")
 	if !strings.Contains(show, "api") || !strings.Contains(show, "25") {
