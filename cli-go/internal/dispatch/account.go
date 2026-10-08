@@ -452,9 +452,10 @@ type ConfigChange struct {
 }
 
 // auditFiles are the files a ConfigChange may name: the router policy, the model
-// registry overlay and the budget policy. The event carries the base name only,
-// never a path.
-var auditFiles = map[string]bool{"router-policy.yml": true, "model-registry.yml": true, "budget-policy.yml": true}
+// registry overlay, the budget policy and the workflow triggers' schedules file
+// (the fixed label "schedules.yml": the real name carries a project slug and a
+// path hash). The event carries the base name only, never a path.
+var auditFiles = map[string]bool{"router-policy.yml": true, "model-registry.yml": true, "budget-policy.yml": true, "schedules.yml": true}
 
 type configChangedEvent struct {
 	Type       string `json:"type"`
