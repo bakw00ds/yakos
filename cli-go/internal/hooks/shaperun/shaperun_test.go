@@ -373,9 +373,9 @@ func shellEnvelope(shape, cmd string, argv []string) []byte {
 		cmdv = argv
 	}
 	if shape == "codex" {
-		v = map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": "/w", "tool_input": map[string]any{"command": cmdv}}
+		v = map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "tool_input": map[string]any{"command": cmdv}}
 	} else {
-		v = map[string]any{"workspacePaths": []string{"/w"}, "toolCall": map[string]any{"name": "run_command", "args": map[string]any{"CommandLine": cmd}}}
+		v = map[string]any{"toolCall": map[string]any{"name": "run_command", "args": map[string]any{"CommandLine": cmd}}}
 	}
 	b, _ := json.Marshal(v)
 	return b
@@ -500,5 +500,66 @@ func TestShellWriteInputsOnePerTarget(t *testing.T) {
 	}
 	if len(hookio.ShellWriteInputs([]hooktype.HookInput{{Tool: "Read", Event: "PreToolUse"}})) != 0 {
 		t.Error("a non-shell tool produced writes")
+	}
+}
+
+// Relative patch paths are relative to the envelope's cwd, which may be a
+// subdirectory of the project: "src/evil.go" from P/other lands in
+// P/other/src/evil.go, outside an allow-list of src/**.
+func TestRelativePathsAreJudgedFromTheEnvelopeCwd(t *testing.T) {
+	proj, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(proj, ".claude", "path-allowlist.json"), []byte(`{"backend":{"allow":["src/**"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wc := t.TempDir()
+	run := func(cwd, tool string, input map[string]any) int {
+		d := deps(t, false)
+		d.Agent = "backend"
+		d.Resolve = func(string) (registry.Config, string) {
+			return registry.Config{WorkCurrentDir: wc, ProjectDir: proj, StateDir: t.TempDir()}, wc
+		}
+		b, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "tool_name": tool, "cwd": cwd, "tool_input": input})
+		return Run(hookio.WithProject(context.Background(), proj), "codex", "path-allowlist", b, d).ExitCode
+	}
+	patch := map[string]any{"input": "*** Begin Patch\n*** Add File: src/evil.go\n+x\n*** End Patch"}
+	if got := run(filepath.Join(proj, "other"), "apply_patch", patch); got != 2 {
+		t.Errorf("patch from a subdirectory cwd: exit %d, want 2", got)
+	}
+	if got := run(proj, "apply_patch", patch); got != 0 {
+		t.Errorf("patch from the project root: exit %d, want 0", got)
+	}
+	// From the allowed subdirectory the same relative path is fine.
+	if got := run(filepath.Join(proj, "src"), "Write", map[string]any{"file_path": "a.go", "content": "x"}); got != 0 {
+		t.Errorf("write inside src from cwd src: exit %d, want 0", got)
+	}
+	if got := run(filepath.Join(proj, "src"), "Write", map[string]any{"file_path": "../README.md", "content": "x"}); got != 2 {
+		t.Errorf("traversal from cwd src: exit %d, want 2", got)
+	}
+	if got := run(filepath.Join(proj, "other"), "Write", map[string]any{"file_path": "src/evil.go", "content": "x"}); got != 2 {
+		t.Errorf("write from a subdirectory cwd: exit %d, want 2", got)
+	}
+}
+
+// A shell redirect is relative to the envelope's cwd as well.
+func TestShellWriteFromSubdirectoryCwd(t *testing.T) {
+	d := shellDeps(t, "backend", `{"backend":{"allow":["src/**"]}}`)
+	cfg, _ := d.Resolve("")
+	ctx := hookio.WithProject(context.Background(), cfg.ProjectDir)
+	mk := func(cwd string) []byte {
+		b, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": cwd,
+			"tool_input": map[string]any{"command": "echo x > src/evil.go"}})
+		return b
+	}
+	if r := Run(ctx, "codex", "path-allowlist", mk(filepath.Join(cfg.ProjectDir, "other")), d); !denied(r) {
+		t.Errorf("redirect from a subdirectory cwd allowed: %+v", r)
+	}
+	if r := Run(ctx, "codex", "path-allowlist", mk(cfg.ProjectDir), d); denied(r) {
+		t.Errorf("redirect from the project root blocked: %+v", r)
 	}
 }

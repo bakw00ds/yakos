@@ -49,7 +49,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/bakw00ds/yakos/internal/dashauth"
@@ -94,7 +96,7 @@ type hooksHandler struct {
 // (without the role gate). A failure to persist the nonce leaves the endpoint
 // off rather than usable by nobody-knows-whom.
 func newHooksHandler(ep *HooksEndpoint, addr string) (http.Handler, error) {
-	if ep == nil || ep.Run == nil || ep.Known == nil || ep.NonceFile == "" || !filepath.IsAbs(ep.ProjectDir) {
+	if ep == nil || ep.Run == nil || ep.Known == nil || ep.NonceFile == "" || !isAbsFor(runtime.GOOS, ep.ProjectDir) {
 		return nil, errors.New("hooks endpoint: incomplete configuration")
 	}
 	project, err := resolveDir(ep.ProjectDir)
@@ -115,33 +117,82 @@ func newHooksHandler(ep *HooksEndpoint, addr string) (http.Handler, error) {
 	return dashauth.RequireLocalHost(addr, http.HandlerFunc(h.serve)), nil
 }
 
-// resolveDir cleans dir and resolves its symlinks. A path that does not exist
-// is compared lexically (Clean only), so a missing directory can never be
-// "within" the bound project through a link.
+// resolveDir resolves the symlinks of the longest existing prefix of dir and
+// appends the rest, so a link inside the project cannot be hidden behind a
+// component that does not exist yet ("P/link-out/missing"). A path with a ".."
+// component is refused: the OS would apply it to a link's target, which a
+// lexical Clean cannot see.
 func resolveDir(dir string) (string, error) {
-	c := filepath.Clean(dir)
-	if r, err := filepath.EvalSymlinks(c); err == nil {
-		return r, nil
+	for _, c := range strings.FieldsFunc(dir, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if c == ".." {
+			return "", errors.New("parent component")
+		}
 	}
-	if _, err := os.Stat(c); err == nil {
-		return "", errors.New("unresolvable")
+	p := filepath.Clean(dir)
+	var rest []string
+	for {
+		r, err := filepath.EvalSymlinks(p)
+		if err == nil {
+			for i := len(rest) - 1; i >= 0; i-- {
+				r = filepath.Join(r, rest[i])
+			}
+			return r, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return "", err
+		}
+		rest = append(rest, filepath.Base(p))
+		p = parent
 	}
-	return c, nil
 }
 
 // withinProject reports whether dir is the bound project or inside it.
 func (h *hooksHandler) withinProject(dir string) bool {
-	if !filepath.IsAbs(dir) {
+	if !isAbsFor(runtime.GOOS, dir) {
 		return false
 	}
 	d, err := resolveDir(dir)
 	if err != nil {
 		return false
 	}
-	if d == h.project {
+	return pathWithin(runtime.GOOS, h.project, d)
+}
+
+// canonPath is the comparison form of an absolute path on goos: separators
+// unified to "/", cleaned, and, on Windows, case-folded (its file systems are
+// case-insensitive). It is lexical; callers resolve symlinks first.
+func canonPath(goos, p string) string {
+	if goos == "windows" {
+		p = strings.ToLower(strings.ReplaceAll(p, `\`, "/"))
+	}
+	return path.Clean(p)
+}
+
+// isAbsFor reports whether p is absolute on goos: a rooted path, or on Windows
+// also a drive path ("C:\x", "c:/x") or a UNC path.
+func isAbsFor(goos, p string) bool {
+	if goos != "windows" {
+		return strings.HasPrefix(p, "/")
+	}
+	p = strings.ReplaceAll(p, `\`, "/")
+	if strings.HasPrefix(p, "//") {
 		return true
 	}
-	return strings.HasPrefix(d, strings.TrimRight(h.project, string(filepath.Separator))+string(filepath.Separator))
+	return len(p) >= 3 && p[1] == ':' && p[2] == '/' && (p[0]|0x20 >= 'a' && p[0]|0x20 <= 'z')
+}
+
+// pathWithin reports whether dir equals project or lies below it, comparing
+// canonical forms for goos. Both arguments must be absolute.
+func pathWithin(goos, project, dir string) bool {
+	p, d := canonPath(goos, project), canonPath(goos, dir)
+	if d == p {
+		return true
+	}
+	return strings.HasPrefix(d, strings.TrimRight(p, "/")+"/")
 }
 
 func writeNonceFile(path, nonce string) error {

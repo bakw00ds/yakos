@@ -49,7 +49,12 @@ func newHooksEP(t *testing.T, enabled bool) hooksEPFixture {
 			Run: func(ctx context.Context, shape, name string, body []byte) hookio.Response {
 				*calls++
 				if bytes.Contains(body, []byte("PROJECT")) {
-					return hookio.Respond(shape, "PreToolUse", true, "project="+hookio.ProjectFrom(ctx))
+					// Never echo the path: only whether it is the bound project.
+					got := "OTHER"
+					if hookio.ProjectFrom(ctx) == project {
+						got = "BOUND"
+					}
+					return hookio.Respond(shape, "PreToolUse", true, "project="+got)
 				}
 				if bytes.Contains(body, []byte("WHOAMI")) {
 					return hookio.Respond(shape, "PreToolUse", true, "agent="+hookio.AgentFrom(ctx))
@@ -245,12 +250,13 @@ func TestHooksEndpointBindsProjectToNonce(t *testing.T) {
 	refused["agy relative"] = do("agy", agy("proj"))
 	if runtime.GOOS != "windows" {
 		refused["symlink out"] = do("codex", codex(link))
+		refused["symlink out, missing child"] = do("codex", codex(filepath.Join(link, "missing", "deeper")))
 	}
 	for name, w := range refused {
 		if w.Code != http.StatusForbidden {
 			t.Errorf("%s: status %d, want 403 (%s)", name, w.Code, w.Body)
 		}
-		for _, p := range []string{outside, f.project, "-evil"} {
+		for _, p := range []string{outside, f.project, "-evil", strings.ReplaceAll(outside, `\`, `\\`), strings.ReplaceAll(f.project, `\`, `\\`)} {
 			if strings.Contains(w.Body.String(), p) {
 				t.Errorf("%s: response leaks a path (%q): %s", name, p, w.Body)
 			}
@@ -263,14 +269,15 @@ func TestHooksEndpointBindsProjectToNonce(t *testing.T) {
 	// Accepted: the project, a subdirectory, an agy workspace inside it, and an
 	// envelope that names none. The hook always sees the BOUND project.
 	for name, w := range map[string]*httptest.ResponseRecorder{
-		"project":    do("codex", codex(f.project)),
-		"subdir":     do("codex", codex(sub)),
-		"agy":        do("agy", agy(f.project)),
-		"no cwd":     do("codex", codex("")),
-		"unparsable": do("codex", "PROJECT"),
+		"project":                      do("codex", codex(f.project)),
+		"subdir":                       do("codex", codex(sub)),
+		"agy":                          do("agy", agy(f.project)),
+		"no cwd":                       do("codex", codex("")),
+		"missing child of the project": do("codex", codex(filepath.Join(f.project, "not-yet", "there"))),
+		"unparsable":                   do("codex", "PROJECT"),
 	} {
-		if w.Code != 200 || !strings.Contains(w.Body.String(), "project="+f.project) {
-			t.Errorf("%s: %d %s, want the bound project %s", name, w.Code, w.Body, f.project)
+		if w.Code != 200 || !strings.Contains(w.Body.String(), "project=BOUND") {
+			t.Errorf("%s: %d %s, want the bound project", name, w.Code, w.Body)
 		}
 	}
 }

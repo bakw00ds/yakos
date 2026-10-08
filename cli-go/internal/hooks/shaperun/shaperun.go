@@ -91,6 +91,11 @@ func Run(ctx context.Context, shape, name string, data []byte, d Deps) hookio.Re
 		ins = append(ins, hookio.ShellWriteInputs(ins)...)
 	}
 
+	// A relative file path means "relative to the envelope's cwd", which may be
+	// a subdirectory of the project. The hooks judge paths against the project
+	// root, so make them absolute first (K-170 fix).
+	absolutizeFilePaths(ins)
+
 	// A bound project (the endpoint's nonce) outranks everything the caller or
 	// the envelope says: the hooks judge the call against that project only.
 	bound := hookio.ProjectFrom(ctx)
@@ -165,6 +170,47 @@ func Run(ctx context.Context, shape, name string, data []byte, d Deps) hookio.Re
 		}
 	}
 	return hookio.Respond(shape, event, false, "")
+}
+
+// absolutizeFilePaths rewrites a relative tool_input.file_path / notebook_path
+// to "<envelope cwd>/<path>" when the envelope's cwd is absolute. The join is
+// textual on purpose: cleaning would collapse "link/.." before path-allowlist
+// can resolve the path as written. Payload maps belong to the decoder, so they
+// are copied.
+func absolutizeFilePaths(ins []hooktype.HookInput) {
+	for i := range ins {
+		cwd := ins[i].WorkDir
+		if !filepath.IsAbs(cwd) && !strings.HasPrefix(cwd, "/") {
+			continue
+		}
+		ti, ok := ins[i].Payload["tool_input"].(map[string]any)
+		if !ok {
+			continue
+		}
+		var nti map[string]any
+		for _, k := range []string{"file_path", "notebook_path"} {
+			p, ok := ti[k].(string)
+			if !ok || p == "" || filepath.IsAbs(p) || strings.HasPrefix(p, "/") {
+				continue
+			}
+			if nti == nil {
+				nti = make(map[string]any, len(ti))
+				for kk, v := range ti {
+					nti[kk] = v
+				}
+			}
+			nti[k] = strings.TrimRight(cwd, "/") + "/" + p
+		}
+		if nti == nil {
+			continue
+		}
+		pl := make(map[string]any, len(ins[i].Payload))
+		for k, v := range ins[i].Payload {
+			pl[k] = v
+		}
+		pl["tool_input"] = nti
+		ins[i].Payload = pl
+	}
 }
 
 func isRuntimeName(agent string) bool {

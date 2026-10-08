@@ -151,7 +151,9 @@ installed binary no longer exists: codex fails open when a hook cannot start.
 
 Fail-closed launcher (K-170): on Unix each hook command is
 `/bin/sh -c '<script>' <absolute yakos>`, with the binary as `$0`. A PreToolUse
-launcher runs the binary only if it is a regular, executable file, and passes
+launcher runs the binary only if its path is absolute and names a regular,
+executable file (a hand-edited relative path would resolve against the harness
+cwd, so it is refused), and passes
 through its own answer only when it exits 0 or 2 (codex) or exits 0 (agy). A
 missing, non-executable, directory or crashing binary instead yields the
 harness's own deny (codex: exit 2 with a reason on stderr; agy: stdout
@@ -222,7 +224,11 @@ absolute `cwd` (codex) or first `workspacePaths` entry (agy). The hook process's
 working directory is never used (agy runs hooks from `.agents`). When none of those
 names a project, a fail-closed hook refuses the PreToolUse call ("cannot determine
 the project directory") and a telemetry hook skips it; `YAKOS_HOOKS_FAIL_OPEN=1`
-overrides, as for an undecodable envelope. A harness started in a subdirectory of
+overrides, as for an undecodable envelope. A relative file path in a tool call is
+taken relative to the envelope's cwd, which may be a subdirectory of the project,
+and is made absolute before the hooks judge it against the project root. The
+endpoint resolves symlinks in the longest existing prefix of an envelope
+directory and refuses one containing "..". A harness started in a subdirectory of
 the project is judged by that subdirectory's `.claude/`, which usually holds no
 policy: start it at the project root.
 

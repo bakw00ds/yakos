@@ -464,10 +464,10 @@ func TestBinaryCharsOKIsOSAware(t *testing.T) {
 // hash, so it must be deliberate.
 func TestShapeCommandGoldenUnix(t *testing.T) {
 	cases := []struct{ harness, name, event, want string }{
-		{"codex", "path-allowlist", "PreToolUse", `/bin/sh -c 'if [ -f "$0" ] && [ -x "$0" ]; then "$0" hook run --shape codex path-allowlist; rc=$?; if [ $rc -eq 0 ] || [ $rc -eq 2 ]; then exit $rc; fi; fi; echo "yakOS: the hook binary is missing, not executable or failed to run; refusing the tool call" >&2; exit 2' /opt/yakos/bin/yakos`},
-		{"agy", "secret-scan", "PreToolUse", `/bin/sh -c 'if [ -f "$0" ] && [ -x "$0" ]; then out=$("$0" hook run --shape agy secret-scan) && { printf "%s\n" "$out"; exit 0; }; fi; printf "%s\n" "{\"decision\":\"deny\",\"reason\":\"yakOS: the hook binary is missing, not executable or failed to run; refusing the tool call\"}"; exit 0' /opt/yakos/bin/yakos`},
-		{"codex", "supervisor-stream", "PostToolUse", `/bin/sh -c 'if [ -f "$0" ] && [ -x "$0" ]; then exec "$0" hook run --shape codex supervisor-stream; fi; echo "yakOS: the hook binary is missing or not executable; this hook was skipped" >&2; exit 0' /opt/yakos/bin/yakos`},
-		{"agy", "supervisor-stream", "PostToolUse", `/bin/sh -c 'if [ -f "$0" ] && [ -x "$0" ]; then exec "$0" hook run --shape agy supervisor-stream; fi; echo "yakOS: the hook binary is missing or not executable; this hook was skipped" >&2; printf "{}\n"; exit 0' /opt/yakos/bin/yakos`},
+		{"codex", "path-allowlist", "PreToolUse", `/bin/sh -c 'if case "$0" in /*) [ -f "$0" ] && [ -x "$0" ];; *) false;; esac; then "$0" hook run --shape codex path-allowlist; rc=$?; if [ $rc -eq 0 ] || [ $rc -eq 2 ]; then exit $rc; fi; fi; echo "yakOS: the hook binary is missing, not executable or failed to run; refusing the tool call" >&2; exit 2' /opt/yakos/bin/yakos`},
+		{"agy", "secret-scan", "PreToolUse", `/bin/sh -c 'if case "$0" in /*) [ -f "$0" ] && [ -x "$0" ];; *) false;; esac; then out=$("$0" hook run --shape agy secret-scan) && { printf "%s\n" "$out"; exit 0; }; fi; printf "%s\n" "{\"decision\":\"deny\",\"reason\":\"yakOS: the hook binary is missing, not executable or failed to run; refusing the tool call\"}"; exit 0' /opt/yakos/bin/yakos`},
+		{"codex", "supervisor-stream", "PostToolUse", `/bin/sh -c 'if case "$0" in /*) [ -f "$0" ] && [ -x "$0" ];; *) false;; esac; then exec "$0" hook run --shape codex supervisor-stream; fi; echo "yakOS: the hook binary is missing or not executable; this hook was skipped" >&2; exit 0' /opt/yakos/bin/yakos`},
+		{"agy", "supervisor-stream", "PostToolUse", `/bin/sh -c 'if case "$0" in /*) [ -f "$0" ] && [ -x "$0" ];; *) false;; esac; then exec "$0" hook run --shape agy supervisor-stream; fi; echo "yakOS: the hook binary is missing or not executable; this hook was skipped" >&2; printf "{}\n"; exit 0' /opt/yakos/bin/yakos`},
 	}
 	for _, c := range cases {
 		if got := shapeCommand("linux", c.harness, "/opt/yakos/bin/yakos", c.name, c.event); got != c.want {
@@ -620,5 +620,37 @@ func TestInstalledFileUsesLauncherAndRoundTrips(t *testing.T) {
 			t.Errorf("%s: a deleted binary is not reported missing: %+v", harness, in)
 		}
 		bin = fakeBin(t)
+	}
+}
+
+// A hand-edited relative binary path would resolve against the harness cwd (a
+// project-controlled directory): the launcher refuses it even when it runs.
+func TestLauncherRefusesRelativeBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix launcher")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "yakos"), []byte("#!/bin/sh\necho RAN > ran.marker\nexit 0\n"), 0o755); err != nil { //nolint:gosec
+		t.Fatal(err)
+	}
+	for _, harness := range []string{HarnessCodex, HarnessAgy} {
+		for _, rel := range []string{"yakos", "./yakos"} {
+			sh := os.Getenv("YAKOS_TEST_SH")
+			if sh == "" {
+				sh = "sh"
+			}
+			cmd := exec.Command(sh, "-c", shapeCommand("linux", harness, rel, "path-allowlist", "PreToolUse")) //nolint:gosec
+			cmd.Dir = dir
+			var o, e bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &o, &e
+			_ = cmd.Run()
+			if _, err := os.Stat(filepath.Join(dir, "ran.marker")); err == nil {
+				t.Fatalf("%s %q: the relative binary was run", harness, rel)
+			}
+			deny := harness == HarnessCodex && cmd.ProcessState.ExitCode() == 2 || harness == HarnessAgy && strings.Contains(o.String(), `"decision":"deny"`)
+			if !deny {
+				t.Errorf("%s %q: not refused: exit %d out %q err %q", harness, rel, cmd.ProcessState.ExitCode(), o.String(), e.String())
+			}
+		}
 	}
 }
