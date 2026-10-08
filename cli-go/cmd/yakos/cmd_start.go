@@ -224,6 +224,7 @@ func runStart(yakosRoot string, args []string) {
 	shareTerminal := false
 	direct := false
 	routed := false
+	native := ""
 	var passthrough []string
 
 	// Explicit-flag sentinels for daemon auto-spawn decision.
@@ -276,6 +277,7 @@ func runStart(yakosRoot string, args []string) {
 		{Name: "--share-terminal", Kind: cliflag.Bool, Bool: &shareTerminal},
 		{Name: "--direct", Kind: cliflag.Bool, Bool: &direct},
 		{Name: "--routed", Kind: cliflag.Bool, Bool: &routed},
+		{Name: "--native", Kind: cliflag.String, Str: &native, ValueDesc: "a runtime id"},
 	}}
 	head, tail := splitStartTerminator(args, fs)
 	rest, perr := fs.Parse(head)
@@ -301,6 +303,28 @@ func runStart(yakosRoot string, args []string) {
 				os.Exit(1)
 			}
 		}
+	}
+
+	// --native <runtime> is the vendor-TUI launch of today: it is --runtime
+	// under a name that says what it does now that the REPL is the default.
+	if native != "" {
+		if runtime != "" && runtime != native {
+			fmt.Fprintln(os.Stderr, "start: --native and --runtime name different runtimes")
+			os.Exit(1)
+		}
+		runtime = native
+	}
+	if wantREPL(replGate{
+		native: native, runtime: runtime, noREPL: noREPL, dryRun: dryRun, printAgents: printAgents,
+		printEnv: printEnv, shareTerminal: shareTerminal, direct: direct, cont: continueSession,
+		fork: fork, ide: ide, bare: bare, strictMCP: strictMCP, resume: resume, passthrough: passthrough,
+		daemonFlags: networkedFromFlags(networked, consoleBind) || consoleBindProvided || consoleExternalHostProvided,
+	}, stdinIsTerminal()) {
+		h := os.Getenv("HOME")
+		if h == "" {
+			h = "/tmp"
+		}
+		os.Exit(runStartREPL(h, name, runtime, model, consoleAddr))
 	}
 
 	// Resolve YAKOS_ROOT from env (bash entry-point may set it).

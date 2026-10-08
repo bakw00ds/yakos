@@ -75,6 +75,7 @@ func runServe(yakosRoot string, args []string) {
 	consoleBootstrapCertName := ""
 	noBootstrapCert := false
 	consoleAllowBash := false
+	requireConsole := false
 	consoleStructuredQuestions := false
 	shareTerminal := false
 	openAIEndpoint := false
@@ -112,6 +113,7 @@ func runServe(yakosRoot string, args []string) {
 		{Name: "--console-bootstrap-cert", Kind: cliflag.String, Str: &consoleBootstrapCertName, ValueDesc: "a name"},
 		{Name: "--no-bootstrap-cert", Kind: cliflag.Bool, Bool: &noBootstrapCert},
 		{Name: "--console-allow-bash", Kind: cliflag.Bool, Bool: &consoleAllowBash},
+		{Name: "--require-console", Kind: cliflag.Bool, Bool: &requireConsole},
 		{Name: "--console-structured-questions", Kind: cliflag.Bool, Bool: &consoleStructuredQuestions},
 		{Name: "--share-terminal", Kind: cliflag.Bool, Bool: &shareTerminal},
 		{Name: "--openai-endpoint", Kind: cliflag.Bool, Bool: &openAIEndpoint},
@@ -215,6 +217,7 @@ func runServe(yakosRoot string, args []string) {
 		ConsoleBootstrapCertName:       consoleBootstrapCertName,
 		NoBootstrapCert:                noBootstrapCert,
 		ConsoleAllowBash:               consoleAllowBash,
+		RequireConsole:                 requireConsole,
 		ConsoleStructuredQuestions:     consoleStructuredQuestions,
 		ShareTerminal:                  shareTerminal,
 		OpenAIEndpoint:                 openAIEndpoint,
@@ -574,7 +577,7 @@ func runServeStop() {
 func printServeHelp(w io.Writer) {
 	_, _ = fmt.Fprint(w, `yakos serve [stop | --socket <path>] [--pidfile <path>] [--ws-addr <addr>]
              [--console-addr <addr>] [--console-bind <addr>]
-             [--console-external-host <host[:port]>] [--no-console]
+             [--console-external-host <host[:port]>] [--no-console] [--require-console]
              [--perf-addr <addr>] [--no-perf] [--detach] [--help]
 
 Start the yakos daemon for the current workspace.
@@ -629,6 +632,8 @@ Flags:
                                      --console-external-host 192.168.1.50:7890 \
                                      --console-external-host myhost.local:7890
   --no-console              Disable the unified console server.
+  --require-console         Exit with an error when the console cannot bind its port
+                            (default: log it and run without a console).
   --openai-endpoint         Serve the OpenAI-compatible endpoint (/v1/models,
                             /v1/chat/completions) on 127.0.0.1:7898, loopback only,
                             bearer = the REST write token. Same as openai_endpoint: true

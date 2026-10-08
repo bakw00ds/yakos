@@ -1255,6 +1255,17 @@ loads the chosen runtime adapter, materializes agents in the right
 format, and exec's the session. <name> is inferred from the cwd if
 not supplied.
 
+Interactive mode (YAKOS_IMPL=go, on a terminal):
+    (default)             Open the yakOS REPL: a line client of the console
+                          daemon (auto-started when absent). Messages route
+                          through the router; the same conversation is in the
+                          console Chat pane. Type /help in the REPL.
+    --native <runtime>    Skip the REPL and exec the vendor TUI (claude |
+                          codex | agy) as before. Same as --runtime <id>.
+    The REPL is not used with --native, --no-repl, --dry-run, --print-agents,
+    --share-terminal, --direct, the session passthroughs below, networked
+    flags, or when stdin is not a terminal; those keep the exec path.
+
 Runtime selection:
     --runtime <id>        claude (default) | codex | agy
                           Falls back to YAKOS_RUNTIME env or

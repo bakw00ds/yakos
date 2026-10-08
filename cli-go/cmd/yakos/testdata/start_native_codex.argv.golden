@@ -1,0 +1,5 @@
+argv0=codex
+codex
+--add-dir
+<repo>
+--dangerously-bypass-approvals-and-sandbox

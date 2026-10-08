@@ -201,6 +201,13 @@ type Config struct {
 	// Injected in tests to avoid port conflicts.
 	Listener net.Listener
 
+	// InstanceNonce, when non-empty, is served unauthenticated at
+	// GET /api/instance as {"instance": "<nonce>"} and nothing else. The daemon
+	// reports the same value over its owner-only unix socket (yakos.version),
+	// so a client can prove the process behind this TCP port is that daemon
+	// before it sends a bearer token.
+	InstanceNonce string
+
 	// StateDir is the yakOS state directory (e.g. ~/.yakos-state) used to
 	// locate the mTLS role-mapping file (mtls/roles.json) for the identity
 	// resolver.  When empty, the identity resolver uses an empty stateDir and
@@ -893,6 +900,9 @@ func (s *Server) registerRoutes() {
 	// Use method-neutral patterns to avoid the Go 1.22 method-specificity
 	// conflict with the path-prefix handlers below (which are also method-neutral).
 	s.mux.HandleFunc("/", s.handleIndex)
+	if s.cfg.InstanceNonce != "" {
+		s.mux.HandleFunc("/api/instance", s.handleInstance)
+	}
 	s.mux.HandleFunc("/app.js", s.handleAppJS)
 	s.mux.HandleFunc("/chat-routing.js", s.handleChatRoutingJS)
 	s.mux.HandleFunc("/context-drawer.js", s.handleContextDrawerJS)
@@ -1562,6 +1572,9 @@ func (s *Server) handleLoginCSS(w http.ResponseWriter, r *http.Request) {
 //     available).  /login is reachable token-free but is useless on loopback —
 //     harmless, and consistent with the networked behavior.
 func isStaticAsset(r *http.Request) bool {
+	if r.URL.Path == "/api/instance" && r.Method == http.MethodGet {
+		return true // the per-boot nonce; no secret, no token (see Config.InstanceNonce)
+	}
 	switch r.URL.Path {
 	case "/login", "/login.js", "/login.css":
 		// Login page, its script, and its stylesheet: always accessible without a
@@ -1724,4 +1737,15 @@ func kanbanRoleGate(next http.Handler) http.Handler {
 		}
 		requireRole(required, next).ServeHTTP(w, r)
 	})
+}
+
+// handleInstance serves the per-boot instance nonce, and only that.
+func (s *Server) handleInstance(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]string{"instance": s.cfg.InstanceNonce})
 }

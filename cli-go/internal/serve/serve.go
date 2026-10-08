@@ -20,8 +20,10 @@ package serve
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -135,6 +137,19 @@ type Config struct {
 	// ConsoleAddr (plain HTTP, bearer token) and the networked path is not
 	// activated.
 	ConsoleBind string
+
+	// RequireConsole makes a console bind failure fatal: Run returns an error
+	// instead of continuing with only the unix socket. The REPL launcher sets it
+	// (--require-console) because a daemon without its console is useless to it.
+	// Without it a bind failure is logged loudly and the daemon reports no
+	// console address (yakos.version console_addr is empty).
+	RequireConsole bool
+
+	// instance and boundConsole are set by Run before the JSON-RPC methods are
+	// registered: the per-boot nonce and the console address that actually
+	// bound ("" when the console is off or failed to bind).
+	instance     string
+	boundConsole string
 
 	// ConsoleExternalHosts is the list of host[:port] values that browsers use to
 	// reach the console when ConsoleBind is a wildcard or non-loopback address.
@@ -594,6 +609,13 @@ func Run(ctx context.Context, cfg Config) error {
 	//   4. A loud startup banner is printed (see below).
 	// There is NO --insecure escape hatch.
 	consoleErrCh := make(chan error, 1)
+	// Per-boot instance nonce: proves to the REPL that the process answering on
+	// the console TCP port is the same process that owns the unix socket.
+	instance, ierr := newInstanceNonce()
+	if ierr != nil {
+		return fmt.Errorf("serve: instance nonce: %w", ierr)
+	}
+	cfg.instance = instance
 	if !cfg.NoConsole && cfg.consoleAddr() != "-" {
 		consoleTok, err := consoleui.LoadOrCreateToken(cfg.consoleStateDir())
 		if err != nil {
@@ -904,13 +926,29 @@ func Run(ctx context.Context, cfg Config) error {
 			fmt.Fprintln(os.Stderr, sep)
 		}
 
-		consoleSrv, err := consoleui.New(consoleCfg)
-		if err != nil {
-			return fmt.Errorf("serve: console: %w", err)
+		// Bind the console listener here, before the daemon answers anything,
+		// so yakos.version reports only an address this process really holds.
+		consoleLn, lerr := listenConsole(bindAddr, networked)
+		if lerr != nil {
+			fmt.Fprintf(os.Stderr, "serve: ERROR: the console could not bind %s: %v\n", bindAddr, lerr)
+			fmt.Fprintln(os.Stderr, "serve: ERROR: another process holds the port; this daemon runs WITHOUT a console and reports none")
+			if cfg.RequireConsole {
+				return fmt.Errorf("serve: console bind %s: %w", bindAddr, lerr)
+			}
+			close(consoleErrCh)
+		} else {
+			cfg.boundConsole = consoleLn.Addr().String()
+			consoleCfg.Listener = consoleLn
+			consoleCfg.InstanceNonce = instance
+			consoleSrv, err := consoleui.New(consoleCfg)
+			if err != nil {
+				_ = consoleLn.Close()
+				return fmt.Errorf("serve: console: %w", err)
+			}
+			go func() {
+				consoleErrCh <- consoleSrv.Serve(ctx)
+			}()
 		}
-		go func() {
-			consoleErrCh <- consoleSrv.Serve(ctx)
-		}()
 	} else {
 		close(consoleErrCh)
 	}
@@ -1339,4 +1377,30 @@ func filesChangedPayload(ev filewatch.ChangeEvent) wsbus.FilesChangedPayload {
 		p.Count = ev.Count
 	}
 	return p
+}
+
+// newInstanceNonce returns 16 random bytes as hex: the per-boot daemon identity.
+func newInstanceNonce() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// listenConsole binds the console TCP listener. A plain (loopback) console must
+// be a loopback address; the networked path is wrapped in TLS by consoleui.
+func listenConsole(addr string, networked bool) (net.Listener, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	if !networked {
+		host, _, _ := net.SplitHostPort(ln.Addr().String())
+		if ip := net.ParseIP(host); ip != nil && !ip.IsLoopback() {
+			_ = ln.Close()
+			return nil, fmt.Errorf("%s is not a loopback address; use --console-bind with mTLS", addr)
+		}
+	}
+	return ln, nil
 }
