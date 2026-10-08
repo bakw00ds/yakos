@@ -34,6 +34,35 @@ printf '%s\n' '{"type":"stream_event","event":{"type":"content_block_stop","inde
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"duration_ms":100,"session_id":"sess-claude-1","total_cost_usd":0.01,"usage":{"input_tokens":1,"output_tokens":1}}'
 `
 
+// settleTree waits (at most 5 s) until nothing under roots has changed for 250 ms.
+func settleTree(roots ...string) {
+	snap := func() (n int, size int64, newest time.Time) {
+		for _, r := range roots {
+			_ = filepath.Walk(r, func(_ string, i os.FileInfo, err error) error {
+				if err == nil {
+					n++
+					size += i.Size()
+					if i.ModTime().After(newest) {
+						newest = i.ModTime()
+					}
+				}
+				return nil
+			})
+		}
+		return
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	n, size, newest := snap()
+	stable := time.Now()
+	for time.Now().Before(deadline) && time.Since(stable) < 250*time.Millisecond {
+		time.Sleep(25 * time.Millisecond)
+		n2, size2, newest2 := snap()
+		if n2 != n || size2 != size || !newest2.Equal(newest) {
+			n, size, newest, stable = n2, size2, newest2, time.Now()
+		}
+	}
+}
+
 type k148 struct {
 	ledgerServer
 	claudeLog, codexLog string
@@ -61,6 +90,11 @@ func newK148(t *testing.T) k148 {
 	t.Setenv("PATH", codexBin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
+	// A killed pane's engine goroutine still writes its end-of-turn records after
+	// mgr.Close returns. Registered after the TempDirs, so it runs before their
+	// RemoveAll (which otherwise fails "directory not empty" on a loaded runner).
+	home := os.Getenv("HOME")
+	t.Cleanup(func() { settleTree(home, s.workDir) })
 	frames := s.sseFrames(t, ctx, "alice")
 	time.Sleep(100 * time.Millisecond) // the stream registers before the first turn
 	return k148{ledgerServer: s, claudeLog: claudeLog, codexLog: codexLog, store: consoleui.NewTranscripts(s.workDir), frames: frames, t: t}
