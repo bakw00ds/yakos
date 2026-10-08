@@ -103,3 +103,16 @@ func TestJevNoRetryMakesOneAttempt(t *testing.T) {
 		t.Errorf("%d attempts, want 1", n)
 	}
 }
+
+// An empty state dir must read as off. StatePaths would otherwise fall back to
+// statepath.Dir, which honours the project-settable YAKOS_DISPATCH_LOG.
+func TestResolveRoutingShadow_EmptyStateDirIsOffNotTheEnvDir(t *testing.T) {
+	planted := t.TempDir()
+	if err := os.WriteFile(filepath.Join(planted, PolicyFileName), []byte("routing_shadow: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("YAKOS_DISPATCH_LOG", planted)
+	if got := ResolveRoutingShadow("", "", func(string) string { return "" }); got.Enabled {
+		t.Errorf("an empty state dir read the policy behind YAKOS_DISPATCH_LOG: %+v", got)
+	}
+}

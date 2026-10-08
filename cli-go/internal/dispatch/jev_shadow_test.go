@@ -164,7 +164,7 @@ func settleAbandonedCall(t *testing.T, f *fakeJev, stateDir string) {
 		close(f.block)
 		deadline := time.Now().Add(3 * time.Second)
 		for time.Now().Before(deadline) {
-			if _, err := os.Stat(filepath.Join(stateDir, decision.BreakerFileName)); err == nil {
+			if _, err := os.Stat(filepath.Join(stateDir, decision.ShadowBreakerFileName)); err == nil {
 				time.Sleep(50 * time.Millisecond)
 				return
 			}
@@ -176,7 +176,13 @@ func settleAbandonedCall(t *testing.T, f *fakeJev, stateDir string) {
 // shadowRow runs one real Run (fake CLIs on PATH) and returns the finished row.
 func shadowRow(t *testing.T, req Request) map[string]interface{} {
 	t.Helper()
-	logDir := isolatedLogDir(t)
+	return shadowRowIn(t, req, isolatedLogDir(t))
+}
+
+// shadowRowIn is shadowRow with the YAKOS_DISPATCH_LOG directory chosen by the
+// caller (isolatedLogDir has already pointed the variable at logDir).
+func shadowRowIn(t *testing.T, req Request, logDir string) map[string]interface{} {
+	t.Helper()
 	rec := fakeCLIs(t)
 	_ = rec
 	captureRouteLog(t)
@@ -722,5 +728,120 @@ func TestJevShadow_EmbeddedSetMatchesSource(t *testing.T) {
 	}
 	if got := strings.Join(emb.StateFields, ","); got != "agent,route_class,task_preview" {
 		t.Errorf("state_fields = %s", got)
+	}
+}
+
+// sec-370 HIGH: YAKOS_DISPATCH_LOG is project-settable (a committed
+// .claude/settings.json env block), so a policy planted behind it must not turn
+// the shadow on. The opt-in is read only from $HOME/.yakos-state.
+func TestJevShadow_PlantedPolicyBehindDispatchLogEnvCannotEnableIt(t *testing.T) {
+	f := newFakeJev(t)
+	shadowOn(t, f, shadowOpts{})
+	// TestMain blanks the seam; restore the value the product ships with. A
+	// separate test below pins that value to statepath.TrustedDir.
+	jevShadowStateDir = jevShadowStateDirProduct
+	logDir := isolatedLogDir(t) // resets HOME, so set the home after it
+	home := t.TempDir()         // no ~/.yakos-state, no policy
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	planted := filepath.Join(logDir, decision.PolicyFileName)
+	if err := os.WriteFile(planted, []byte(policyOn), 0o644); err != nil { // as a git checkout leaves it
+		t.Fatal(err)
+	}
+	if got := jevShadowStateDirProduct(); got != filepath.Join(home, ".yakos-state") || got == logDir {
+		t.Errorf("the product default state dir is %q", got)
+	}
+	row := shadowRowIn(t, Request{AgentName: "plain", Task: "hello"}, logDir)
+	if _, ok := row["jev_shadow"]; ok {
+		t.Errorf("a planted policy enabled the shadow: %v", row)
+	}
+	if n := len(f.requests()); n != 0 {
+		t.Errorf("%d requests left the host from a planted policy", n)
+	}
+}
+
+// sec-370 LOW: the shadow has its own breaker and budget files, so its failures
+// and volume cannot affect the supervisor pre-filter's.
+func TestJevShadow_UsesItsOwnBreakerAndBudgetFiles(t *testing.T) {
+	f := newFakeJev(t)
+	f.status = 500
+	stateDir := shadowOn(t, f, shadowOpts{policy: policyOn})
+	row := shadowRow(t, Request{AgentName: "plain", Task: "hello"})
+	if row["jev_shadow"] != JevShadowUnavailable {
+		t.Fatalf("row = %v", row)
+	}
+	for _, name := range []string{decision.BreakerFileName, decision.BudgetFileName} {
+		if _, err := os.Stat(filepath.Join(stateDir, name)); err == nil {
+			t.Errorf("the shadow touched the pre-filter's %s", name)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(stateDir, decision.ShadowBreakerFileName)); err != nil {
+		t.Errorf("no shadow breaker file: %v", err)
+	}
+}
+
+// rev-370: the ledger-write wait is at most 150 ms. A hung call returns within
+// about that, and the product constant is pinned.
+func TestJevShadow_FinishWaitIsAbout150ms(t *testing.T) {
+	if jevShadowFinishWait != 150*time.Millisecond {
+		t.Fatalf("jevShadowFinishWait = %v, want 150ms", jevShadowFinishWait)
+	}
+	hung := &jevShadow{done: make(chan struct{})} // never closed
+	start := time.Now()
+	out := hung.collect()
+	d := time.Since(start)
+	if out.Status != JevShadowUnavailable {
+		t.Errorf("outcome = %+v", out)
+	}
+	if d < 100*time.Millisecond || d > 600*time.Millisecond {
+		t.Errorf("collect on a hung call took %v, want about 150ms", d)
+	}
+}
+
+// sec-370 LOW: a hostile response cannot write its model string into the log.
+func TestJevShadow_HostileModelStringIsNotLogged(t *testing.T) {
+	secret := "AKIA" + strings.Repeat("Q", 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model": strings.Repeat("m", 900_000) + secret,
+			"answers": map[string]any{"tier": map[string]any{
+				"type": "choice", "choice": "opus",
+				"probabilities": map[string]float64{"haiku": 0.1, "sonnet": 0.2, "opus": 0.7}, "confidence": 0.7,
+			}},
+			"usage": map[string]int{"input_tokens": 1, "output_tokens": 1},
+		})
+	}))
+	t.Cleanup(srv.Close)
+	f := &fakeJev{srv: srv}
+	stateDir := shadowOn(t, f, shadowOpts{policy: policyOn})
+	shadowRow(t, Request{AgentName: "plain", Task: "hello"})
+	data, err := os.ReadFile(filepath.Join(stateDir, decision.LogFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(data) > 4096 || strings.Contains(string(data), secret) {
+		t.Errorf("hostile model reached the decision log (%d bytes)", len(data))
+	}
+}
+
+// The same, for a successful call: the spend lands in the shadow's own budget.
+func TestJevShadow_SuccessSpendsTheShadowsOwnBudget(t *testing.T) {
+	f := newFakeJev(t)
+	stateDir := shadowOn(t, f, shadowOpts{policy: policyOn})
+	row := shadowRow(t, Request{AgentName: "plain", Task: "hello"})
+	if row["jev_shadow"] != JevShadowOK {
+		t.Fatalf("row = %v", row)
+	}
+	matches, _ := filepath.Glob(filepath.Join(stateDir, "decision-*budget*"))
+	var shadow, prefilter int
+	for _, m := range matches {
+		if strings.Contains(filepath.Base(m), "shadow") {
+			shadow++
+		} else {
+			prefilter++
+		}
+	}
+	if shadow == 0 || prefilter != 0 {
+		t.Errorf("budget files %v: shadow %d, pre-filter %d", matches, shadow, prefilter)
 	}
 }

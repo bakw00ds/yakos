@@ -32,7 +32,9 @@ never holds a login: ADR-0010. Detailed entries follow.
   `routing_shadow: true` in the user-level `decision-policy.yml`; a project file
   cannot enable it. It sends the agent name, the route class and the first 2 KiB of
   the task to `*.typesafe.ai`, never a sensitive task, with a 3 second bound, no
-  retry and no wait on the dispatch path. `yakos doctor` and `yakos router explain`
+  retry and at most 150 ms of wait at ledger-write time. The opt-in is read only
+  from the home state directory. A path written in the task text leaves with the
+  text unless it matches `never_paths`. `yakos doctor` and `yakos router explain`
   show whether it is on. New question set `lib/decisions/routing-tier.yaml`. See
   `docs/routing.md` and the ADR-0009 addendum.
 

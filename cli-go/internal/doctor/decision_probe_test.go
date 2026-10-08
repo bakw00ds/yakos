@@ -284,3 +284,20 @@ func TestDoctor_RoutingShadowState(t *testing.T) {
 		t.Errorf("a plain run hides an enabled shadow:\n%s", plain.String())
 	}
 }
+
+// sec-370 HIGH: the doctor reads the opt-in from the home state dir only. A
+// policy planted behind YAKOS_DISPATCH_LOG must not read as on.
+func TestDoctor_RoutingShadowIgnoresDispatchLogEnv(t *testing.T) {
+	lib, proj, home := probeFixture(t, probeSet, "")
+	planted := t.TempDir()
+	writeFile(t, filepath.Join(planted, "decision-policy.yml"), "routing_shadow: true\n")
+	if err := os.Chmod(filepath.Join(planted, "decision-policy.yml"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{HomeDir: home, YakosLib: lib, Getwd: func() (string, error) { return proj, nil }}
+	out, rep := runProbe(t, cfg, map[string]string{"YAKOS_DISPATCH_LOG": planted})
+	if !strings.Contains(out, "routing shadow: off (default)") || strings.Contains(out, "routing shadow: on") {
+		t.Errorf("a planted policy turned the shadow on:\n%s", out)
+	}
+	_ = rep
+}

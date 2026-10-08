@@ -19,6 +19,16 @@ func (r *runner) stateDir() string {
 	return filepath.Join(r.home, ".yakos-state")
 }
 
+// trustedStateDir is $HOME/.yakos-state from the injected home, ignoring
+// YAKOS_DISPATCH_LOG: the same directory the dispatcher, `router explain` and
+// the policy check read the routing-shadow opt-in from (statepath.TrustedDir).
+func (r *runner) trustedStateDir() string {
+	if r.home == "" {
+		return ""
+	}
+	return filepath.Join(r.home, ".yakos-state")
+}
+
 // checkDecisionProbe implements --probe-decision (ADR-0009 §3.4). Everything
 // here is read-only and local except the single call made when
 // ProbeDecisionLive is set. The key is only ever reported as set / not set.
@@ -173,7 +183,7 @@ func (r *runner) routingShadowState() decision.RoutingShadow {
 			proj, _ = os.Getwd()
 		}
 	}
-	return decision.ResolveRoutingShadow(r.stateDir(), proj, r.env)
+	return decision.ResolveRoutingShadow(r.trustedStateDir(), proj, r.env)
 }
 
 // checkRoutingShadow is the plain `yakos doctor` line. The shadow is off by

@@ -847,7 +847,10 @@ What leaves the machine, in one request per dispatch to `https://*.typesafe.ai`
 | `task_preview` | the first 2 KiB of the task text, whitespace-normalised and secret-redacted |
 
 Never sent: the knowledge block, the agent's system prompt, the environment,
-file paths, the project root or any credential. The question set is
+the project root or any credential. File paths are not added to the payload, but a
+path you write in the task text is part of the task and leaves the host like any
+other word, unless it matches `never_paths` (then it is withheld and the task is
+skipped). The question set is
 `lib/decisions/routing-tier.yaml`; its `state_fields` allowlist names exactly the
 three fields above.
 

@@ -31,12 +31,18 @@ type RoutingShadow struct {
 //   - the project's .yakos.yml does not opt out (decisions.provider: none, or
 //     decisions.surfaces.routing-tier.mode: off).
 //
+// stateDir must be the trusted home state directory (statepath.TrustedDir), never
+// statepath.Dir: YAKOS_DISPATCH_LOG is project-settable. An empty stateDir is off.
 // A project file can therefore only turn the shadow off, never on. Every error
 // reads as off. project may be empty (no project file is consulted).
 func ResolveRoutingShadow(stateDir, project string, getenv func(string) string) RoutingShadow {
 	off := func(detail string) RoutingShadow { return RoutingShadow{Detail: detail} }
 	if KillSwitch(getenv) {
 		return off("off: " + killSwitchEnvVar + "=1")
+	}
+	if stateDir == "" {
+		// StatePaths would fall back to statepath.Dir, which a project can steer.
+		return off("off: no trusted home state directory")
 	}
 	pol, err := LoadPolicy(StatePaths{Dir: stateDir}.Policy())
 	switch {

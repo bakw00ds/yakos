@@ -8,13 +8,17 @@ package dispatch
 //
 // This feature sends task text off the host, so every limit is in this file:
 //
-//   - Off by default. It runs only when the trusted user policy (home state dir)
-//     sets routing_shadow: true; a project file can only opt out
+//   - Off by default. It runs only when the trusted user policy ($HOME/.yakos-state,
+//     never YAKOS_DISPATCH_LOG) sets routing_shadow: true; a project file can only opt out
 //     (decision.ResolveRoutingShadow).
 //   - The payload is three fields: the agent name, the route class and the first
 //     2 KiB of the task text. Never the knowledge block, the agent's prompt, the
-//     environment, paths or credentials. The decision engine redacts it again
-//     and the question set allowlists exactly these three fields.
+//     environment or credentials. A path typed in the task text is part of the
+//     task and is sent unless it matches never_paths. The question set
+//     allowlists exactly these three fields. The engine redacts the payload
+//     again as a backstop; on this path the gate below has already skipped
+//     anything that redaction would change, so that second pass never alters a
+//     sent payload (the engine's own redaction is tested in internal/decision).
 //   - A sensitive task is never sent. The route class is checked first; then the
 //     exact sanitized payload and the whole task go through the K-140 scanner; a
 //     redaction, a withheld path or a scan that cannot finish counts as
@@ -63,9 +67,17 @@ var (
 	jevShadowFinishWait = 150 * time.Millisecond
 )
 
+// jevShadowStateDirProduct is what the seam holds in production. It is separate
+// so a test can restore it after TestMain blanks the seam.
+func jevShadowStateDirProduct() string { return statepath.TrustedDir() }
+
 // Seams tests replace. None is configuration: the defaults are the product.
 var (
-	jevShadowStateDir = statepath.Dir
+	// jevShadowStateDir is the TRUSTED home state dir (empty = off). It must not
+	// be statepath.Dir: that honours YAKOS_DISPATCH_LOG, which a cloned project
+	// can set through a committed .claude/settings.json env block, and the
+	// opt-in would then be read from a file the project planted.
+	jevShadowStateDir = jevShadowStateDirProduct
 	jevShadowGetenv   = os.Getenv
 	// jevShadowBaseURL overrides the endpoint (empty: the Jev client's own rules,
 	// which accept only https://*.typesafe.ai or loopback).
@@ -209,8 +221,10 @@ func runJevShadow(req Request, stateDir string, cfg decision.Config) jevOutcome 
 		HTTP:    jevShadowHTTP,
 		Getenv:  jevShadowGetenv,
 		NoRetry: true,
-		Breaker: decision.NewBreaker(paths.Breaker()),
-		Budget:  decision.NewBudget(paths.Budget(), cfg.Budget.MaxCallsPerSession, cfg.Budget.MaxUSDPerDay),
+		// Their own breaker and budget files: shadow failures or volume must not
+		// open the supervisor pre-filter's breaker or spend its budget.
+		Breaker: decision.NewBreaker(paths.ShadowBreaker()),
+		Budget:  decision.NewBudget(paths.ShadowBudget(), cfg.Budget.MaxCallsPerSession, cfg.Budget.MaxUSDPerDay),
 	}
 	eng := &decision.Engine{Provider: prov, Logger: decision.NewLogger(paths.Log()), Egress: cfg.Egress, Tag: "routing-shadow"}
 	session := req.SessionID
