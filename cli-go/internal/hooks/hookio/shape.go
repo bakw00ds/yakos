@@ -258,6 +258,51 @@ func Respond(shape, event string, blocked bool, reason string) Response {
 
 type agentCtxKey struct{}
 
+type projectCtxKey struct{}
+
+// WithProject returns ctx carrying the project directory a caller has bound
+// the request to (the loopback hooks endpoint binds it to its nonce at issue
+// time). shaperun then ignores the process environment and the envelope for
+// the project and uses this one.
+func WithProject(ctx context.Context, dir string) context.Context {
+	return context.WithValue(ctx, projectCtxKey{}, dir)
+}
+
+// ProjectFrom returns the directory WithProject stored, or "".
+func ProjectFrom(ctx context.Context) string {
+	s, _ := ctx.Value(projectCtxKey{}).(string)
+	return s
+}
+
+// EnvelopeDirs lists every project directory a codex or agy envelope names:
+// codex's cwd, agy's workspacePaths entries. Values are returned exactly as
+// sent (possibly relative); an envelope that does not parse names none.
+func EnvelopeDirs(shape string, data []byte) []string {
+	if len(data) > MaxShapeBytes {
+		return nil
+	}
+	var obj map[string]any
+	if json.Unmarshal(data, &obj) != nil {
+		return nil
+	}
+	var out []string
+	switch shape {
+	case ShapeCodex:
+		if s, ok := obj["cwd"].(string); ok && s != "" {
+			out = append(out, s)
+		}
+	case ShapeAgy:
+		if ws, ok := obj["workspacePaths"].([]any); ok {
+			for _, w := range ws {
+				if s, ok := w.(string); ok && s != "" {
+					out = append(out, s)
+				}
+			}
+		}
+	}
+	return out
+}
+
 // WithAgent returns ctx carrying the id of the agent yakOS dispatched, for a
 // caller (the loopback hooks endpoint) that cannot pass it through the
 // environment.

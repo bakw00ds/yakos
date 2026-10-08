@@ -49,6 +49,17 @@ import (
 
 const hookName = "path-allowlist"
 
+// FallbackAgentEnv names an environment variable set only by shaperun (a
+// harness cannot supply it): when the invocation's agent has no entry in the
+// policy file, the entry named by its value is applied instead of passing the
+// call. It is set for a chat pane whose agent is a bare runtime name, which
+// claude judges as FallbackAgent.
+const FallbackAgentEnv = "YAKOS_POLICY_FALLBACK_AGENT"
+
+// FallbackAgent is the default policy a runtime-named chat pane falls back to
+// (the one a claude chat gets).
+const FallbackAgent = "lead"
+
 // Hook implements runner.Hook for path allowlist enforcement.
 type Hook struct {
 	// WorkCurrentDir is the absolute path to work/current/ for bypass checks
@@ -186,6 +197,11 @@ func (c *ctx) run() {
 
 	// `.[$agent] // empty`: jq's // treats null and false as absent.
 	pv := hookio.JQAlt(root[agent])
+	if pv == nil {
+		if fb := c.in.Env[FallbackAgentEnv]; fb != "" && fb != agent {
+			pv = hookio.JQAlt(root[fb])
+		}
+	}
 	if pv == nil {
 		c.log("REPORT", "pass", "no policy for agent_type",
 			map[string]any{"agent_type": agent, "file_path": relFile, "note": "no policy for agent"})

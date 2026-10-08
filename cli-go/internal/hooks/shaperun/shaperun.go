@@ -18,8 +18,10 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
+	"github.com/bakw00ds/yakos/internal/hooks/pathallowlist"
 	"github.com/bakw00ds/yakos/internal/hooks/registry"
 	"github.com/bakw00ds/yakos/internal/hooks/runner"
+	"github.com/bakw00ds/yakos/internal/runtime"
 )
 
 // Deps carries what differs between the CLI and the daemon.
@@ -84,7 +86,23 @@ func Run(ctx context.Context, shape, name string, data []byte, d Deps) hookio.Re
 		return hookio.Respond(shape, "PreToolUse", false, "")
 	}
 
-	cfg, workCurrentDir := d.Resolve(ins[0].WorkDir)
+	// A bound project (the endpoint's nonce) outranks everything the caller or
+	// the envelope says: the hooks judge the call against that project only.
+	bound := hookio.ProjectFrom(ctx)
+	workDir := ins[0].WorkDir
+	if bound != "" {
+		workDir = bound
+	}
+	cfg, workCurrentDir := d.Resolve(workDir)
+	if cfg.ProjectDir == "" && d.Env["CLAUDE_PROJECT_DIR"] == "" {
+		// No trusted source named the project (no CLAUDE_PROJECT_DIR, no
+		// absolute workspace in the envelope). The hook process's own cwd is
+		// not one: agy runs hooks from .agents. A fail-closed hook refuses.
+		if event == "PreToolUse" {
+			return degraded("cannot determine the project directory from a trusted source")
+		}
+		return hookio.Respond(shape, event, false, "")
+	}
 	hook, _, found := registry.Lookup(name, cfg)
 	if !found {
 		return hookio.Respond(shape, event, false, "")
@@ -100,7 +118,7 @@ func Run(ctx context.Context, shape, name string, data []byte, d Deps) hookio.Re
 	for k, v := range d.Env {
 		env[k] = v
 	}
-	if env["CLAUDE_PROJECT_DIR"] == "" {
+	if env["CLAUDE_PROJECT_DIR"] == "" || bound != "" {
 		env["CLAUDE_PROJECT_DIR"] = cfg.ProjectDir
 	}
 
@@ -111,6 +129,14 @@ func Run(ctx context.Context, shape, name string, data []byte, d Deps) hookio.Re
 	if !hookio.ValidAgent(agent) {
 		agent = ""
 		env["YAKOS_REQUIRE_AGENT_TYPE"] = "1"
+	}
+	// A chat pane whose agent is a bare runtime name ("codex") has no policy
+	// entry of its own; claude judges the same chat as the lead. Tell
+	// path-allowlist to fall back to the lead's entry, and never to "no
+	// policy". Always overwritten here: the harness environment cannot set it.
+	delete(env, pathallowlist.FallbackAgentEnv)
+	if isRuntimeName(agent) {
+		env[pathallowlist.FallbackAgentEnv] = pathallowlist.FallbackAgent
 	}
 
 	for _, in := range ins {
@@ -134,6 +160,15 @@ func Run(ctx context.Context, shape, name string, data []byte, d Deps) hookio.Re
 		}
 	}
 	return hookio.Respond(shape, event, false, "")
+}
+
+func isRuntimeName(agent string) bool {
+	for _, r := range runtime.Known {
+		if r == agent {
+			return true
+		}
+	}
+	return false
 }
 
 // blockReason is the hook's own stderr text, falling back to its stdout.

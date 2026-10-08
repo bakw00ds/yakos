@@ -21,6 +21,11 @@ package consoleui
 //     must be codex or agy (400). A caller MUST treat 413 (and any non-200
 //     answer) as DENY: a tool call too large to inspect is not allowed by
 //     default, and fail-open on an endpoint error would bypass the gate.
+//   - The nonce is bound to one project directory when it is issued
+//     (HooksEndpoint.ProjectDir, the daemon's project). Every hook runs against
+//     that project, whatever the caller sends. An envelope whose cwd or
+//     workspacePaths name a directory outside it, or a relative one, is refused
+//     (403): the message and the audit line carry no path.
 //   - ?agent=<id> names the dispatched agent for path-allowlist. Without a valid
 //     id, path-allowlist refuses file-path calls when a policy file exists.
 //
@@ -66,6 +71,9 @@ type HooksEndpoint struct {
 	Known func(name string) bool
 	// NonceFile is where the per-daemon nonce is written (0600). Required.
 	NonceFile string
+	// ProjectDir is the absolute project directory the nonce is bound to at
+	// issue time. Required: the endpoint stays off without it.
+	ProjectDir string
 }
 
 type hooksResponseDTO struct {
@@ -78,20 +86,26 @@ type hooksHandler struct {
 	ep    HooksEndpoint
 	nonce string
 	port  string
+	// project is ep.ProjectDir, symlink-resolved once at issue time.
+	project string
 }
 
 // newHooksHandler generates the nonce, writes it, and returns the handler
 // (without the role gate). A failure to persist the nonce leaves the endpoint
 // off rather than usable by nobody-knows-whom.
 func newHooksHandler(ep *HooksEndpoint, addr string) (http.Handler, error) {
-	if ep == nil || ep.Run == nil || ep.Known == nil || ep.NonceFile == "" {
+	if ep == nil || ep.Run == nil || ep.Known == nil || ep.NonceFile == "" || !filepath.IsAbs(ep.ProjectDir) {
 		return nil, errors.New("hooks endpoint: incomplete configuration")
+	}
+	project, err := resolveDir(ep.ProjectDir)
+	if err != nil {
+		return nil, errors.New("hooks endpoint: bound project directory is not usable")
 	}
 	var raw [32]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return nil, err
 	}
-	h := &hooksHandler{ep: *ep, nonce: hex.EncodeToString(raw[:])}
+	h := &hooksHandler{ep: *ep, nonce: hex.EncodeToString(raw[:]), project: project}
 	if _, p, err := net.SplitHostPort(addr); err == nil {
 		h.port = p
 	}
@@ -99,6 +113,35 @@ func newHooksHandler(ep *HooksEndpoint, addr string) (http.Handler, error) {
 		return nil, err
 	}
 	return dashauth.RequireLocalHost(addr, http.HandlerFunc(h.serve)), nil
+}
+
+// resolveDir cleans dir and resolves its symlinks. A path that does not exist
+// is compared lexically (Clean only), so a missing directory can never be
+// "within" the bound project through a link.
+func resolveDir(dir string) (string, error) {
+	c := filepath.Clean(dir)
+	if r, err := filepath.EvalSymlinks(c); err == nil {
+		return r, nil
+	}
+	if _, err := os.Stat(c); err == nil {
+		return "", errors.New("unresolvable")
+	}
+	return c, nil
+}
+
+// withinProject reports whether dir is the bound project or inside it.
+func (h *hooksHandler) withinProject(dir string) bool {
+	if !filepath.IsAbs(dir) {
+		return false
+	}
+	d, err := resolveDir(dir)
+	if err != nil {
+		return false
+	}
+	if d == h.project {
+		return true
+	}
+	return strings.HasPrefix(d, strings.TrimRight(h.project, string(filepath.Separator))+string(filepath.Separator))
 }
 
 func writeNonceFile(path, nonce string) error {
@@ -184,7 +227,14 @@ func (h *hooksHandler) serve(w http.ResponseWriter, r *http.Request) {
 		hooksJSONError(w, http.StatusBadRequest, "cannot read body")
 		return
 	}
-	ctx := r.Context()
+	for _, d := range hookio.EnvelopeDirs(shape, body) {
+		if !h.withinProject(d) {
+			slog.Warn("hooks endpoint refused", "hook", name, "shape", shape, "reason", "envelope names a directory outside the nonce's project")
+			hooksJSONError(w, http.StatusForbidden, "envelope names a directory outside the project this nonce is bound to")
+			return
+		}
+	}
+	ctx := hookio.WithProject(r.Context(), h.project)
 	if a := r.URL.Query().Get("agent"); hookio.ValidAgent(a) {
 		ctx = hookio.WithAgent(ctx, a)
 	}

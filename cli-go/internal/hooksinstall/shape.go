@@ -100,12 +100,66 @@ type agyEntry struct {
 // agyKey is the top-level hook name yakOS owns inside agy's hooks.json.
 const agyKey = "yakos"
 
+// Fail-closed launcher (K-170 c). A harness whose hook command cannot start
+// fails OPEN (codex proven, agy never ruled out): the call proceeds ungated.
+// So on Unix the command is a tiny /bin/sh launcher that takes the absolute
+// binary as $0 and refuses the tool call when that file is missing, is not an
+// executable regular file, or exits with anything but its own allow (0) or
+// deny (2) status. The refusal is rendered in the harness's own deny shape.
+// PostToolUse hooks are telemetry: a missing binary there only skips them.
+// Windows has no /bin/sh; there the command stays the bare absolute path
+// (doctor still reports a missing binary).
+//
+// The script is single-quoted, so it contains no single quote, and it holds no
+// run id or temp path: the command text is byte-stable (codex hashes it).
+const (
+	denyMsg = "yakOS: the hook binary is missing, not executable or failed to run; refusing the tool call"
+	skipMsg = "yakOS: the hook binary is missing or not executable; this hook was skipped"
+	// launcherEnd separates the quoted script from the binary word.
+	launcherEnd = "' "
+)
+
+func shapeCommand(goos, harness, binary, name, event string) string {
+	run := `hook run --shape ` + harness + ` ` + name
+	if goos == "windows" {
+		return binary + " " + run
+	}
+	var script string
+	switch {
+	case event == "PreToolUse" && harness == HarnessAgy:
+		// agy denies in stdout JSON and always exits 0.
+		script = `if [ -f "$0" ] && [ -x "$0" ]; then out=$("$0" ` + run + `) && { printf "%s\n" "$out"; exit 0; }; fi; ` +
+			`printf "%s\n" "{\"decision\":\"deny\",\"reason\":\"` + denyMsg + `\"}"; exit 0`
+	case event == "PreToolUse":
+		script = `if [ -f "$0" ] && [ -x "$0" ]; then "$0" ` + run + `; rc=$?; if [ $rc -eq 0 ] || [ $rc -eq 2 ]; then exit $rc; fi; fi; ` +
+			`echo "` + denyMsg + `" >&2; exit 2`
+	case harness == HarnessAgy:
+		script = `if [ -f "$0" ] && [ -x "$0" ]; then exec "$0" ` + run + `; fi; echo "` + skipMsg + `" >&2; printf "{}\n"; exit 0`
+	default:
+		script = `if [ -f "$0" ] && [ -x "$0" ]; then exec "$0" ` + run + `; fi; echo "` + skipMsg + `" >&2; exit 0`
+	}
+	return "/bin/sh -c '" + script + launcherEnd + binary
+}
+
+// commandBinary extracts the binary word from a command shapeCommand wrote
+// ("" when the command is not one of ours).
+func commandBinary(cmd string) string {
+	if strings.HasPrefix(cmd, "/bin/sh -c '") {
+		if i := strings.LastIndex(cmd, launcherEnd); i >= 0 {
+			return cmd[i+len(launcherEnd):]
+		}
+		return ""
+	}
+	bin, _, _ := strings.Cut(cmd, " hook run ")
+	return bin
+}
+
 func shapeEventsFor(harness, binary string) shapeEvents {
 	var ev shapeEvents
 	for _, h := range shapeHooks {
 		g := shapeGroup{Matcher: "*", Hooks: []shapeHandler{{
 			Type:    "command",
-			Command: binary + " hook run --shape " + harness + " " + h.name,
+			Command: shapeCommand(runtime.GOOS, harness, binary, h.name, h.event),
 			Timeout: shapeTimeoutSec,
 		}}}
 		if h.event == "PreToolUse" {
@@ -136,11 +190,21 @@ func RenderShapeFile(harness, binary string) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("hooks install: unknown harness %q (codex | agy)", harness)
 	}
-	b, err := json.MarshalIndent(v, "", "  ")
-	if err != nil {
+	return marshalIndent(v)
+}
+
+// marshalIndent is json.MarshalIndent without HTML escaping, so the launcher's
+// "&", "<" and ">" stay readable in the file. The bytes are still a pure
+// function of the value.
+func marshalIndent(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
 		return nil, err
 	}
-	return append(b, '\n'), nil
+	return buf.Bytes(), nil // Encode ends the document with a newline
 }
 
 // ShapeTarget is the hooks.json path for harness under dir: the CODEX_HOME for
@@ -358,11 +422,11 @@ func mergeAgy(existing, ours []byte) ([]byte, []string, error) {
 	}
 	sort.Strings(foreign)
 	cur[agyKey] = mine[agyKey]
-	b, err := json.MarshalIndent(cur, "", "  ") // map keys marshal sorted
+	b, err := marshalIndent(cur) // map keys marshal sorted
 	if err != nil {
 		return nil, nil, err
 	}
-	return append(b, '\n'), foreign, nil
+	return b, foreign, nil
 }
 
 // SafeName quotes a name taken from a file so control characters and escape
@@ -532,7 +596,7 @@ func installedBinary(harness string, data []byte) string {
 		return ""
 	}
 	cmd := ev.PreToolUse[0].Hooks[0].Command
-	bin, _, _ := strings.Cut(cmd, " hook run ")
+	bin := commandBinary(cmd)
 	if checkBinaryText(bin) != nil {
 		return ""
 	}

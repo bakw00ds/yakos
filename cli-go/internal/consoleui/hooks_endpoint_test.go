@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,12 +23,17 @@ type hooksEPFixture struct {
 	nonce     string
 	nonceFile string
 	calls     *int
+	project   string
 }
 
 func newHooksEP(t *testing.T, enabled bool) hooksEPFixture {
 	t.Helper()
 	dir := t.TempDir()
 	calls := new(int)
+	project, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	cfg := consoleui.Config{
 		Addr:            "127.0.0.1:7899",
 		Token:           "tok",
@@ -37,10 +43,14 @@ func newHooksEP(t *testing.T, enabled bool) hooksEPFixture {
 	nf := filepath.Join(dir, "state", "hooks-endpoint-nonce")
 	if enabled {
 		cfg.HooksEndpoint = &consoleui.HooksEndpoint{
-			NonceFile: nf,
-			Known:     func(n string) bool { return n == "secret-scan" },
+			NonceFile:  nf,
+			ProjectDir: project,
+			Known:      func(n string) bool { return n == "secret-scan" },
 			Run: func(ctx context.Context, shape, name string, body []byte) hookio.Response {
 				*calls++
+				if bytes.Contains(body, []byte("PROJECT")) {
+					return hookio.Respond(shape, "PreToolUse", true, "project="+hookio.ProjectFrom(ctx))
+				}
 				if bytes.Contains(body, []byte("WHOAMI")) {
 					return hookio.Respond(shape, "PreToolUse", true, "agent="+hookio.AgentFrom(ctx))
 				}
@@ -52,7 +62,7 @@ func newHooksEP(t *testing.T, enabled bool) hooksEPFixture {
 		}
 	}
 	srv := consoleui.MustNew(t, cfg)
-	f := hooksEPFixture{h: srv.HandlerForTest(), nonceFile: nf, calls: calls}
+	f := hooksEPFixture{h: srv.HandlerForTest(), nonceFile: nf, calls: calls, project: project}
 	if enabled {
 		b, err := os.ReadFile(nf)
 		if err != nil {
@@ -190,6 +200,113 @@ func TestHooksEndpointPassesDispatchedAgent(t *testing.T) {
 	for _, bad := range []string{"&agent=a%20b", "&agent=..%2Fx", "&agent=a;b", ""} {
 		if b := got(bad); strings.Contains(b, "agent=a") || strings.Contains(b, "agent=..") {
 			t.Errorf("invalid agent %q accepted: %s", bad, b)
+		}
+	}
+}
+
+// K-170 (e): the nonce is bound to one project at issue time. The envelope
+// cannot move the hooks to another directory.
+func TestHooksEndpointBindsProjectToNonce(t *testing.T) {
+	f := newHooksEP(t, true)
+	outside, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sub := filepath.Join(f.project, "pkg")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(f.project, "link")
+	if runtime.GOOS != "windows" {
+		if err := os.Symlink(outside, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	codex := func(cwd string) string {
+		b, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": cwd, "note": "PROJECT"})
+		return string(b)
+	}
+	agy := func(ws ...string) string {
+		b, _ := json.Marshal(map[string]any{"workspacePaths": ws, "toolCall": map[string]any{"name": "run_command"}, "note": "PROJECT"})
+		return string(b)
+	}
+	do := func(shape, body string) *httptest.ResponseRecorder {
+		return f.do(t, nil, "/api/hooks/run/secret-scan?shape="+shape, body)
+	}
+
+	// Refused: another directory, a sibling that shares the prefix, a relative
+	// path, a traversal, a symlink out of the project, any agy workspace entry.
+	refused := map[string]*httptest.ResponseRecorder{}
+	refused["other dir"] = do("codex", codex(outside))
+	refused["prefix sibling"] = do("codex", codex(f.project+"-evil"))
+	refused["relative"] = do("codex", codex("proj"))
+	refused["traversal"] = do("codex", codex(f.project+"/../"+filepath.Base(outside)))
+	refused["agy second workspace"] = do("agy", agy(f.project, outside))
+	refused["agy relative"] = do("agy", agy("proj"))
+	if runtime.GOOS != "windows" {
+		refused["symlink out"] = do("codex", codex(link))
+	}
+	for name, w := range refused {
+		if w.Code != http.StatusForbidden {
+			t.Errorf("%s: status %d, want 403 (%s)", name, w.Code, w.Body)
+		}
+		for _, p := range []string{outside, f.project, "-evil"} {
+			if strings.Contains(w.Body.String(), p) {
+				t.Errorf("%s: response leaks a path (%q): %s", name, p, w.Body)
+			}
+		}
+	}
+	if *f.calls != 0 {
+		t.Fatalf("hook ran %d times for refused envelopes", *f.calls)
+	}
+
+	// Accepted: the project, a subdirectory, an agy workspace inside it, and an
+	// envelope that names none. The hook always sees the BOUND project.
+	for name, w := range map[string]*httptest.ResponseRecorder{
+		"project":    do("codex", codex(f.project)),
+		"subdir":     do("codex", codex(sub)),
+		"agy":        do("agy", agy(f.project)),
+		"no cwd":     do("codex", codex("")),
+		"unparsable": do("codex", "PROJECT"),
+	} {
+		if w.Code != 200 || !strings.Contains(w.Body.String(), "project="+f.project) {
+			t.Errorf("%s: %d %s, want the bound project %s", name, w.Code, w.Body, f.project)
+		}
+	}
+}
+
+// The refusal leaves an audit line that names the hook and shape but no path.
+func TestHooksEndpointProjectRefusalIsAudited(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	f := newHooksEP(t, true)
+	outside := t.TempDir()
+	b, _ := json.Marshal(map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": outside})
+	if w := f.do(t, nil, "/api/hooks/run/secret-scan?shape=codex", string(b)); w.Code != 403 {
+		t.Fatalf("status %d", w.Code)
+	}
+	log := buf.String()
+	if !strings.Contains(log, "hooks endpoint refused") || !strings.Contains(log, "secret-scan") {
+		t.Errorf("no audit line: %q", log)
+	}
+	if strings.Contains(log, outside) || strings.Contains(log, f.project) {
+		t.Errorf("audit line carries a path: %q", log)
+	}
+}
+
+func TestHooksEndpointNeedsABoundProject(t *testing.T) {
+	for _, dir := range []string{"", "relative/dir"} {
+		cfg := consoleui.Config{Addr: "127.0.0.1:7899", Token: "tok", KanbanBoardPath: filepath.Join(t.TempDir(), "k.md"), KanbanProject: "t"}
+		nf := filepath.Join(t.TempDir(), "nonce")
+		cfg.HooksEndpoint = &consoleui.HooksEndpoint{NonceFile: nf, ProjectDir: dir,
+			Known: func(string) bool { return true },
+			Run:   func(context.Context, string, string, []byte) hookio.Response { return hookio.Response{} }}
+		srv := consoleui.MustNew(t, cfg)
+		_ = srv
+		if _, err := os.Stat(nf); err == nil {
+			t.Errorf("ProjectDir %q: nonce issued without a bound project", dir)
 		}
 	}
 }
