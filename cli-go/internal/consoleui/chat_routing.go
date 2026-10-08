@@ -15,6 +15,7 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -143,10 +144,17 @@ func (ch *chatHandlers) emitRoute(sessionID, conversationID, operatorID string, 
 		SessionID: sessionID, ConversationID: conversationID, OperatorID: operatorID,
 		Role: RoleRoute, Text: rv.Reason, Runtime: rv.Runtime, Model: rv.Model,
 		RuleID: rv.RuleID, FallbackFrom: rv.FallbackFrom, Pinned: rv.Pinned, OverrideRefused: rv.OverrideRefused,
+		Provider: rv.Provider, Class: rv.Class,
 	})
 	now := func() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 	ch.hub.Route(SSEEvent{SessionID: sessionID, ConversationID: conversationID, Type: "route", Route: rv, TS: now()})
 	if hv != nil {
+		// Persisted with the route so a reload shows the banner too (K-173).
+		_ = ch.transcripts.Append(TranscriptEntry{
+			SessionID: sessionID, ConversationID: conversationID, OperatorID: operatorID,
+			Role: RoleHandoff, Runtime: hv.To, HandoffFrom: hv.From,
+			Turns: hv.Turns, DigestBytes: hv.DigestBytes, Redactions: hv.Redactions,
+		})
 		ch.hub.Route(SSEEvent{SessionID: sessionID, ConversationID: conversationID, Type: "handoff", Handoff: hv, TS: now()})
 	}
 }
@@ -248,6 +256,12 @@ func buildHandoffDigest(entries []TranscriptEntry, from string) (text string, tu
 
 // secretPatterns are the shapes scanSecrets redacts. Each is linear-time (RE2).
 var secretPatterns = []*regexp.Regexp{
+	// An Authorization header of any scheme or none (Basic, Bearer, ApiKey, SSWS,
+	// OAuth ..., AWS4 Signature= after a comma): the whole value is redacted, to
+	// the end of the line or the closing bracket of a JSON / Go-map form
+	// (K-173). First in the list: the value it leaves is
+	// "[redacted]", which a later scheme pattern (bearer) must not count again.
+	regexp.MustCompile(`(?i)(?:\b|_)(?:proxy-)?authorization["']?\s*[:=]\s*\[?["']?[^\r\n\]]{6,}`),
 	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)`),
 	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
 	regexp.MustCompile(`\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}`),
@@ -256,6 +270,12 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}`),
 	regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}`),
+	// A Cookie / Set-Cookie header, or the CGI form: the whole value.
+	regexp.MustCompile(`(?i)(?:\b|_)(?:set-)?cookie["']?\s*[:=]\s*[^\r\n]{6,}`),
+	// curl -b / --cookie 'name=value'.
+	regexp.MustCompile(`(?i)\bcurl\b[^\r\n]*?(?:\s-b|\s--cookie)[ =]+["']?[^\s"']{6,}`),
+	// An Azure SAS / signed-URL signature and similar query signatures.
+	regexp.MustCompile(`(?i)[?&](?:sig|signature|x-amz-signature)=[A-Za-z0-9%+/=_-]{8,}`),
 	// A credential-looking name (it may sit inside a longer one: AWS_SECRET_ACCESS_KEY,
 	// GITHUB_TOKEN, "client_secret") followed by : or = and a value.
 	regexp.MustCompile(`(?i)[A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|secret|token|passwd|password|credential)s?[A-Za-z0-9_.-]*["']?\s*[:=]\s*["']?[^\s"',;\[][^\s"',;]{5,}`),
@@ -280,4 +300,65 @@ func scanSecrets(s string) (string, int) {
 		s = re.ReplaceAllStringFunc(s, func(string) string { n++; return "[redacted]" })
 	}
 	return s, n
+}
+
+// paneRoute is the route an interactive pane was decided under, kept for the
+// life of the pane so each follow-up turn can announce it again (K-173).
+type paneRoute struct {
+	owner     string
+	sessionID string // the hub session the pane's events ride
+	view      routeView
+}
+
+// paneRouteStore holds the latest route per interactive conversation. It is
+// bounded: past maxPaneRoutes the oldest entry is forgotten, which only means
+// that pane's follow-ups announce no route.
+type paneRouteStore struct {
+	mu    sync.Mutex
+	m     map[string]paneRoute
+	order []string
+}
+
+const maxPaneRoutes = 1024
+
+func newPaneRouteStore() *paneRouteStore { return &paneRouteStore{m: map[string]paneRoute{}} }
+
+func (s *paneRouteStore) put(conversationID string, p paneRoute) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.m[conversationID]; !ok {
+		s.order = append(s.order, conversationID)
+		if len(s.order) > maxPaneRoutes {
+			delete(s.m, s.order[0])
+			s.order = s.order[1:]
+		}
+	}
+	s.m[conversationID] = p
+}
+
+// get returns the pane's route only to the operator who owns the pane.
+func (s *paneRouteStore) get(conversationID, owner string) (paneRoute, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.m[conversationID]
+	if !ok || p.owner != owner {
+		return paneRoute{}, false
+	}
+	return p, true
+}
+
+// maxCardBytes bounds the text a stored tool or thinking card keeps.
+const maxCardBytes = 16 << 10
+
+// cardTruncatedMarker ends a stored card that was cut, so a replay shows the cut
+// even where the truncated flag is not rendered.
+const cardTruncatedMarker = "\n[… truncated at 16 KiB …]"
+
+// capCardText cuts text to maxCardBytes (on a rune boundary) and appends the
+// marker; the bool says whether it cut. Callers scan for secrets first.
+func capCardText(text string) (string, bool) {
+	if len(text) <= maxCardBytes {
+		return text, false
+	}
+	return truncateUTF8(text, maxCardBytes) + cardTruncatedMarker, true
 }
