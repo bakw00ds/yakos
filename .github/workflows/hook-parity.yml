@@ -43,6 +43,8 @@ on:
     branches: [main]
     paths:
       - 'cli-go/internal/hooks/**'
+      - 'cli-go/internal/hooksinstall/**'
+      - '.github/fixtures/hooks-shape/**'
       - 'cli-go/cmd/yakos/cmd_hook*.go'
       - 'lib/hooks/**'
       - '.github/fixtures/hooks/**'
@@ -59,6 +61,8 @@ on:
     branches: [main]
     paths:
       - 'cli-go/internal/hooks/**'
+      - 'cli-go/internal/hooksinstall/**'
+      - '.github/fixtures/hooks-shape/**'
       - 'cli-go/cmd/yakos/cmd_hook*.go'
       - 'lib/hooks/**'
       - '.github/fixtures/hooks/**'
@@ -775,3 +779,28 @@ jobs:
         shell: bash
         timeout-minutes: 10
         run: /bin/bash tests/run-supervisor-budget-test.sh
+
+  # K-145: the codex/agy envelope decoders and deny shapes against the fixture
+  # corpus under .github/fixtures/hooks-shape, plus the installer's byte
+  # stability. Go only (no bash twin exists for these shapes).
+  hook-shape:
+    name: harness envelope decoders (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: '1.25'
+          cache-dependency-path: cli-go/go.sum
+
+      - name: Decoder goldens, installer stability, shape runner
+        working-directory: cli-go
+        run: go test -count=1 -race -timeout 120s -run 'Shape|Respond' ./internal/hooks/hookio/ ./internal/hooksinstall/ ./internal/hooks/shaperun/

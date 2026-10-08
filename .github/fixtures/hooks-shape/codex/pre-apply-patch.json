@@ -1,0 +1,37 @@
+{
+  "envelope": {
+    "cwd": "/p",
+    "hook_event_name": "PreToolUse",
+    "model": "m",
+    "permission_mode": "default",
+    "session_id": "s1",
+    "tool_input": {
+      "input": "*** Begin Patch\n*** Add File: .env\n+KEY=1\n*** Update File: src/a.go\n@@\n-a\n+b\n*** End Patch"
+    },
+    "tool_name": "apply_patch",
+    "tool_use_id": "c1",
+    "turn_id": "t1"
+  },
+  "want": {
+    "inputs": [
+      {
+        "event": "PreToolUse",
+        "tool": "Write",
+        "tool_input": {
+          "content": "*** Begin Patch\n*** Add File: .env\n+KEY=1\n*** Update File: src/a.go\n@@\n-a\n+b\n*** End Patch",
+          "file_path": ".env"
+        },
+        "work_dir": "/p"
+      },
+      {
+        "event": "PreToolUse",
+        "tool": "Write",
+        "tool_input": {
+          "content": "*** Begin Patch\n*** Add File: .env\n+KEY=1\n*** Update File: src/a.go\n@@\n-a\n+b\n*** End Patch",
+          "file_path": "src/a.go"
+        },
+        "work_dir": "/p"
+      }
+    ]
+  }
+}

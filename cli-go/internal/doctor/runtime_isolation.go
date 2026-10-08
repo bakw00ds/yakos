@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/bakw00ds/yakos/internal/codexhome"
+	"github.com/bakw00ds/yakos/internal/hooksinstall"
 	"github.com/bakw00ds/yakos/internal/routerpolicy"
 )
 
@@ -41,6 +42,8 @@ func (r *runner) checkRuntimeIsolation() {
 		}
 	}
 
+	lines = append(lines, r.codexHooksLines()...)
+
 	pol, perr := routerpolicy.Load(filepath.Join(r.home, ".yakos-state"))
 	switch {
 	case perr != nil: // Load reports a missing file as an empty policy, so this is a real problem
@@ -71,4 +74,61 @@ func (r *runner) checkRuntimeIsolation() {
 		f()
 	}
 	writeln(r, "")
+}
+
+// codexHooksLines reports the K-145 codex hooks file in the yakOS profile. A
+// hooks.json that codex will not load is skipped silently, which looks like "no
+// gate" to the operator, so each way that can happen gets a line (texts from the
+// K-156 spike).
+func (r *runner) codexHooksLines() []func() {
+	if _, err := r.lookPath("codex"); err != nil || !codexhome.ProfileHasHooks(r.home) {
+		return nil
+	}
+	profile := codexhome.ProfileDir(r.home)
+	file := "~/.yakos-state/" + codexhome.ProfileDirName + "/" + codexhome.HooksFileName // no absolute home path in the output
+	if _, isolated := codexhome.Effective(r.home, r.env); !isolated {
+		return []func(){func() {
+			r.warn(SectionRuntimeIsolation,
+				"codex hooks in %s are not loaded and codex will skip them silently: dispatch does not use that profile. Run 'yakos auth login codex' (or export OPENAI_API_KEY for the dispatching process), or re-run 'yakos hooks install --harness codex'",
+				file)
+		}}
+	}
+	in := hooksinstall.InspectShape(hooksinstall.HarnessCodex, profile, "")
+	var lines []func()
+	if in.BinaryMissing {
+		lines = append(lines, func() {
+			r.warn(SectionRuntimeIsolation,
+				"codex hooks in %s run a yakos binary that no longer exists (%s): codex fails open when a hook cannot start, so the yakOS gate is OFF; re-run 'yakos hooks install --harness codex'",
+				file, r.tilde(in.Binary))
+		})
+	}
+	switch in.State {
+	case "unsafe":
+		lines = append(lines, func() {
+			r.warn(SectionRuntimeIsolation,
+				"codex hooks file %s (or its directory) is a link, belongs to another user, or is group/world-writable: dispatch will NOT trust it (no --dangerously-bypass-hook-trust, codex skips it, the yakOS gate is OFF). Fix the permissions or re-run 'yakos hooks install --harness codex'",
+				file)
+		})
+	case "stale":
+		lines = append(lines, func() {
+			r.warn(SectionRuntimeIsolation,
+				"codex hooks file %s differs from what this yakos installs: dispatch will NOT trust it (no --dangerously-bypass-hook-trust, so codex skips it and the yakOS gate is OFF). If it was edited by anything but yakos, treat it as tampering; re-run 'yakos hooks install --harness codex'",
+				file)
+		})
+	}
+	if len(lines) > 0 {
+		return lines
+	}
+	return []func(){func() {
+		r.ok(SectionRuntimeIsolation, "codex hooks installed in the yakOS profile and match this yakos; dispatch passes --dangerously-bypass-hook-trust only for exactly this file")
+	}}
+}
+
+// tilde shortens a path under the home directory so output carries no absolute
+// home path.
+func (r *runner) tilde(p string) string {
+	if r.home != "" && strings.HasPrefix(p, r.home+string(filepath.Separator)) {
+		return "~" + p[len(r.home):]
+	}
+	return p
 }

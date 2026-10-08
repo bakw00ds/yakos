@@ -808,6 +808,11 @@ func toolResultContentToString(raw json.RawMessage) string {
 // paths orthogonal — no risk of accidentally mixing the two calling
 // conventions.
 type ChatDispatchRequest struct {
+	// AgentName is the roster id the codex and agy chat paths export as
+	// YAKOS_AGENT_TYPE so the hooks apply that agent's path policy. The claude
+	// chat path ignores it (its hooks read agent_type from the payload).
+	AgentName string
+
 	// Project is the absolute path to the project repository.
 	Project string
 

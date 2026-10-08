@@ -1,0 +1,27 @@
+{
+  "envelope": {
+    "cwd": "/p",
+    "hook_event_name": "PreToolUse",
+    "model": "m",
+    "permission_mode": "default",
+    "session_id": "s1",
+    "tool_input": {
+      "command": "echo hi"
+    },
+    "tool_name": "Bash",
+    "tool_use_id": "c1",
+    "turn_id": "t1"
+  },
+  "want": {
+    "inputs": [
+      {
+        "event": "PreToolUse",
+        "tool": "Bash",
+        "tool_input": {
+          "command": "echo hi"
+        },
+        "work_dir": "/p"
+      }
+    ]
+  }
+}

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/bakw00ds/yakos/internal/codexhome"
+	"github.com/bakw00ds/yakos/internal/hooksinstall"
 )
 
 // buildEnvCodex constructs the subprocess environment for codex dispatch: an
@@ -18,7 +19,7 @@ import (
 func buildEnvCodex(req DispatchRequest) []string {
 	env := filterEnv(os.Environ(), codexEnvSpec)
 	env = applyCodexHome(env)
-	return appendDispatchEnv(env, req)
+	return withAgentType(appendDispatchEnv(env, req), req.AgentName)
 }
 
 // applyCodexHome points codex at the yakOS-owned profile
@@ -171,8 +172,56 @@ func codexCommonArgs(model, effort string, resume bool) []string {
 	if e := codexEffort(effort); e != "" {
 		args = append(args, "-c", "model_reasoning_effort="+tomlString(e))
 	}
-	return append(args, codexPolicyArgs(resume)...)
+	args = append(args, codexPolicyArgs(resume)...)
+	return append(args, codexHooksArgs()...)
 }
+
+// codexHooksArgs returns --dangerously-bypass-hook-trust when the dispatch runs
+// under the yakOS profile AND the profile's hooks.json is exactly what
+// `yakos hooks install --harness codex` writes for this binary, in a profile
+// only this user can change (hooksinstall.CodexHooksTrusted). Without the flag
+// codex skips an untrusted hook silently (K-156); with it, codex runs whatever
+// the file says with no review, so a planted or edited file must never get it.
+// ~/.codex is never touched.
+func codexHooksArgs() []string {
+	switch codexHooksState() {
+	case HooksTrusted:
+		return []string{"--dangerously-bypass-hook-trust"}
+	case HooksUntrusted:
+		noteOnce("codex-hooks-untrusted",
+			"yakos: the codex hooks file in the yakOS profile differs from what yakos installs or is not private to you; codex will not run it and the yakOS gate is OFF for this dispatch. Run 'yakos doctor' and re-run 'yakos hooks install --harness codex'\n")
+	}
+	return nil
+}
+
+// Hook-trust states of a codex dispatch.
+const (
+	// HooksNone: the dispatch does not use the yakOS profile or it has no hooks file.
+	HooksNone = ""
+	// HooksTrusted: the profile's hooks.json is the one yakos installed.
+	HooksTrusted = "trusted"
+	// HooksUntrusted: a hooks file exists but is not what yakos installs.
+	HooksUntrusted = "untrusted"
+)
+
+func codexHooksState() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return HooksNone
+	}
+	if _, isolated := codexhome.Effective(home, os.Getenv); !isolated || !codexhome.ProfileHasHooks(home) {
+		return HooksNone
+	}
+	if hooksinstall.CodexHooksTrusted(codexhome.ProfileDir(home)) {
+		return HooksTrusted
+	}
+	return HooksUntrusted
+}
+
+// CodexHooksUntrusted reports whether a codex dispatch started now would run
+// without the yakOS gate because the profile hooks file is not trusted. The
+// dispatch log records it as hooks_untrusted.
+func CodexHooksUntrusted() bool { return codexHooksState() == HooksUntrusted }
 
 // ExecCmd returns the exec.Cmd for dispatch, without running it.
 // The dispatch layer uses this to attach stdout/stderr pipes (PR #34).
@@ -245,6 +294,7 @@ func (a *CodexAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest)
 
 	cmd := exec.CommandContext(ctx, "codex", args...) //nolint:gosec
 	cmd.Env = buildEnvCodex(DispatchRequest{
+		AgentName:     req.AgentName,
 		Project:       req.Project,
 		ModelOverride: req.ModelOverride,
 		AllowRoot:     req.AllowRoot,

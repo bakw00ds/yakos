@@ -18,6 +18,8 @@ import (
 	"github.com/bakw00ds/yakos/internal/consolecmd"
 	internalconsoleui "github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/daemonclient"
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"github.com/bakw00ds/yakos/internal/hooks/shaperun"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/mtlscmd"
 	internalperfdash "github.com/bakw00ds/yakos/internal/perfdash"
@@ -209,6 +211,10 @@ func runServe(yakosRoot string, args []string) {
 		ConsoleAllowBash:           consoleAllowBash,
 		ConsoleStructuredQuestions: consoleStructuredQuestions,
 		ShareTerminal:              shareTerminal,
+		HooksRun: func(ctx context.Context, shape, name string, body []byte) hookio.Response {
+			return shaperun.Run(ctx, shape, name, body, shapeDeps(yakosRoot))
+		},
+		HooksKnown: shaperun.Known,
 	}
 
 	wsBindAddr := wsAddr

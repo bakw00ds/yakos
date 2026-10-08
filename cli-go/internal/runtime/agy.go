@@ -13,7 +13,7 @@ import (
 // OPENAI_*/CODEX_* this way.
 func buildEnvAgy(req DispatchRequest) []string {
 	env := filterEnv(os.Environ(), agyEnvSpec)
-	return appendDispatchEnv(env, req)
+	return withAgentType(appendDispatchEnv(env, req), req.AgentName)
 }
 
 // AgyAdapter implements Adapter for the Antigravity (agy) CLI.
@@ -193,6 +193,7 @@ func (a *AgyAdapter) ChatExecCmd(ctx context.Context, req ChatDispatchRequest) *
 
 	cmd := exec.CommandContext(ctx, "agy", args...) //nolint:gosec
 	cmd.Env = buildEnvAgy(DispatchRequest{
+		AgentName:     req.AgentName,
 		Project:       req.Project,
 		ModelOverride: req.ModelOverride,
 		AllowRoot:     req.AllowRoot,
