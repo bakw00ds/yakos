@@ -17,6 +17,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/policywrite"
 	"github.com/bakw00ds/yakos/internal/router"
 	"github.com/bakw00ds/yakos/internal/routerpolicy"
 	internalstart "github.com/bakw00ds/yakos/internal/start"
@@ -30,7 +31,7 @@ func isRouterForceGo(args []string) bool {
 
 var (
 	// explainAgentRe is the shape of an agent name taken from argv.
-	explainAgentRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	explainAgentRe = policywrite.AgentRe
 	// explainClassRe is the shape of a route class taken from argv.
 	explainClassRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
 )

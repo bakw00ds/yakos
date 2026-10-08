@@ -27,6 +27,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/authsession"
 	"github.com/bakw00ds/yakos/internal/consoleui"
+	"github.com/bakw00ds/yakos/internal/modelreg"
 	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/statepath"
 	"github.com/bakw00ds/yakos/internal/userstore"
@@ -85,6 +86,7 @@ type wfx struct {
 	aStore                *authsession.Store
 	uStore                *userstore.Store
 	wantOperator, wantVia string
+	noAutoBase            bool // put leaves a policy body without base_sha as written
 }
 
 func (f *wfx) state() string { return filepath.Join(f.home, ".yakos-state") }
@@ -287,6 +289,11 @@ var wops = []string{"enable", "disable", "alias", "pin", "pricing", "policy"}
 // put builds a fully valid write for op as credential c with a current step-up
 // NOT assumed; mods then break it.
 func (f *wfx) put(op, body string, c wcred, csrf string, mods ...func(*http.Request)) *http.Request {
+	if op == "policy" && !f.noAutoBase && !strings.Contains(body, "base_sha") && strings.HasSuffix(body, "}") {
+		body = strings.TrimSuffix(body, "}") + `,"base_sha":"@BASE@"}`
+	}
+	// The current sha of the policy file, as write-session hands it to the editor.
+	body = strings.ReplaceAll(body, "@BASE@", sha256File(f.read("router-policy.yml")))
 	r := f.req(http.MethodPut, wpath(op), body, c)
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("X-CSRF-Token", csrf)
@@ -331,4 +338,15 @@ func bodyJSON(t *testing.T, rr *httptest.ResponseRecorder) map[string]any {
 		t.Fatalf("not JSON: %q", rr.Body.String())
 	}
 	return m
+}
+
+// policyRegistry loads the registry the writers validate against, for a test that
+// calls a writer directly (as the CLI does).
+func policyRegistry(t *testing.T, f *wfx) *modelreg.Registry {
+	t.Helper()
+	reg, err := modelreg.Load(modelreg.Options{StateDir: f.state()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return reg
 }

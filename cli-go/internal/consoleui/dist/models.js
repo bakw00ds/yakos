@@ -264,7 +264,7 @@
       holder.textContent = '';
       holder.appendChild(box);
       if (ov && ov.can_write && root.YakModelsWrite) {
-        holder.appendChild(root.YakModelsWrite.panel(ov, fetchFn, function () { load().catch(function () {}); }));
+        holder.appendChild(root.YakModelsWrite.panel(ov, fetchFn, function () { return load().catch(function () { return null; }); }));
       }
       holder.appendChild(playground(fetchFn));
     }).catch(function () {

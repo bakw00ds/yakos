@@ -80,6 +80,7 @@
   function panel(overview, fetchFn, reload) {
     var o = overview || {};
     var csrf = null;
+    var baseSha = null; // the policy sha the rules editor was loaded from
     var sec = el('section', 'models-section models-write');
     sec.appendChild(el('h3', null, 'Edit policy'));
     sec.appendChild(el('p', 'models-note', 'Browser writes are on for this daemon. Each change goes through the ' +
@@ -104,14 +105,25 @@
       });
     }
 
-    // mint fetches the CSRF token (and the double-submit cookie) once.
-    function mint() {
-      if (csrf) return Promise.resolve(true);
+    var rulesBox = null; // the rules textarea, set below
+
+    // load fetches the CSRF token (and the double-submit cookie) and the editor's
+    // starting point: the current rules text and the sha a save must cite. fill
+    // says whether to put the rules into the textarea (replacing what is there).
+    function load(fill) {
       return call('GET', '/api/models/write-session').then(function (r) {
         if (!r.ok || typeof r.body.csrf_token !== 'string') { say('Could not start a write session.', true); return false; }
         csrf = r.body.csrf_token;
+        baseSha = typeof r.body.policy_sha === 'string' ? r.body.policy_sha : null;
+        if (fill && rulesBox) rulesBox.value = typeof r.body.rules_yaml === 'string' ? r.body.rules_yaml : '';
         return true;
       });
+    }
+
+    // mint makes sure there is a token (and, the first time, the editor state).
+    function mint() {
+      if (csrf) return Promise.resolve(true);
+      return load(false); // never replace text the user may be editing; the panel's own load filled it
     }
 
     function showStepUp(method) {
@@ -150,7 +162,9 @@
         if (!r) return;
         if (r.ok) {
           say(r.body.changed ? 'Saved.' : 'No change: already set.');
-          if (r.body.changed && typeof reload === 'function') reload();
+          if (r.body.changed) refresh();
+        } else if (r.status === 409) {
+          say('The policy changed since you loaded it. Click "Reload current rules" (your text is replaced), then redo the edit.', true);
         } else if (r.status === 401 && r.body.error === 'step_up_required') {
           say('Re-authenticate to save this change.', true);
           showStepUp(String(r.body.method || 'password'));
@@ -165,6 +179,37 @@
       }).catch(function () { say('Could not save the change.', true); });
     }
 
+    // refresh reloads the read side after a change, rebuilds the selects from the new
+    // overview (a save can add pins, aliases and prices) and reloads the editor's sha.
+    function refresh() {
+      var done = typeof reload === 'function' ? reload() : null;
+      Promise.resolve(done).then(function (ov) {
+        if (ov && typeof ov === 'object') fillSelects(ov);
+        return load(false);
+      }).catch(function () {});
+    }
+
+    var selects = []; // {el, pick: function(overview) -> [values]}
+    function fillSelects(ov) {
+      selects.forEach(function (s) {
+        var prev = s.el.value;
+        var vals = s.pick(ov);
+        s.el.textContent = '';
+        s.el._picked = false;
+        vals.forEach(function (v) {
+          var o = el('option', null, v);
+          o.value = v;
+          s.el.appendChild(o);
+        });
+        if (vals.indexOf(prev) >= 0) s.el.value = prev;
+      });
+    }
+    function modelIds(ov) {
+      return uniq((ov.models || []).filter(function (m) { return m && ID_RE.test(String(m.id)); }).map(function (m) { return m.id; }));
+    }
+    function aliasNames(ov) { return (ov.aliases || []).map(function (a) { return a.alias; }); }
+    function tracked(sel, pick) { selects.push({ el: sel, pick: pick }); return sel; }
+
     function row(title) {
       var r = el('div', 'models-write-row');
       r.appendChild(el('strong', null, title));
@@ -177,7 +222,7 @@
 
     // enable / disable
     var r1 = row('Model on or off');
-    var m1 = select('Model', ids);
+    var m1 = tracked(select('Model', ids), modelIds);
     r1.appendChild(m1);
     r1.appendChild(button('Enable', function () { submit('enable', { id: m1.value }); }));
     r1.appendChild(button('Disable', function () { submit('disable', { id: m1.value }); }));
@@ -185,7 +230,7 @@
 
     // alias
     var r2 = row('Tier alias');
-    var a2 = select('Alias', aliases), h2 = select('Harness', ['codex', 'agy']);
+    var a2 = tracked(select('Alias', aliases), aliasNames), h2 = select('Harness', ['codex', 'agy']);
     var m2 = input('text', 'Model id or default', 'model id, or default');
     r2.appendChild(a2); r2.appendChild(h2); r2.appendChild(m2);
     r2.appendChild(button('Set alias', function () {
@@ -198,7 +243,7 @@
     // pin
     var r3 = row('Per-agent pin');
     var ag3 = input('text', 'Agent name', 'agent name');
-    var m3 = select('Model', ids), rt3 = select('Runtime', ['', 'claude', 'codex', 'agy']);
+    var m3 = tracked(select('Model', ids), modelIds), rt3 = select('Runtime', ['', 'claude', 'codex', 'agy']);
     r3.appendChild(ag3); r3.appendChild(m3); r3.appendChild(rt3);
     r3.appendChild(button('Pin', function () {
       var a = String(ag3.value || '').trim();
@@ -214,7 +259,7 @@
 
     // pricing
     var r4 = row('Price (dollars per million tokens)');
-    var m4 = select('Model', ids), b4 = select('Billing', ['', 'api', 'subscription', 'local']);
+    var m4 = tracked(select('Model', ids), modelIds), b4 = select('Billing', ['', 'api', 'subscription', 'local']);
     var in4 = input('text', 'Input price', 'input'), out4 = input('text', 'Output price', 'output');
     var cr4 = input('text', 'Cache read price', 'cache read'), cw4 = input('text', 'Cache write price', 'cache write');
     [m4, b4, in4, out4, cr4, cw4].forEach(function (c) { r4.appendChild(c); });
@@ -234,17 +279,23 @@
     var ta = el('textarea', 'models-write-rules');
     ta.setAttribute('aria-label', 'Router rules as a YAML list');
     ta.placeholder = '- match: {agent: backend}\n  action: {runtime: codex, model: gpt-5.6-terra}';
+    rulesBox = ta;
     var ok5 = input('checkbox', 'I understand this replaces every rule');
     r5.appendChild(ta);
     r5.appendChild(el('p', 'models-note', 'Saving REPLACES the whole rules list, including the pins above (they are rules). ' +
-      'Paste the full list you want. Anchors, aliases and merge keys are refused; the privileged keys in the file are never changed here.'));
+      'The box starts with the current rules. A save is refused if the policy changed after you loaded it. Anchors, aliases and merge keys are refused; the privileged keys in the file are never changed here.'));
     r5.appendChild(ok5);
     r5.appendChild(el('span', null, ' I understand this replaces every rule. '));
     r5.appendChild(button('Save rules', function () {
       if (!ok5.checked) { say('Tick the box to confirm the replacement.', true); return; }
-      submit('policy', { rules_yaml: String(ta.value || '') });
+      if (baseSha === null) { say('The current rules are not loaded. Click "Reload current rules".', true); return; }
+      submit('policy', { rules_yaml: String(ta.value || ''), base_sha: baseSha });
+    }));
+    r5.appendChild(button('Reload current rules', function () {
+      load(true).then(function (ok) { if (ok) say('Loaded the current rules.'); });
     }));
     sec.appendChild(r5);
+    load(true).catch(function () {}); // fill the editor now; a failure shows on the first save
     return sec;
   }
 

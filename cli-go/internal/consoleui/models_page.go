@@ -37,6 +37,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/modelreg"
 	"github.com/bakw00ds/yakos/internal/netid"
+	"github.com/bakw00ds/yakos/internal/policywrite"
 	"github.com/bakw00ds/yakos/internal/router"
 	"github.com/bakw00ds/yakos/internal/statepath"
 )
@@ -51,7 +52,7 @@ const (
 )
 
 var (
-	modelsAgentRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	modelsAgentRe = policywrite.AgentRe
 	modelsClassRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
 )
 
@@ -147,7 +148,8 @@ type aliasView struct {
 }
 
 type overviewResponse struct {
-	// WritesEnabled says the operator turned browser writes on (--console-model-writes);
+	// WritesEnabled says the operator turned browser writes on (--console-model-writes)
+	// and the caller is an admin: below that the flag is not shown (false);
 	// CanWrite is that and the caller being an admin. The tab draws write controls
 	// only for CanWrite.
 	WritesEnabled bool `json:"writes_enabled"`
@@ -198,7 +200,7 @@ func (m *modelsPage) handleOverview(w http.ResponseWriter, r *http.Request) {
 	}
 	id := netid.IdentityFrom(r.Context())
 	out := overviewResponse{
-		WritesEnabled: m.w.enabled, CanWrite: m.w.enabled && id.Role.Allows(netid.RoleAdmin),
+		WritesEnabled: m.w.enabled && id.Role.Allows(netid.RoleAdmin), CanWrite: m.w.enabled && id.Role.Allows(netid.RoleAdmin),
 		PrivilegedHidden: !id.Role.Allows(netid.RoleAdmin),
 		Providers:        []providerView{}, Models: []modelreg.Entry{}, Aliases: []aliasView{}, Budgets: []budgetView{},
 		Warnings: len(reg.Warnings()), Router: router.ViewOf(state), Sensitive: router.Sensitive(),

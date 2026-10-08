@@ -234,7 +234,7 @@ func routerPolicySet(stdout, stderr io.Writer, state, rulesFile string) int {
 		return explainExitFail
 	}
 	defer au.Close()
-	if err := policywrite.SetRules(state, data, recorder(stdout, stderr, "policy set", au)); err != nil {
+	if err := policywrite.SetRules(state, data, nil, recorder(stdout, stderr, "policy set", au)); err != nil {
 		if !errors.Is(err, errAuditFailed) {
 			_, _ = fmt.Fprintf(stderr, "router policy set: %s\n", sanitizeForTerminal(err.Error()))
 		}

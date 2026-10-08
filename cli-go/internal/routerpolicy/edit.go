@@ -8,8 +8,11 @@ package routerpolicy
 // here) and replaces the file atomically with mode 0600 (statepath.EditYAML).
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
 
 	"gopkg.in/yaml.v3"
@@ -32,11 +35,17 @@ const MaxRules = 6
 // anchors and aliases resolved, so an alias planted in the new rules cannot
 // change a privileged key (sec-356 M1).
 func Edit(stateDir string, edit func(top *yaml.Node) error, check func(File) error) (statepath.EditResult, error) {
+	return editIf(stateDir, nil, edit, check)
+}
+
+// editIf is Edit with an optional compare-and-swap on the file's sha (see
+// statepath.EditYAMLIf).
+func editIf(stateDir string, base *string, edit func(top *yaml.Node) error, check func(File) error) (statepath.EditResult, error) {
 	if stateDir == "" || !filepath.IsAbs(stateDir) {
 		return statepath.EditResult{}, errors.New("router policy: no usable state directory")
 	}
 	var before map[string]string
-	return statepath.EditYAML(Path(stateDir), maxPolicyBytes, func(top *yaml.Node) error {
+	return statepath.EditYAMLIf(Path(stateDir), maxPolicyBytes, base, func(top *yaml.Node) error {
 		var err error
 		if before, err = untouchedKeys(top); err != nil {
 			return errors.New("router policy: the file cannot be read for editing; fix it by hand first")
@@ -60,6 +69,36 @@ func Edit(stateDir string, edit func(top *yaml.Node) error, check func(File) err
 		}
 		return nil
 	})
+}
+
+// CurrentRules returns the sha of the trusted policy file and its rules: list as
+// YAML text, read from one set of bytes, for an editor to prefill and to cite as the
+// base of a compare-and-swap (SetRulesIf). A missing file is ("", "", nil); an
+// untrusted or unreadable one is an error.
+func CurrentRules(stateDir string) (sha, rulesYAML string, err error) {
+	if stateDir == "" || !filepath.IsAbs(stateDir) {
+		return "", "", errors.New("router policy: no usable state directory")
+	}
+	data, rerr := statepath.ReadTrusted(Path(stateDir), maxPolicyBytes)
+	if errors.Is(rerr, fs.ErrNotExist) {
+		return "", "", nil
+	}
+	if rerr != nil {
+		return "", "", errors.New("router policy: the file cannot be read")
+	}
+	sum := sha256.Sum256(data)
+	sha = hex.EncodeToString(sum[:])
+	var doc yaml.Node
+	if yaml.Unmarshal(data, &doc) != nil || doc.Kind != yaml.DocumentNode || len(doc.Content) != 1 {
+		return sha, "", nil
+	}
+	if r := statepath.YAMLGet(doc.Content[0], "rules"); r != nil && r.Kind == yaml.SequenceNode && noIndirection(r) {
+		out, merr := yaml.Marshal(r)
+		if merr == nil {
+			rulesYAML = string(out)
+		}
+	}
+	return sha, rulesYAML, nil
 }
 
 // untouchedKeys maps every top-level key except rules to the canonical
@@ -121,6 +160,12 @@ func noIndirection(n *yaml.Node) bool {
 // SetRules replaces the rules: list with the YAML list in rulesYAML. Nothing else
 // in the file changes. An empty list removes the key.
 func SetRules(stateDir string, rulesYAML []byte, check func(File) error) (statepath.EditResult, error) {
+	return SetRulesIf(stateDir, rulesYAML, nil, check)
+}
+
+// SetRulesIf is SetRules that writes only if the policy file's sha, read under the
+// edit lock, equals *base ("" is a missing file); else a *statepath.StaleError.
+func SetRulesIf(stateDir string, rulesYAML []byte, base *string, check func(File) error) (statepath.EditResult, error) {
 	var seq yaml.Node
 	if err := yaml.Unmarshal(rulesYAML, &seq); err != nil {
 		return statepath.EditResult{}, errors.New("router policy: the rules are not valid YAML")
@@ -138,7 +183,7 @@ func SetRules(stateDir string, rulesYAML []byte, check func(File) error) (statep
 	if len(list.Content) > MaxRules {
 		return statepath.EditResult{}, fmt.Errorf("router policy: at most %d rules are read", MaxRules)
 	}
-	return Edit(stateDir, func(top *yaml.Node) error {
+	return editIf(stateDir, base, func(top *yaml.Node) error {
 		if len(list.Content) == 0 {
 			statepath.YAMLDelete(top, "rules")
 			return nil

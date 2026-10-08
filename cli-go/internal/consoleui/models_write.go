@@ -63,6 +63,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/modelreg"
 	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/policywrite"
+	"github.com/bakw00ds/yakos/internal/routerpolicy"
 	"github.com/bakw00ds/yakos/internal/statepath"
 	"github.com/bakw00ds/yakos/internal/userstore"
 )
@@ -426,6 +427,11 @@ func (m *modelsPage) handleWriteSession(rw http.ResponseWriter, r *http.Request)
 	http.SetCookie(rw, &http.Cookie{Name: csrfCookieName, Value: cred.csrf, Path: "/api/", HttpOnly: true,
 		SameSite: http.SameSiteStrictMode, Secure: r.TLS != nil})
 	out := map[string]any{"csrf_token": cred.csrf, "step_up_method": cred.stepUpMethod(), "step_up_current": false}
+	// What the rules editor starts from: the file's current rules and the sha a
+	// save must cite (an unreadable file is an empty editor; the save is refused).
+	if sha, rules, err := routerpolicy.CurrentRules(w.stateDir()); err == nil {
+		out["policy_sha"], out["rules_yaml"] = sha, rules
+	}
 	if until, ok := w.steppedUp(cred); ok {
 		out["step_up_current"] = true
 		out["step_up_expires"] = until.UTC().Format(time.RFC3339)
@@ -509,6 +515,10 @@ type pricingDTO struct {
 
 type policyDTO struct {
 	RulesYAML string `json:"rules_yaml"`
+	// BaseSHA is the policy sha the editor loaded (write-session returns it). It is
+	// required: a PUT replaces the whole rules list, and the write is refused (409)
+	// when the file is not the one the rules were based on. "" means no file.
+	BaseSHA *string `json:"base_sha"`
 }
 
 func fnum(p *float64) string {
@@ -579,8 +589,12 @@ func (m *modelsPage) handleWrite(op string) http.HandlerFunc {
 			if !decodeBody(rw, r, maxWriteBody, &d) {
 				return
 			}
+			if d.BaseSHA == nil {
+				modelsError(rw, http.StatusBadRequest, "base_sha is required")
+				return
+			}
 			run = func(_ *modelreg.Registry, state string, rec policywrite.Recorder) error {
-				return policywrite.SetRules(state, []byte(d.RulesYAML), rec)
+				return policywrite.SetRules(state, []byte(d.RulesYAML), d.BaseSHA, rec)
 			}
 		}
 		w.perform(rw, id, run)
@@ -636,6 +650,11 @@ func (w *modelsWriter) perform(rw http.ResponseWriter, id netid.Identity, run fu
 		}
 		writeModelsJSON(rw, http.StatusOK, map[string]any{"ok": true, "changed": changed, "changes": views})
 	default:
+		var stale *statepath.StaleError
+		if errors.As(err, &stale) {
+			writeModelsJSON(rw, http.StatusConflict, map[string]string{"error": "the policy changed since you loaded it; reload and redo the edit", "sha": stale.SHA})
+			return
+		}
 		status, msg := refusalOf(err)
 		modelsError(rw, status, msg)
 	}

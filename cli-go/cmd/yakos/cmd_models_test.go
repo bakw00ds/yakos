@@ -1043,7 +1043,8 @@ func runYakosIn(t *testing.T, dir string, args ...string) (int, string) {
 	b, _ := json.Marshal(args)
 	cmd := exec.Command(os.Args[0], "-test.run=^TestBudgetHelperMain$")
 	cmd.Dir = dir
-	cmd.Env = []string{"YAKOS_TEST_MAIN_ARGS=" + string(b), "HOME=" + t.TempDir(), "PATH=" + t.TempDir()}
+	home := t.TempDir()
+	cmd.Env = []string{"YAKOS_TEST_MAIN_ARGS=" + string(b), "HOME=" + home, "USERPROFILE=" + home, "PATH=" + t.TempDir()}
 	var out bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &out
 	err := cmd.Run()

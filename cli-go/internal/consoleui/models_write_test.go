@@ -6,6 +6,7 @@ package consoleui_test
 // policy files byte-identical afterwards and no audit line written.
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/netid"
+	"github.com/bakw00ds/yakos/internal/policywrite"
 	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
@@ -79,7 +81,7 @@ func TestWrites_AcceptedWriteAuditsOnceWithServerSideIdentity(t *testing.T) {
 				lines := f.audit()
 				want := 1
 				if op == "pricing" {
-					want = 2 // billing, then price
+					want = 1 // billing and price in one write
 				}
 				if len(lines) != want {
 					t.Fatalf("%d audit lines, want %d: %v", len(lines), want, lines)
@@ -407,6 +409,22 @@ func TestWrites_HostIsChecked(t *testing.T) {
 			t.Errorf("bare mux, good Host = %d %s", rr.Code, rr.Body.String())
 		}
 	})
+	t.Run("write-session mint refuses a rebinding Host", func(t *testing.T) {
+		f := newWfx(t, modeLoopback, true)
+		bare := injectIdentityMiddleware(netid.Identity{OperatorID: wLoopOp, Role: netid.RoleAdmin, Resolved: true}, f.srv.HandlerForTest())
+		for _, h := range hosts {
+			r := f.req(http.MethodGet, "/api/models/write-session", "", f.a)
+			r.Host = h
+			if rr := f.serve(bare, r); rr.Code != 403 {
+				t.Errorf("mint with Host %q = %d, want 403", h, rr.Code)
+			}
+			r = f.req(http.MethodGet, "/api/models/write-session", "", f.a)
+			r.Host = h
+			if rr := f.serve(f.full, r); rr.Code != 403 {
+				t.Errorf("mint (full handler) with Host %q = %d, want 403", h, rr.Code)
+			}
+		}
+	})
 	t.Run("networked host must be a configured external host", func(t *testing.T) {
 		f := newWfx(t, modeSession, true)
 		csrf := f.ready(f.a)
@@ -697,7 +715,7 @@ func TestWrites_UnsandboxedRuntimesAreAdminOnly(t *testing.T) {
 				t.Errorf("%s: hooks_endpoint flag hidden in %s", name, where)
 			}
 		}
-		if ov["can_write"] != (tc.role == netid.RoleAdmin) || ov["writes_enabled"] != true {
+		if ov["can_write"] != (tc.role == netid.RoleAdmin) || ov["writes_enabled"] != (tc.role == netid.RoleAdmin) {
 			t.Errorf("%s: can_write=%v writes_enabled=%v", name, ov["can_write"], ov["writes_enabled"])
 		}
 	}
@@ -730,5 +748,92 @@ func TestWrites_ConcurrentWritesAreAllRecorded(t *testing.T) {
 		if !strings.Contains(f.read("model-registry.yml"), id) {
 			t.Errorf("write for %s lost", id)
 		}
+	}
+}
+
+// The whole-list rules replace is a compare-and-swap: a CLI pin that lands between
+// the editor's load and its save makes the save a 409, and the pin survives.
+func TestWrites_RulesReplaceIsCompareAndSwap(t *testing.T) {
+	for _, mode := range allModes {
+		t.Run(string(mode), func(t *testing.T) {
+			f := newWfx(t, mode, true)
+			csrf := f.ready(f.a)
+			// The editor loads: write-session hands out the sha and the rules text.
+			ws := bodyJSON(t, f.serve(f.full, f.req(http.MethodGet, "/api/models/write-session", "", f.a)))
+			base, _ := ws["policy_sha"].(string)
+			if base != sha256File(f.read("router-policy.yml")) || !strings.Contains(ws["rules_yaml"].(string), "class: chat") {
+				t.Fatalf("editor state = %v", ws)
+			}
+			if strings.Contains(ws["rules_yaml"].(string), "SENTINEL") {
+				t.Error("rules text carries a key outside rules:")
+			}
+			// A CLI pin lands (the same writer `yakos models pin` calls).
+			reg := policyRegistry(t, f)
+			if err := policywrite.SetPin(f.state(), reg, "backend", "gpt-5.6-terra", "codex", false, func(policywrite.Change) error { return nil }); err != nil {
+				t.Fatal(err)
+			}
+			after := f.files()
+			body := `{"rules_yaml":"- {match: {agent: other}, action: {runtime: codex, model: gpt-5.6-terra}}\n","base_sha":"` + base + `"}`
+			rr := f.serve(f.full, f.put("policy", body, f.a, csrf))
+			if rr.Code != 409 {
+				t.Fatalf("stale save = %d %s", rr.Code, rr.Body.String())
+			}
+			if m := bodyJSON(t, rr); m["sha"] != sha256File(f.read("router-policy.yml")) {
+				t.Errorf("409 does not name the current sha: %v", m)
+			}
+			if f.files() != after || !strings.Contains(f.read("router-policy.yml"), "backend") || len(f.audit()) != 0 {
+				t.Error("a stale save changed the file or was audited; the pin must survive")
+			}
+			// Redoing the edit from the fresh state works.
+			ws = bodyJSON(t, f.serve(f.full, f.req(http.MethodGet, "/api/models/write-session", "", f.a)))
+			body = `{"rules_yaml":` + jsonString(ws["rules_yaml"].(string)) + `,"base_sha":"` + ws["policy_sha"].(string) + `"}`
+			if rr := f.serve(f.full, f.put("policy", body, f.a, csrf)); rr.Code != 200 {
+				t.Errorf("save from fresh state = %d %s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+	t.Run("base_sha is required", func(t *testing.T) {
+		f := newWfx(t, modeLoopback, true)
+		f.noAutoBase = true
+		csrf := f.ready(f.a)
+		before := f.files()
+		refused(t, f, f.serve(f.full, f.put("policy", `{"rules_yaml":""}`, f.a, csrf)), 400, before, "no base_sha")
+		refused(t, f, f.serve(f.full, f.put("policy", `{"rules_yaml":"[]","base_sha":""}`, f.a, csrf)), 409, before, "empty base_sha against an existing file")
+		refused(t, f, f.serve(f.full, f.put("policy", `{"rules_yaml":"[]","base_sha":"`+strings.Repeat("0", 64)+`"}`, f.a, csrf)), 409, before, "wrong base_sha")
+	})
+}
+
+func jsonString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
+}
+
+// Two admins: another admin's password is not a step-up for this session.
+func TestWrites_StepUpRefusesAnotherAdminsPassword(t *testing.T) {
+	f := newWfx(t, modeSession, true)
+	if err := f.uStore.Create("carol", "carols-own-password-1", netid.RoleAdmin); err != nil {
+		t.Fatal(err)
+	}
+	csrf := f.mint(f.a)
+	if rr := f.stepUp(f.a, csrf, `{"password":"carols-own-password-1"}`); rr.Code != 401 {
+		t.Fatalf("another admin's password = %d", rr.Code)
+	}
+	before := f.files()
+	refused(t, f, f.serve(f.full, f.put("enable", wbodies["enable"], f.a, csrf)), 401, before, "after carol's password")
+	if rr := f.stepUp(f.a, csrf, f.a.stepBody); rr.Code != 200 {
+		t.Errorf("own password = %d", rr.Code)
+	}
+	// And the other way round: carol's session checks carol's password, not alice's.
+	sess, err := f.aStore.Create("carol", netid.RoleAdmin, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	carol := wcred{apply: func(r *http.Request) { r.AddCookie(&http.Cookie{Name: "yakos_session", Value: sess.ID}) }}
+	cc := f.mint(carol)
+	if rr := f.stepUp(carol, cc, `{"password":"`+wPassword+`"}`); rr.Code != 401 {
+		t.Errorf("alice's password on carol's session = %d", rr.Code)
+	}
+	if rr := f.stepUp(carol, cc, `{"password":"carols-own-password-1"}`); rr.Code != 200 {
+		t.Errorf("carol's own password = %d", rr.Code)
 	}
 }

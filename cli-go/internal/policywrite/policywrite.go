@@ -175,30 +175,30 @@ func SetPricing(stateDir string, reg *modelreg.Registry, id string, a PricingArg
 		}
 		price = &p
 	}
-	if a.Billing != "" {
-		res, err := modelreg.SetBilling(stateDir, id, modelreg.Billing(a.Billing))
+	// One atomic write for billing and price together: a failure cannot leave
+	// the billing mode changed and the price not, and one audit line covers it.
+	if price == nil && !a.Clear {
+		if a.Billing == "" {
+			return nil
+		}
+		res, err := modelreg.SetBillingAndPricing(stateDir, id, modelreg.Billing(a.Billing), false, nil)
 		if err != nil {
 			return err
 		}
-		if err := rec(Change{File: overlay, Action: "models.billing", What: id + " is billed " + a.Billing, Res: res}); err != nil {
-			return err
-		}
+		return rec(Change{File: overlay, Action: "models.billing", What: id + " is billed " + a.Billing, Res: res})
 	}
-	if a.Clear {
-		res, err := modelreg.SetPricing(stateDir, id, nil)
-		if err != nil {
-			return err
-		}
-		return rec(Change{File: overlay, Action: "models.pricing", What: "cleared the price of " + id, Res: res})
-	}
-	if price == nil {
-		return nil // only the billing mode was asked for
-	}
-	res, err := modelreg.SetPricing(stateDir, id, price)
+	res, err := modelreg.SetBillingAndPricing(stateDir, id, modelreg.Billing(a.Billing), true, price)
 	if err != nil {
 		return err
 	}
-	return rec(Change{File: overlay, Action: "models.pricing", What: "priced " + id, Res: res})
+	what := "priced " + id
+	if a.Clear {
+		what = "cleared the price of " + id
+	}
+	if a.Billing != "" {
+		what += ", billed " + a.Billing
+	}
+	return rec(Change{File: overlay, Action: "models.pricing", What: what, Res: res})
 }
 
 // SetPin pins an agent to a model (runtime narrows an id several runtimes offer),
@@ -242,8 +242,10 @@ func SetPin(stateDir string, reg *modelreg.Registry, agent, id, runtime string, 
 }
 
 // SetRules replaces the router policy's rules with the YAML list in rulesYAML.
-func SetRules(stateDir string, rulesYAML []byte, rec Recorder) error {
-	res, err := routerpolicy.SetRules(stateDir, rulesYAML, router.CheckPolicy)
+// A non-nil base makes it a compare-and-swap: the policy file's sha, read under
+// the edit lock, must equal *base or the error is a *statepath.StaleError.
+func SetRules(stateDir string, rulesYAML []byte, base *string, rec Recorder) error {
+	res, err := routerpolicy.SetRulesIf(stateDir, rulesYAML, base, router.CheckPolicy)
 	if err != nil {
 		return err
 	}

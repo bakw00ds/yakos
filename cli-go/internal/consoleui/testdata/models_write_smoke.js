@@ -60,6 +60,11 @@ function fetchFn(method, path, body, extra) {
   return Promise.resolve({ ok: reply.status < 400, status: reply.status, json: function () { return Promise.resolve(reply.body); } });
 }
 const ov = function () { return { status: 200, body: overview(true) }; };
+const ovNew = function () {
+  const b = overview(true);
+  b.models.push({ id: 'brand-new-model', harness: 'codex', billing: 'api', billing_by: 'overlay', enabled: true, enabled_by: 'catalog', aliases: [] });
+  return { status: 200, body: b };
+};
 const perf = { status: 200, body: [] };
 
 async function main() {
@@ -74,8 +79,8 @@ async function main() {
   // 2. can_write: panel drawn, evil strings only through textContent.
   calls.length = 0;
   script = {
-    'GET /api/models/overview': ov(), 'GET /perf/api/perf/by_axis?axis=model&window=30d': perf,
-    'GET /api/models/write-session': { status: 200, body: { csrf_token: 'TOK1', step_up_method: 'password' } },
+    'GET /api/models/overview': [ov(), ovNew()], 'GET /perf/api/perf/by_axis?axis=model&window=30d': perf,
+    'GET /api/models/write-session': { status: 200, body: { csrf_token: 'TOK1', step_up_method: 'password', policy_sha: 'SHA1', rules_yaml: '- {match: {agent: a}}\n' } },
     'PUT /api/models/disable': [
       { status: 401, body: { error: 'step_up_required', method: 'password' } },
       { status: 200, body: { ok: true, changed: true, changes: [] } },
@@ -89,13 +94,16 @@ async function main() {
   assert(texts(panel).join('\n').indexOf('router-policy pins only') >= 0, 'pin-scope note missing');
   assert(texts(holder).join('\n').indexOf('Browser writes are on') >= 0, 'banner does not say writes are on');
 
+  // The rules editor starts from the current rules, not blank.
+  await tick();
+  assert(find(panel, 'models-write-rules').value === '- {match: {agent: a}}\n', 'rules editor not prefilled: ' + find(panel, 'models-write-rules').value);
   // Disable the first model: mint, then PUT with the CSRF header; step-up is required.
   buttons(panel, 'Disable')[0].listeners.click();
   await tick();
   const put1 = calls.filter(function (c) { return c.method === 'PUT'; });
   assert(put1.length === 1 && put1[0].path === '/api/models/disable' && put1[0].body.id === 'gpt-5.5', 'first PUT: ' + JSON.stringify(put1));
   assert(put1[0].headers['X-CSRF-Token'] === 'TOK1' && put1[0].keep401, 'PUT lacks the CSRF header or keep401');
-  assert(calls.filter(function (c) { return c.path === '/api/models/write-session'; }).length === 1, 'minted not once');
+  assert(calls.filter(function (c) { return c.path === '/api/models/write-session'; }).length === 1, 'write-session fetched more than once before the first write');
   const step = find(panel, 'models-write-step');
   const secretInput = find(step, 'models-write-input');
   assert(secretInput && secretInput.type === 'password', 'no password prompt after step_up_required');
@@ -117,6 +125,14 @@ async function main() {
   await tick();
   assert(texts(panel).join(' ').indexOf('Saved.') >= 0, 'success not shown: ' + texts(panel).join('|'));
   assert(calls.filter(function (c) { return c.path === '/api/models/overview'; }).length === overviewsBefore + 1, 'no reload after a change');
+
+  // A saved change rebuilds the selects from the reloaded overview.
+  await tick();
+  const sel = [];
+  walk(panel, function (x) { if (x.tag === 'select') sel.push(x); });
+  const offered = [];
+  sel[0].children.forEach(function (o) { offered.push(o.value); });
+  assert(offered.indexOf('brand-new-model') >= 0, 'selects stale after a save: ' + offered);
 
   // 3. Client-side validation never reaches the network.
   const n0 = calls.length;
@@ -142,7 +158,7 @@ async function main() {
 
   // 4. A server error string is shown as text; a CSRF refusal clears the token.
   script['PUT /api/models/enable'] = { status: 403, body: { error: evil } };
-  script['GET /api/models/write-session'] = { status: 200, body: { csrf_token: 'TOK2', step_up_method: 'password' } };
+  script['GET /api/models/write-session'] = { status: 200, body: { csrf_token: 'TOK2', step_up_method: 'password', policy_sha: 'SHA1', rules_yaml: '- {match: {agent: a}}\n' } };
   buttons(panel, 'Enable')[0].listeners.click();
   await tick();
   assert(texts(panel).join(' ').indexOf(evil) >= 0, 'server error not shown as text');
@@ -153,13 +169,27 @@ async function main() {
   assert(last.headers['X-CSRF-Token'] === 'TOK2', 'token not re-minted after a 403: ' + last.headers['X-CSRF-Token']);
   assert(texts(panel).join(' ').indexOf('No change') >= 0, 'unchanged result not shown');
 
-  // 5. Rules: ticked box sends the YAML text as rules_yaml, nothing else.
+  // 5. Rules: ticked box sends the YAML text and the sha it was loaded from.
   inputs.find(function (i) { return i.type === 'checkbox'; }).checked = true;
   script['PUT /api/router/policy'] = { status: 200, body: { ok: true, changed: true, changes: [] } };
   buttons(panel, 'Save rules')[0].listeners.click();
   await tick();
   const pol = calls.filter(function (c) { return c.path === '/api/router/policy'; }).pop();
-  assert(pol && pol.method === 'PUT' && Object.keys(pol.body).join() === 'rules_yaml' && pol.body.rules_yaml.indexOf('runtime: codex') >= 0, 'rules call: ' + JSON.stringify(pol));
+  assert(pol && pol.method === 'PUT' && Object.keys(pol.body).sort().join() === 'base_sha,rules_yaml' && pol.body.rules_yaml.indexOf('runtime: codex') >= 0 && pol.body.base_sha === 'SHA1', 'rules call: ' + JSON.stringify(pol));
+  // A 409 says so and leaves the user's text alone until they ask for a reload.
+  script['PUT /api/router/policy'] = { status: 409, body: { error: 'changed', sha: 'SHA2' } };
+  ta.value = 'my edit';
+  buttons(panel, 'Save rules')[0].listeners.click();
+  await tick();
+  assert(texts(panel).join(' ').indexOf('policy changed since you loaded it') >= 0 && ta.value === 'my edit', '409 handling');
+  script['GET /api/models/write-session'] = { status: 200, body: { csrf_token: 'TOK3', policy_sha: 'SHA2', rules_yaml: '- {fresh: 1}\n' } };
+  buttons(panel, 'Reload current rules')[0].listeners.click();
+  await tick();
+  assert(ta.value === '- {fresh: 1}\n', 'reload did not replace the editor text');
+  script['PUT /api/router/policy'] = { status: 200, body: { ok: true, changed: true, changes: [] } };
+  buttons(panel, 'Save rules')[0].listeners.click();
+  await tick();
+  assert(calls.filter(function (c) { return c.path === '/api/router/policy'; }).pop().body.base_sha === 'SHA2', 'save after reload cites the old sha');
 
   // 6. Methods and paths the panel may use, and no others.
   const allowed = { 'GET /api/models/write-session': 1, 'GET /api/models/overview': 1, 'GET /perf/api/perf/by_axis?axis=model&window=30d': 1,

@@ -16,6 +16,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/projfile"
 	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
@@ -575,16 +576,14 @@ func clampDispatchModel(args []string, agent, project string) ([]string, error) 
 }
 
 // budgetPolicySHA is the hex SHA-256 of the budget policy file ("" when it is
-// absent or unreadable), for the config_changed audit line. The read is bounded.
+// absent, not a regular file or unreadable), for the config_changed audit line.
+// It reads through projfile.ReadFile: no symlink followed, no FIFO or device
+// opened (a FIFO there would block a plain os.Open for good), read bounded.
 func budgetPolicySHA(stateDir string) string {
-	f, err := os.Open(budget.PolicyPath(stateDir))
+	b, err := projfile.ReadFile(budget.PolicyPath(stateDir))
 	if err != nil {
 		return ""
 	}
-	defer func() { _ = f.Close() }()
-	h := sha256.New()
-	if _, err := io.Copy(h, io.LimitReader(f, 1<<20)); err != nil {
-		return ""
-	}
-	return hex.EncodeToString(h.Sum(nil))
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
 }

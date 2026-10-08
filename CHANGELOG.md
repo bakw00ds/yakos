@@ -38,7 +38,8 @@ never holds a login: ADR-0010. Detailed entries follow.
   privileged field. The tab draws controls only for an admin when writes are on.
   `allow_unsandboxed_runtimes` is hidden from read and dispatch callers in
   `GET /api/router/policy` and the overview; the tab says it lists router-policy
-  pins only; `yakos budget set` now writes a `config_changed` line
+  pins only; the rules replace is a compare-and-swap on the policy sha (409 on a
+  stale save); `yakos budget set` now writes a `config_changed` line
   (`budget.set`). Reference: `docs/routing.md`, "Browser writes".
 - **docs: ADR-0010, the runtime-matrix rewrite and the routing map (K-155).**
   ADR-0010 records harness-native routing, the vendor-policy facts it rests on

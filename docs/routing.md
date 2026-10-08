@@ -719,8 +719,8 @@ start the daemon with `yakos serve`.)
 | `PUT /api/models/alias` `{"alias","harness","id"}` | admin | `models alias`; `id` `""` or `"default"` is the harness default |
 | `PUT /api/models/pin` `{"agent","id","runtime","clear"}` | admin | `models pin` / `--clear` |
 | `PUT /api/models/pricing` `{"id","input","output","cache_read","cache_write","billing","clear"}` | admin | `models pricing` |
-| `PUT /api/router/policy` `{"rules_yaml"}` | admin | `router policy set`: **replaces the whole rules list, pins included** |
-| `GET /api/models/write-session` | admin | mints the CSRF token, sets the `yakos_wcsrf` cookie |
+| `PUT /api/router/policy` `{"rules_yaml","base_sha"}` | admin | `router policy set`: **replaces the whole rules list, pins included**; `base_sha` (required) is the policy sha the editor loaded, checked under the edit lock: a mismatch is 409 with the current sha and nothing is written |
+| `GET /api/models/write-session` | admin | mints the CSRF token, sets the `yakos_wcsrf` cookie; also returns `policy_sha` and `rules_yaml` (the current rules list) for the rules editor |
 | `POST /api/models/step-up` | admin | re-authenticate (below) |
 
 The writes call `internal/policywrite`, the same code the CLI calls, so the same
@@ -768,7 +768,7 @@ guards (the Host check, the 415 gate) answer in plain text; they carry the same
 no-store and nosniff headers.
 
 **The audit line.** An accepted write appends one `config_changed` line per file
-replaced (a price with a billing mode is two), to the home state directory's
+replaced (a price with a billing mode is one write and one line), to the home state directory's
 dispatch log, whatever `YAKOS_DISPATCH_LOG` says. Besides the CLI's fields it has
 `surface: "console"`, `actor: "operator-browser"`, `auth_method` (`session`, `cert`
 or `none` for the loopback token) and `operator_id`, which is the server-resolved
@@ -781,13 +781,19 @@ same line now (`file: budget-policy.yml`, `action: budget.set`).
 `can_write` (the flag is on and the caller is admin). It fetches the token once,
 sends it on each write, shows the step-up form when asked, clears the typed secret
 the moment it is sent, and stores nothing. The rules box warns that saving replaces
-every rule and asks for a tick.
+every rule and asks for a tick. The rules box starts with the current rules, and a
+save cites the sha it loaded: if a CLI `models pin` (or another admin) changed the
+policy in between, the save is a 409, the user's text is kept, and "Reload current
+rules" fetches the new state. After a saved change the page re-reads the overview
+and rebuilds its selects.
 
 **Limits to know.** One session is one credential; a logged-out session loses its
 token and step-up with it. A step-up on mTLS is weaker than a typed secret, as
-described above. The rules write replaces the list wholesale; there is no
-compare-and-swap on the policy sha yet, so two admins editing at once is
-last-write-wins (the audit line has both shas).
+described above. The rules write replaces the list wholesale, guarded by the
+`base_sha` compare-and-swap above (a lost update becomes a 409). The overview shows
+`writes_enabled` and `can_write` as true to admins only. `yakos budget set` refuses
+before writing anything when the home dispatch log cannot be opened, as the model
+and router writers do.
 
 ## Claude Code request-class aliases (K-141)
 
