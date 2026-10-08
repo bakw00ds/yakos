@@ -136,7 +136,7 @@ func seedModelsState(t *testing.T, f modelsFx) {
 		"rules:\n  - {match: {agent: backend}, action: {runtime: codex, model: gpt-5.6-terra}, override_pins: true}\n  - {match: {class: chat}, action: {runtime: claude, model: sonnet}}\n")
 	ev := func(m map[string]any) string { b, _ := json.Marshal(m); return string(b) + "\n" }
 	log := ev(map[string]any{"type": "eval_run_finished", "ts": "2026-10-01T10:00:00Z", "run_id": "run-old", "agent": "backend",
-		"tier_pass_rates": map[string]float64{"haiku": 0.5, "sonnet": 0.9}, "tier_mean_costs": map[string]float64{"haiku": 0.01},
+		"tier_pass_rates": map[string]float64{"haiku": 0.5, "sonnet": 0.9, "ti\x1b[31mer": 0.1, strings.Repeat("k", 65): 0.2}, "tier_mean_costs": map[string]float64{"haiku": 0.01, "bad\u202ekey": 3},
 		"candidate_emitted": true, "candidate_tier": "sonnet", "note": "SENTINEL-EVAL-NOTE"}) +
 		"not json at all SENTINEL-EVAL-NOTE\n" +
 		ev(map[string]any{"type": "eval_run_finished", "ts": "2026-10-02T10:00:00Z", "run_id": "run-\x1b[31mevil", "agent": "backend"}) +
@@ -400,6 +400,12 @@ func TestModelsPage_OverviewContent(t *testing.T) {
 	if evals[0].(map[string]any)["run_id"] != "run-new" || evals[1].(map[string]any)["candidate_tier"] != "sonnet" {
 		t.Errorf("evals = %v", evals)
 	}
+	old := evals[1].(map[string]any)
+	rates, _ := old["tier_pass_rates"].(map[string]any)
+	costs, _ := old["tier_mean_costs"].(map[string]any)
+	if len(rates) != 2 || rates["haiku"] != 0.5 || rates["sonnet"] != 0.9 || len(costs) != 1 || costs["haiku"] != 0.01 {
+		t.Errorf("tier maps must keep only identifier keys: rates=%v costs=%v", rates, costs)
+	}
 }
 
 func TestModelsPage_ProbeResultsAreCached(t *testing.T) {
@@ -521,7 +527,6 @@ func TestModelsPage_ExplainRoundTripAndRefusals(t *testing.T) {
 		"":                                  400,
 		"agent=../etc/passwd":               400,
 		"agent=a&class=bad%20class":         400,
-		"agent=a&class=nonexistent":         400,
 		"agent=a&task_bytes=-1":             400,
 		"agent=a&task_bytes=abc":            400,
 		"agent=a&task_bytes=99999999999999": 400,
@@ -531,8 +536,11 @@ func TestModelsPage_ExplainRoundTripAndRefusals(t *testing.T) {
 			t.Errorf("explain?%s = %d, want %d (%s)", q, rr.Code, want, rr.Body.String())
 		}
 	}
-	if rr := f.get("/api/models/explain?agent=a&class=sensitive"); rr.Code != 400 {
+	if rr := f.get("/api/models/explain?agent=a&class=nonexistent"); rr.Code != 400 {
 		t.Errorf("a class no rule or built-in names is refused: %d", rr.Code)
+	}
+	if rr := f.get("/api/models/explain?agent=backend&class=sensitive"); rr.Code != 200 || got.Class != "sensitive" {
+		t.Errorf("class=sensitive must reach the dry run: %d class=%q %s", rr.Code, got.Class, rr.Body.String())
 	}
 }
 
@@ -570,5 +578,65 @@ func TestModelsPage_StaticAssetAndWiring(t *testing.T) {
 	app, _ := os.ReadFile("dist/app.js")
 	if !strings.Contains(string(index), `src="/models.js"`) || !strings.Contains(string(app), "id: 'models'") || !strings.Contains(string(app), `id="panel-models"`) {
 		t.Error("the tab is not wired into index.html and app.js")
+	}
+}
+
+// An untrusted router-policy.yml (world-writable, or a symlink) is read as no
+// policy: the empty view, the fixed warning and no path or file text anywhere.
+func TestModelsPage_UntrustedPolicyIsEmptyViewWithFixedWarning(t *testing.T) {
+	const wantWarning = "router policy ignored: the file must be a regular file you own that is not group or world writable (chmod 600); no routing rules are applied"
+	body := "x_secret: SENTINEL-POLICY-KEY\nhooks_endpoint: true\nrules:\n  - {match: {agent: backend}, action: {runtime: codex}}\n"
+	cases := map[string]func(t *testing.T, f modelsFx){
+		"world-writable": func(t *testing.T, f modelsFx) {
+			f.writeState(t, "router-policy.yml", body)
+			if err := os.Chmod(filepath.Join(f.state(), "router-policy.yml"), 0o666); err != nil { //nolint:gosec
+				t.Fatal(err)
+			}
+		},
+		"symlink": func(t *testing.T, f modelsFx) {
+			target := filepath.Join(f.home, "elsewhere-policy.yml")
+			if err := os.WriteFile(target, []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(f.state(), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, filepath.Join(f.state(), "router-policy.yml")); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	for name, plant := range cases {
+		t.Run(name, func(t *testing.T) {
+			f := newModelsFx(t, readerID)
+			plant(t, f)
+			for _, path := range []string{"/api/router/policy", "/api/models/overview"} {
+				rr := f.get(path)
+				if rr.Code != 200 {
+					t.Fatalf("%s: %d %s", path, rr.Code, rr.Body.String())
+				}
+				raw := rr.Body.String()
+				for _, leak := range []string{f.home, f.state(), "router-policy.yml", "elsewhere-policy", "SENTINEL-POLICY-KEY", "0666"} {
+					if strings.Contains(raw, leak) {
+						t.Errorf("%s leaks %q: %s", path, leak, raw)
+					}
+				}
+				var m map[string]any
+				if err := json.Unmarshal(rr.Body.Bytes(), &m); err != nil {
+					t.Fatal(err)
+				}
+				view := m
+				if path == "/api/models/overview" {
+					view = m["router"].(map[string]any)
+				}
+				if view["present"] != false || view["sha"] != "" || len(view["rules"].([]any)) != 0 || view["hooks_endpoint"] != false {
+					t.Errorf("%s: want the empty view, got %v", path, view)
+				}
+				ws, _ := view["warnings"].([]any)
+				if len(ws) != 1 || ws[0] != wantWarning {
+					t.Errorf("%s: warnings = %v, want exactly the fixed text", path, ws)
+				}
+			}
+		})
 	}
 }

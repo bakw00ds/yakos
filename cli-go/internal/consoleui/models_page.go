@@ -282,7 +282,7 @@ func (m *modelsPage) evals() []evalView {
 			continue // not an eval record this build wrote: skip it rather than show it half-trusted
 		}
 		ev := evalView{RunID: raw.RunID, Agent: raw.Agent, Ts: boundedIdent(raw.Ts), Partial: raw.Partial,
-			TierPassRates: raw.Rates, TierMeanCosts: raw.Costs, CandidateFound: raw.Emitted}
+			TierPassRates: boundedKeys(raw.Rates), TierMeanCosts: boundedKeys(raw.Costs), CandidateFound: raw.Emitted}
 		if raw.Tier != nil {
 			ev.CandidateTier = boundedIdent(*raw.Tier)
 		}
@@ -290,6 +290,21 @@ func (m *modelsPage) evals() []evalView {
 	}
 	for i := len(all) - 1; i >= 0 && len(out) < maxEvals; i-- {
 		out = append(out, all[i])
+	}
+	return out
+}
+
+// boundedKeys drops the entries whose key is not a short printable identifier
+// (a tier name); the log is a file the console does not own.
+func boundedKeys(in map[string]float64) map[string]float64 {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]float64, len(in))
+	for k, v := range in {
+		if boundedIdent(k) != "" {
+			out[k] = v
+		}
 	}
 	return out
 }
@@ -336,6 +351,9 @@ func (m *modelsPage) handleExplain(w http.ResponseWriter, r *http.Request) {
 		for _, c := range router.KnownClasses(m.stateDir()) {
 			known = known || c == class
 		}
+		// "sensitive" is declarable (the router keeps it for a request however it
+		// is set); dispatch.Explain below is the same dry run the CLI uses.
+		known = known || class == router.ClassSensitive
 		if !known {
 			modelsError(w, http.StatusBadRequest, "unknown class")
 			return
