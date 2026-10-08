@@ -452,9 +452,18 @@ func TestGatewayTokenRequiredOnEveryRoute(t *testing.T) {
 	if n := len(up.hits()); n != 0 {
 		t.Fatalf("%d requests reached the upstream without the gateway token", n)
 	}
-	if led.count() != 0 {
-		t.Errorf("unauthenticated requests wrote %d ledger events", led.count())
+	// Each rejection leaves exactly one path-free audit line: route, 401, the
+	// reason and the caller's port, and nothing the caller sent.
+	if want := len(routes) * len(hdrs); led.count() != want {
+		t.Errorf("unauthenticated requests wrote %d ledger events, want %d", led.count(), want)
 	}
+	led.mu.Lock()
+	for i, e := range led.evs {
+		if e.Status != 401 || e.Refused != "bad_token" || e.RemotePort <= 0 || e.Endpoint == "" || e.ModelIn != "" || e.Class != "" {
+			t.Errorf("audit event %d = %+v", i, e)
+		}
+	}
+	led.mu.Unlock()
 	// With the token, on each route, the upstream gets the operator key and no
 	// trace of the token.
 	for _, rt := range routes {
@@ -469,6 +478,39 @@ func TestGatewayTokenRequiredOnEveryRoute(t *testing.T) {
 	}
 	if len(up.hits()) != 3 {
 		t.Errorf("upstream hits %d, want 3", len(up.hits()))
+	}
+}
+
+// A restart rotates the token: the one captured before it opens nothing, and
+// nothing reaches the upstream.
+func TestRestartRotatesToken(t *testing.T) {
+	dir := t.TempDir()
+	oldTok, err := RotateToken(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) { _, _ = io.WriteString(w, "{}") })
+	// First "boot": the old token works.
+	base1, _, _ := startGW(t, up, func(c *Config) { c.GatewayToken = oldTok; c.APIKey = "sk-ant-api03-OP" })
+	if st, _, _ := do(t, "POST", base1+"/v1/messages", []byte(msgBody), map[string]string{"authorization": "Bearer " + oldTok}); st != 200 {
+		t.Fatalf("current token: %d", st)
+	}
+	// Second boot, as serve does it: RotateToken, then a gateway built from it.
+	newTok, err := RotateToken(dir)
+	if err != nil || newTok == oldTok {
+		t.Fatalf("RotateToken = %q, %v; want a token different from %q", newTok, err, oldTok)
+	}
+	before := len(up.hits())
+	base2, _, _ := startGW(t, up, func(c *Config) { c.GatewayToken = newTok; c.APIKey = "sk-ant-api03-OP" })
+	st, _, body := do(t, "POST", base2+"/v1/messages", []byte(msgBody), map[string]string{"authorization": "Bearer " + oldTok})
+	if st != 401 || !strings.Contains(string(body), "yakos start --routed") {
+		t.Errorf("pre-restart token after restart: %d %s", st, body)
+	}
+	if n := len(up.hits()); n != before {
+		t.Errorf("%d request(s) reached the upstream with the pre-restart token", n-before)
+	}
+	if st, _, _ := do(t, "POST", base2+"/v1/messages", []byte(msgBody), map[string]string{"authorization": "Bearer " + newTok}); st != 200 {
+		t.Errorf("new token: %d", st)
 	}
 }
 
@@ -522,7 +564,8 @@ func TestStalledBodiesDoNotExhaustSlots(t *testing.T) {
 			_ = c.Close()
 		}
 	}()
-	time.Sleep(150 * time.Millisecond) // all 64 are inside the body read
+	srv := serverAt(t, addr)
+	waitFor(t, "all 64 stalled bodies to hold a slot", func() bool { return len(srv.sem) == maxInflight })
 	if st, _, _ := do(t, "POST", base+"/v1/messages", []byte(msgBody), apiKeyHdr); st != 429 {
 		t.Fatalf("with 64 stalled bodies the 65th got %d, want 429", st)
 	}
@@ -554,7 +597,8 @@ func TestBodyBudgetBoundsTotal(t *testing.T) {
 	}
 	defer c.Close()
 	fmt.Fprintf(c, "POST /v1/messages HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Length: 700\r\n\r\nx", addr, testToken)
-	time.Sleep(150 * time.Millisecond)
+	srv := serverAt(t, addr)
+	waitFor(t, "the first body's 700 bytes to be reserved", func() bool { return srv.budget.Load() >= 700 })
 	big := []byte(`{"model":"claude-sonnet-4-5","pad":"` + strings.Repeat("a", 400) + `"}`)
 	st, _, _ := do(t, "POST", base+"/v1/messages", big, apiKeyHdr)
 	if st != 429 {

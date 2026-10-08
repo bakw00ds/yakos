@@ -5,8 +5,10 @@ package anthropic
 // from a yakOS-launched client. The proof is a 256-bit random token kept at
 // <statepath.Dir()>/gateway-token (0600, owner only). `yakos start --routed`
 // reads it and hands it to Claude Code as ANTHROPIC_AUTH_TOKEN, which Claude
-// Code sends as `Authorization: Bearer <token>`. To rotate it, delete the file
-// and restart `yakos serve`.
+// Code sends as `Authorization: Bearer <token>`. The token is rotated on every
+// gateway start (RotateToken), so a token captured while the daemon was down is
+// worthless after the next start; a daemon restart ends running --routed
+// sessions (401 until they are relaunched).
 
 import (
 	"crypto/rand"
@@ -72,6 +74,20 @@ func LoadOrCreateToken(stateDir string) (string, error) {
 	if tok, err := ReadToken(stateDir); err == nil {
 		return tok, nil
 	}
+	return mintToken(stateDir)
+}
+
+// RotateToken mints a fresh token and atomically replaces the file (0600, same
+// path), whatever is there. The gateway calls it on every start; the previous
+// token stops working the moment the new daemon serves.
+func RotateToken(stateDir string) (string, error) {
+	if err := statepath.SecureDir(stateDir); err != nil {
+		return "", fmt.Errorf("anthropic gateway: state dir: %w", err)
+	}
+	return mintToken(stateDir)
+}
+
+func mintToken(stateDir string) (string, error) {
 	buf := make([]byte, tokenBytes)
 	if _, err := rand.Read(buf); err != nil {
 		return "", fmt.Errorf("anthropic gateway: generate token: %w", err)

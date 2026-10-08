@@ -5,8 +5,10 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -94,22 +96,40 @@ func (q *request) refuse(status int, typ, reason, msg string) {
 	q.finish()
 }
 
+// remotePort is the caller's TCP port (0 when unknown); the address is always
+// loopback, so the port is the only part that tells two callers apart.
+func remotePort(r *http.Request) int {
+	_, p, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(p)
+	if err != nil || n < 0 || n > 65535 {
+		return 0
+	}
+	return n
+}
+
 // admit runs the checks common to every route: method, gateway token, in-flight
 // cap and credential. The token is checked first and before a slot is taken, so
-// a caller without it costs the gateway nothing, reaches no upstream and leaves
-// no ledger line.
+// a caller without it costs the gateway nothing and reaches no upstream; it
+// leaves one bad_token audit line.
 func (s *Server) admit(w http.ResponseWriter, r *http.Request, endpoint, method string) (*request, func(), bool) {
 	if r.Method != method {
 		w.Header().Set("Allow", method)
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error", "method not allowed")
 		return nil, nil, false
 	}
+	port := remotePort(r)
 	if !s.tokenOK(r.Header) {
 		writeError(w, http.StatusUnauthorized, "authentication_error",
-			"this gateway needs the yakOS gateway token; launch Claude Code with `yakos start --routed`")
+			"gateway token rotated or missing; restart `yakos start --routed` (the token changes whenever the daemon restarts)")
+		// One path-free, credential-free audit line: route, status, reason and
+		// the caller's port. Nothing the caller sent is read into it.
+		s.cfg.Ledger(dispatch.GatewayEvent{Surface: surface, Endpoint: endpoint, Status: http.StatusUnauthorized, Refused: "bad_token", RemotePort: port, Started: time.Now()})
 		return nil, nil, false
 	}
-	q := &request{s: s, w: w, r: r, ev: dispatch.GatewayEvent{Surface: surface, Endpoint: endpoint, Class: requestClass(r.Header), Billing: "api", Started: time.Now()}}
+	q := &request{s: s, w: w, r: r, ev: dispatch.GatewayEvent{Surface: surface, Endpoint: endpoint, Class: requestClass(r.Header), Billing: "api", RemotePort: port, Started: time.Now()}}
 	select {
 	case s.sem <- struct{}{}:
 	default:

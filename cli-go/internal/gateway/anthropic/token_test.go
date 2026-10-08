@@ -58,3 +58,37 @@ func TestTokenFile(t *testing.T) {
 		t.Error("ReadToken followed a symlink")
 	}
 }
+
+func TestRotateToken(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "state")
+	first, err := RotateToken(dir)
+	if err != nil || !validToken(first) {
+		t.Fatalf("RotateToken = %q, %v", first, err)
+	}
+	second, err := RotateToken(dir)
+	if err != nil || second == first {
+		t.Fatalf("second RotateToken = %q, %v; want a different token", second, err)
+	}
+	if got, err := ReadToken(dir); err != nil || got != second {
+		t.Fatalf("ReadToken = %q, %v; want the rotated token", got, err)
+	}
+	if runtime.GOOS != "windows" {
+		if fi, err := os.Stat(TokenPath(dir)); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Fatalf("mode %v, %v; want 0600", fi.Mode(), err)
+		}
+	}
+	// A loose or symlinked file is replaced, not trusted.
+	_ = os.Remove(TokenPath(dir))
+	other := filepath.Join(t.TempDir(), "elsewhere")
+	if err := os.WriteFile(other, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, TokenPath(dir)); err == nil {
+		if _, err := RotateToken(dir); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := os.ReadFile(other); string(b) != "x" {
+			t.Error("RotateToken wrote through a symlink")
+		}
+	}
+}

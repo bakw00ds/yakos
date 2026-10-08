@@ -119,7 +119,34 @@ func startGW(t *testing.T, up *fakeUpstream, mut func(*Config)) (string, *ledger
 	done := make(chan struct{})
 	go func() { _ = srv.ServeListener(ctx, ln); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
+	servers.Store(addr, srv)
+	t.Cleanup(func() { servers.Delete(addr) })
 	return "http://" + addr, led, addr
+}
+
+// servers maps a test gateway's address to its Server, so a test can read the
+// slot and budget counters instead of sleeping and hoping.
+var servers sync.Map
+
+func serverAt(t *testing.T, addr string) *Server {
+	t.Helper()
+	v, ok := servers.Load(addr)
+	if !ok {
+		t.Fatalf("no test gateway at %s", addr)
+	}
+	return v.(*Server)
+}
+
+// waitFor polls cond until it holds or the deadline passes.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 func do(t *testing.T, method, url string, body []byte, hdr map[string]string) (int, http.Header, []byte) {

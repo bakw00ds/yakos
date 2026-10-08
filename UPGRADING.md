@@ -17,9 +17,12 @@ New and optional; nothing changes until you turn it on.
   as the first flag. A project `.yakos.yml` cannot turn it on.
 - The daemon needs `ANTHROPIC_API_KEY` in its environment; the gateway attaches
   it to upstream requests.
-- On first start the daemon creates `~/.yakos-state/gateway-token` (0600). To
-  rotate it, delete the file and restart `yakos serve --gateway`; start a new
-  `yakos start --routed` afterwards.
+- Every time the gateway starts, the daemon writes a fresh token to
+  `~/.yakos-state/gateway-token` (0600). A daemon restart therefore ends
+  running `yakos start --routed` sessions: they get 401 ("gateway token
+  rotated") until you quit and run `yakos start --routed` again. `--routed`
+  cannot be combined with `--no-repl` (there is no Claude Code child to give
+  the token to).
 - `yakos start --routed` (Claude only) sets `ANTHROPIC_BASE_URL`,
   `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` and `ANTHROPIC_AUTH_TOKEN=<gateway token>`
   in the Claude Code child and removes `ANTHROPIC_API_KEY` and any own

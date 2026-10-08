@@ -37,6 +37,16 @@ func networkedFromFlags(networkedFlag bool, consoleBind string) bool {
 	return mtls.IsNonLoopback(consoleBind)
 }
 
+// validateRoutedStartMode refuses --routed with --no-repl: that path starts the
+// daemon and execs no Claude Code child, so there is nothing to hand the
+// gateway token to and the flag would be silently ignored.
+func validateRoutedStartMode(routed, noREPL bool) error {
+	if routed && noREPL {
+		return fmt.Errorf("start: --routed cannot be combined with --no-repl (--web): no Claude Code is launched to route; drop one of the flags")
+	}
+	return nil
+}
+
 // validateNetworkedStartMode is retained for reference but is no longer called
 // from runStart.  Interactive + networked mode is now supported by auto-spawning
 // a detached daemon alongside the REPL (see shouldSpawnDaemon / spawnDetachedDaemon).
@@ -290,6 +300,10 @@ func runStart(yakosRoot string, args []string) {
 	if help {
 		start.PrintHelp(os.Stdout)
 		os.Exit(0)
+	}
+	if err := validateRoutedStartMode(routed, noREPL); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
 	}
 	passthrough = append(passthrough, tail...)
 	for _, arg := range rest {

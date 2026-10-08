@@ -89,14 +89,17 @@ func TestLogSink_NoCredentialOrBodyAnywhere(t *testing.T) {
 	if !bytes.Contains(ledger, []byte(`"type":"gateway_request"`)) {
 		t.Fatalf("no gateway_request event was written: %q", ledger)
 	}
-	if got := bytes.Count(ledger, []byte("\n")); got != 8 {
-		t.Errorf("ledger has %d lines, want one per request (8: the Origin refusal never reaches a handler)", got)
+	if got := bytes.Count(ledger, []byte("\n")); got != 10 {
+		t.Errorf("ledger has %d lines, want one per request (10: the Origin refusal never reaches a handler; the 2 bad-token ones are audited)", got)
 	}
 	for _, line := range bytes.Split(bytes.TrimSpace(ledger), []byte("\n")) {
 		var m map[string]any
 		if err := json.Unmarshal(line, &m); err != nil || m["type"] != "gateway_request" || m["surface"] != "anthropic-gateway" {
 			t.Errorf("bad ledger line %s (%v)", line, err)
 		}
+	}
+	if !bytes.Contains(ledger, []byte(`"refused":"bad_token"`)) || !bytes.Contains(ledger, []byte(`"remote_port":`)) {
+		t.Errorf("no bad_token audit line with a remote_port: %q", ledger)
 	}
 	sinks := map[string]string{"slog": logs.String(), "ledger": string(ledger), "replies": strings.Join(replies, "\n")}
 	// The replies of forwarded requests are the upstream's; the refusal and error

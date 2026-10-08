@@ -27,6 +27,8 @@ type GatewayEvent struct {
 	OutputTokens int64
 	CacheRead    int64
 	CacheCreate  int64
+	// RemotePort is the caller's loopback TCP port; 0 when unknown.
+	RemotePort int
 	// Started is when the request arrived; the ledger line's duration_s is the
 	// time since. Zero means "now" (a duration of 0, omitted).
 	Started time.Time
@@ -50,6 +52,7 @@ type gatewayLine struct {
 	CacheRead    int64   `json:"cache_read_tokens,omitempty"`
 	CacheCreate  int64   `json:"cache_creation_tokens,omitempty"`
 	DurationS    float64 `json:"duration_s,omitempty"`
+	RemotePort   int     `json:"remote_port,omitempty"`
 }
 
 // gatewayLineJSON renders ev for the ledger; started is when the request began.
@@ -71,6 +74,7 @@ func gatewayLineJSON(ev GatewayEvent, started, end time.Time) ([]byte, bool) {
 		OutputTokens: clampTokens(ev.OutputTokens),
 		CacheRead:    clampTokens(ev.CacheRead),
 		CacheCreate:  clampTokens(ev.CacheCreate),
+		RemotePort:   clampPort(ev.RemotePort),
 	}
 	if d := end.Sub(started).Seconds(); d > 0 {
 		line.DurationS = d
@@ -85,6 +89,13 @@ func clampTokens(n int64) int64 {
 	}
 	if n > 1<<40 {
 		return 1 << 40
+	}
+	return n
+}
+
+func clampPort(n int) int {
+	if n < 0 || n > 65535 {
+		return 0
 	}
 	return n
 }

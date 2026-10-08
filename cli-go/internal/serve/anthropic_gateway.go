@@ -4,7 +4,7 @@ package serve
 // the operator turned it on, with `yakos serve --gateway` or `anthropic_gateway:
 // true` in the trusted ~/.yakos-state/router-policy.yml. A project .yakos.yml
 // cannot enable it. Off otherwise: nothing binds. The gateway checks a yakOS
-// gateway token (~/.yakos-state/gateway-token, minted here on first start) on
+// gateway token (~/.yakos-state/gateway-token, minted fresh here on every start) on
 // every request; the only other secret it touches is the operator's
 // ANTHROPIC_API_KEY, read from the daemon's environment here and handed to the
 // proxy as a value. The bound address is reported over the daemon's owner-only
@@ -70,7 +70,7 @@ func classTable(policyDir string) func() routerpolicy.GatewayClasses {
 // startAnthropicGateway binds the gateway and serves it in the background. A
 // failed bind is a loud warning and the daemon continues without it.
 func startAnthropicGateway(ctx context.Context, cfg Config, errCh chan error) (string, error) {
-	tok, err := anthropic.LoadOrCreateToken(statepath.Dir())
+	tok, err := anthropic.RotateToken(statepath.Dir())
 	if err != nil {
 		close(errCh)
 		return "", fmt.Errorf("serve: anthropic gateway: %w", err)

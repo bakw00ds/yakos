@@ -140,3 +140,51 @@ func TestAnthropicGatewayClassTableReadsTrustedPolicyAndCaches(t *testing.T) {
 		t.Errorf("no policy gave %+v", c)
 	}
 }
+
+// Every gateway start mints a new token: the one read before a restart is
+// refused by the restarted gateway, so a token captured while the daemon was
+// down cannot be replayed.
+func TestStartAnthropicGatewayRotatesTokenEachStart(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("YAKOS_DISPATCH_LOG", "")
+	t.Setenv("HOME", t.TempDir())
+	var toks []string
+	var last string
+	for i := 0; i < 2; i++ {
+		addr := freePort(t)
+		errCh := make(chan error, 1)
+		ctx, cancel := context.WithCancel(context.Background())
+		if _, err := startAnthropicGateway(ctx, Config{GatewayAddr: addr}, errCh); err != nil {
+			t.Fatal(err)
+		}
+		tok, err := anthropic.ReadToken(statepath.Dir())
+		if err != nil {
+			t.Fatal(err)
+		}
+		toks = append(toks, tok)
+		last = addr
+		if i == 0 {
+			cancel()
+			<-errCh
+			continue
+		}
+		defer cancel()
+	}
+	if toks[0] == toks[1] {
+		t.Fatal("the gateway token survived a restart")
+	}
+	req, _ := http.NewRequest(http.MethodPost, "http://"+last+"/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+toks[0])
+	var st int
+	for i := 0; i < 100 && st == 0; i++ {
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			st = resp.StatusCode
+			_ = resp.Body.Close()
+		} else {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	if st != 401 {
+		t.Errorf("pre-restart token after restart: %d, want 401", st)
+	}
+}

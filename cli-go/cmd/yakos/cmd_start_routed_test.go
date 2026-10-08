@@ -110,3 +110,16 @@ func TestVerifyRoutedGateway_SquatterGetsNothing(t *testing.T) {
 		t.Fatalf("the squatter saw %d connection(s)", n)
 	}
 }
+
+// --routed with --no-repl launches no Claude Code child, so the token would go
+// nowhere: the combination is refused, every other one is allowed.
+func TestValidateRoutedStartMode(t *testing.T) {
+	if err := validateRoutedStartMode(true, true); err == nil || !strings.Contains(err.Error(), "--routed") || !strings.Contains(err.Error(), "--no-repl") {
+		t.Errorf("--routed --no-repl = %v, want a refusal naming both flags", err)
+	}
+	for _, c := range [][2]bool{{true, false}, {false, true}, {false, false}} {
+		if err := validateRoutedStartMode(c[0], c[1]); err != nil {
+			t.Errorf("routed=%v noREPL=%v refused: %v", c[0], c[1], err)
+		}
+	}
+}

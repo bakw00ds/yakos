@@ -1360,6 +1360,10 @@ Routing:
                           (the gateway token) and removes ANTHROPIC_API_KEY.
                           Refuses to launch unless this directory's daemon runs the
                           gateway on that address (see 'yakos serve --help').
+                          The gateway token rotates whenever the daemon restarts: a
+                          running routed session then gets 401 ("gateway token
+                          rotated"); quit and run 'yakos start --routed' again.
+                          Not valid with --no-repl.
                           Uses the vendor TUI, not the REPL. claude only.
 
 Inspection:
