@@ -8,6 +8,16 @@ package main
 // owner-only 0600 atomic rename) and appends a config_changed line to the
 // dispatch log through dispatch.Account (operator, file, sha before and after).
 // None of them prints a path.
+//
+// Trust: the target is statepath.TrustedDir, so an absolute $HOME is trusted as
+// given, including one inside a project directory (K-176, sec-356 Q1). Readers
+// resolve the same $HOME, so a project that controls it controls both sides;
+// tightening only the writers would write a file the readers never read. These
+// commands are an audit and correctness layer, not a boundary against code that
+// can set the caller's environment. The boundary against an agent running them
+// is the budget-guard hook (lib/hooks/legacy/budget-guard.sh and its Go twin,
+// K-176), which refuses `models enable|disable|alias|pin|pricing` and `router
+// policy set` from a tool call.
 
 import (
 	"fmt"
@@ -41,16 +51,38 @@ func cliOperatorID() string {
 	return name
 }
 
+// callerIdentity reads who is calling from the environment (K-176): the agent
+// (YAKOS_AGENT_TYPE, set by dispatch), the session id Claude Code gives its
+// tools, and whether any agent-context marker is present. The environment is
+// the caller's own, so this labels the audit line; it is not a boundary. The
+// boundary is the budget-guard hook, which refuses these commands to an agent.
+func callerIdentity() (agent, session, actor string) {
+	agent = os.Getenv("YAKOS_AGENT_TYPE")
+	for _, k := range []string{"CLAUDE_SESSION_ID", "CLAUDE_CODE_SESSION_ID"} {
+		if v := os.Getenv(k); v != "" {
+			session = v
+			break
+		}
+	}
+	actor = "operator"
+	if agent != "" || session != "" || os.Getenv("CLAUDECODE") != "" || os.Getenv("CLAUDE_PROJECT_DIR") != "" {
+		actor = "agent"
+	}
+	return agent, session, actor
+}
+
 // openAudit opens (and flock-holds) the dispatch log in the trusted state
 // directory BEFORE a policy write, so a write that could not be recorded is
 // refused rather than made unaudited. The log is always the one in stateDir (the
 // home state directory); YAKOS_DISPATCH_LOG, which a project can set, is ignored.
 func openAudit(stderr io.Writer, stateDir string) *dispatch.ConfigAudit {
-	au, err := dispatch.OpenConfigAudit(dispatch.Request{OperatorID: cliOperatorID(), Surface: dispatch.SurfaceCLI}, stateDir)
+	agent, session, actor := callerIdentity()
+	au, err := dispatch.OpenConfigAudit(dispatch.Request{OperatorID: cliOperatorID(), Surface: dispatch.SurfaceCLI, AgentName: agent, SessionID: session}, stateDir)
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "yakos: the dispatch log cannot be opened, so the change was not made")
 		return nil
 	}
+	au.Actor = actor
 	return au
 }
 
@@ -58,7 +90,7 @@ func openAudit(stderr io.Writer, stateDir string) *dispatch.ConfigAudit {
 // happened; a failure here is reported (exit 1) so the operator knows.
 func auditWrite(stderr io.Writer, au *dispatch.ConfigAudit, file, action string, res statepath.EditResult) bool {
 	err := au.Record(dispatch.ConfigChange{
-		File: file, Action: action, SHABefore: res.SHABefore, SHAAfter: res.SHAAfter, Surface: dispatch.SurfaceCLI,
+		File: file, Action: action, SHABefore: res.SHABefore, SHAAfter: res.SHAAfter, Surface: dispatch.SurfaceCLI, Actor: au.Actor,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintln(stderr, "yakos: the change was written but could not be recorded in the dispatch log")
