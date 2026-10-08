@@ -188,3 +188,40 @@ func TestStartAnthropicGatewayRotatesTokenEachStart(t *testing.T) {
 		t.Errorf("pre-restart token after restart: %d, want 401", st)
 	}
 }
+
+// A second daemon that loses the bind must leave the running gateway's token
+// alone.
+func TestStartAnthropicGatewayFailedBindKeepsToken(t *testing.T) {
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("YAKOS_DISPATCH_LOG", "")
+	t.Setenv("HOME", t.TempDir())
+	addr := freePort(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if _, err := startAnthropicGateway(ctx, Config{GatewayAddr: addr}, make(chan error, 1)); err != nil {
+		t.Fatal(err)
+	}
+	before, err := anthropic.ReadToken(statepath.Dir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound, err := startAnthropicGateway(ctx, Config{GatewayAddr: addr}, make(chan error, 1))
+	if err != nil || bound != "" {
+		t.Fatalf("second start = %q, %v; want no gateway and no error", bound, err)
+	}
+	after, err := anthropic.ReadToken(statepath.Dir())
+	if err != nil || after != before {
+		t.Fatalf("token changed after a failed bind: %v", err)
+	}
+	req, _ := http.NewRequest("GET", "http://"+addr+"/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+before)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(b), "rotated or missing") {
+		t.Fatal("the running gateway rejects its own token")
+	}
+}

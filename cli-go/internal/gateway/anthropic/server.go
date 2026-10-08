@@ -43,6 +43,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -101,6 +102,9 @@ type Config struct {
 	// GatewayToken is the secret a client must present (Authorization: Bearer,
 	// or TokenHeader). Required: New refuses an empty one. Never logged.
 	GatewayToken string
+	// DeferToken allows New with no GatewayToken; SetToken must follow before
+	// ServeListener.
+	DeferToken bool
 	// Ledger receives one event per request. Nil writes gateway_request through
 	// a dispatch.Account.
 	Ledger func(dispatch.GatewayEvent)
@@ -114,6 +118,9 @@ type Config struct {
 	// bodyTimeout and bodyBudget default to BodyTimeout and BodyBudget.
 	bodyTimeout time.Duration
 	bodyBudget  int64
+	// badTokenGap is the minimum time between bad_token audit lines; 0 means
+	// one second, negative turns the limit off (tests).
+	badTokenGap time.Duration
 }
 
 // Server is the gateway.
@@ -127,6 +134,10 @@ type Server struct {
 	httpSrv *http.Server
 	sem     chan struct{}
 	budget  atomic.Int64
+
+	badMu      sync.Mutex
+	badLast    time.Time
+	badSkipped int64
 }
 
 // New validates cfg and builds the Server. It does not listen.
@@ -163,10 +174,15 @@ func New(cfg Config) (*Server, error) {
 	if cfg.bodyTimeout <= 0 {
 		cfg.bodyTimeout = BodyTimeout
 	}
+	if cfg.badTokenGap == 0 {
+		cfg.badTokenGap = time.Second
+	}
 	if cfg.bodyBudget <= 0 {
 		cfg.bodyBudget = BodyBudget
 	}
-	if len(cfg.GatewayToken) < 32 {
+	// DeferToken lets the daemon bind first and mint the token after (SetToken);
+	// ServeListener refuses to serve without one.
+	if !(cfg.DeferToken && cfg.GatewayToken == "") && len(cfg.GatewayToken) < 32 {
 		return nil, errors.New("anthropic gateway: a gateway token of at least 32 characters is required")
 	}
 	if cfg.Ledger == nil {
@@ -221,8 +237,16 @@ func (s *Server) Listen() (net.Listener, error) {
 	return ln, nil
 }
 
+// SetToken sets the gateway token. Call it after Listen and before
+// ServeListener; it is not safe once the server is serving.
+func (s *Server) SetToken(tok string) { s.cfg.GatewayToken = tok }
+
 // ServeListener serves on ln until ctx ends.
 func (s *Server) ServeListener(ctx context.Context, ln net.Listener) error {
+	if len(s.cfg.GatewayToken) < 32 {
+		_ = ln.Close()
+		return errors.New("anthropic gateway: a gateway token of at least 32 characters is required")
+	}
 	s.httpSrv.BaseContext = func(net.Listener) context.Context { return ctx }
 	errCh := make(chan error, 1)
 	go func() {

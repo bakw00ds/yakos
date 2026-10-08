@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` and `ANTHROPIC_AUTH_TOKEN` set and
   `ANTHROPIC_API_KEY` removed from the child. Every gateway request must carry
   a gateway token (`Authorization: Bearer`, 32 random bytes in
-  `~/.yakos-state/gateway-token`, 0600, re-minted on every gateway start, so a restart ends running `--routed` sessions);
+  `~/.yakos-state/gateway-token`, 0600, re-minted on every gateway start, so a restart ends running `--routed` sessions, and only after the listener is bound; a request refused for a bad token leaves at most one audit line per second with a `suppressed` count);
   without it the answer is 401 and nothing reaches Anthropic. The gateway holds
   the operator's `ANTHROPIC_API_KEY` and attaches it upstream. Before a routed
   launch `yakos start` checks over the daemon's owner-only socket that the

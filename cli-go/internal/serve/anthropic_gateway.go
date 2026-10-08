@@ -70,13 +70,8 @@ func classTable(policyDir string) func() routerpolicy.GatewayClasses {
 // startAnthropicGateway binds the gateway and serves it in the background. A
 // failed bind is a loud warning and the daemon continues without it.
 func startAnthropicGateway(ctx context.Context, cfg Config, errCh chan error) (string, error) {
-	tok, err := anthropic.RotateToken(statepath.Dir())
-	if err != nil {
-		close(errCh)
-		return "", fmt.Errorf("serve: anthropic gateway: %w", err)
-	}
 	srv, err := anthropic.New(anthropic.Config{
-		GatewayToken:            tok,
+		DeferToken:              true,
 		Addr:                    cfg.GatewayAddr,
 		PassthroughSubscription: cfg.GatewayPassthroughSubscription,
 		APIKey:                  os.Getenv("ANTHROPIC_API_KEY"),
@@ -94,6 +89,15 @@ func startAnthropicGateway(ctx context.Context, cfg Config, errCh chan error) (s
 		close(errCh)
 		return "", nil
 	}
+	// Rotate only now that the port is ours: a daemon that lost the bind must
+	// not invalidate the token of the gateway that holds it.
+	tok, err := anthropic.RotateToken(statepath.Dir())
+	if err != nil {
+		_ = ln.Close()
+		close(errCh)
+		return "", fmt.Errorf("serve: anthropic gateway: %w", err)
+	}
+	srv.SetToken(tok)
 	fmt.Fprintf(os.Stderr, "yakos serve: anthropic gateway: http://%s (launch claude through it with the routed flag of yakos start)\n", ln.Addr())
 	if cfg.GatewayPassthroughSubscription {
 		fmt.Fprintln(os.Stderr, "yakos serve: WARNING: --gateway-passthrough-subscription: subscription OAuth tokens are forwarded through the gateway (see ADR-0011)")

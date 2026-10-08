@@ -913,3 +913,25 @@ func TestLedgerDurationIsTheRequests(t *testing.T) {
 		t.Errorf("duration_s = %v, want about 0.25", d)
 	}
 }
+
+// A client looping on a stale token must not fill the dispatch log: at most one
+// bad_token line per gap, and the next one counts what was skipped.
+func TestBadTokenAuditIsRateLimited(t *testing.T) {
+	up := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) { _, _ = io.WriteString(w, "{}") })
+	base, led, _ := startGW(t, up, func(c *Config) { c.badTokenGap = 3 * time.Second })
+	for i := 0; i < 1000; i++ {
+		if st, _, _ := do(t, "GET", base+"/v1/models", nil, nil); st != 401 {
+			t.Fatalf("request %d: status %d", i, st)
+		}
+	}
+	if n := led.count(); n != 1 {
+		t.Fatalf("1000 rejected requests wrote %d lines, want 1", n)
+	}
+	time.Sleep(3100 * time.Millisecond)
+	do(t, "GET", base+"/v1/models", nil, nil)
+	led.mu.Lock()
+	defer led.mu.Unlock()
+	if len(led.evs) != 2 || led.evs[0].Suppressed != 0 || led.evs[1].Suppressed != 999 {
+		t.Fatalf("events = %+v, want 2 with suppressed 0 then 999", led.evs)
+	}
+}

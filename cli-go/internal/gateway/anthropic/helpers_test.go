@@ -99,7 +99,7 @@ func startGW(t *testing.T, up *fakeUpstream, mut func(*Config)) (string, *ledger
 	t.Helper()
 	led := &ledgerSink{}
 	addr := freeAddr(t)
-	cfg := Config{Addr: addr, Ledger: led.add, GatewayToken: testToken}
+	cfg := Config{Addr: addr, Ledger: led.add, GatewayToken: testToken, badTokenGap: -1}
 	if up != nil {
 		u, _ := url.Parse(up.srv.URL)
 		cfg.baseURL = u

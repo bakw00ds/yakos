@@ -110,6 +110,21 @@ func remotePort(r *http.Request) int {
 	return n
 }
 
+// badTokenSlot reports whether a bad_token line may be written now and, if so,
+// how many were skipped since the last one.
+func (s *Server) badTokenSlot() (int64, bool) {
+	s.badMu.Lock()
+	defer s.badMu.Unlock()
+	now := time.Now()
+	if s.cfg.badTokenGap > 0 && !s.badLast.IsZero() && now.Sub(s.badLast) < s.cfg.badTokenGap {
+		s.badSkipped++
+		return 0, false
+	}
+	n := s.badSkipped
+	s.badLast, s.badSkipped = now, 0
+	return n, true
+}
+
 // admit runs the checks common to every route: method, gateway token, in-flight
 // cap and credential. The token is checked first and before a slot is taken, so
 // a caller without it costs the gateway nothing and reaches no upstream; it
@@ -126,7 +141,12 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, endpoint, method 
 			"gateway token rotated or missing; restart `yakos start --routed` (the token changes whenever the daemon restarts)")
 		// One path-free, credential-free audit line: route, status, reason and
 		// the caller's port. Nothing the caller sent is read into it.
-		s.cfg.Ledger(dispatch.GatewayEvent{Surface: surface, Endpoint: endpoint, Status: http.StatusUnauthorized, Refused: "bad_token", RemotePort: port, Started: time.Now()})
+		// At most one such line per badTokenGap: a client looping on a stale
+		// token must not fill the dispatch log. The next line says how many
+		// were skipped.
+		if skipped, ok := s.badTokenSlot(); ok {
+			s.cfg.Ledger(dispatch.GatewayEvent{Surface: surface, Endpoint: endpoint, Status: http.StatusUnauthorized, Refused: "bad_token", RemotePort: port, Suppressed: skipped, Started: time.Now()})
+		}
 		return nil, nil, false
 	}
 	q := &request{s: s, w: w, r: r, ev: dispatch.GatewayEvent{Surface: surface, Endpoint: endpoint, Class: requestClass(r.Header), Billing: "api", RemotePort: port, Started: time.Now()}}

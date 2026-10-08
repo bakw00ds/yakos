@@ -51,6 +51,7 @@ func TestLogSink_NoCredentialOrBodyAnywhere(t *testing.T) {
 	mk := func(u *fakeUpstream, mut func(*Config)) string {
 		base, _, _ := startGW(t, u, func(c *Config) {
 			c.Ledger = nil
+			c.badTokenGap = -1
 			c.APIKey = "SECRETOPERATORFOUR"
 			c.Classes = classes
 			if mut != nil {
