@@ -1,10 +1,11 @@
 package openai
 
 import (
+	"context"
 	"errors"
 	"net/http"
-	"strings"
 	"testing"
+	"time"
 
 	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/consoleui"
@@ -53,13 +54,14 @@ func TestNewRefusals(t *testing.T) {
 		cfg  Config
 	}{
 		{"no token", Config{Service: svc, Transcripts: tr}},
-		{"short token", Config{WriteToken: "abc", Service: svc, Transcripts: tr}},
-		{"no service", Config{WriteToken: tok, Transcripts: tr}},
-		{"no store", Config{WriteToken: tok, Service: svc}},
-		{"wildcard bind", Config{WriteToken: tok, Service: svc, Transcripts: tr, Addr: "0.0.0.0:7898"}},
-		{"lan bind", Config{WriteToken: tok, Service: svc, Transcripts: tr, Addr: "192.168.1.5:7898"}},
-		{"name bind", Config{WriteToken: tok, Service: svc, Transcripts: tr, Addr: "example.com:7898"}},
-		{"no port", Config{WriteToken: tok, Service: svc, Transcripts: tr, Addr: "127.0.0.1"}},
+		{"empty token", Config{Token: func() string { return "" }, Service: svc, Transcripts: tr}},
+		{"short token", Config{Token: func() string { return "abc" }, Service: svc, Transcripts: tr}},
+		{"no service", Config{Token: func() string { return tok }, Transcripts: tr}},
+		{"no store", Config{Token: func() string { return tok }, Service: svc}},
+		{"wildcard bind", Config{Token: func() string { return tok }, Service: svc, Transcripts: tr, Addr: "0.0.0.0:7898"}},
+		{"lan bind", Config{Token: func() string { return tok }, Service: svc, Transcripts: tr, Addr: "192.168.1.5:7898"}},
+		{"name bind", Config{Token: func() string { return tok }, Service: svc, Transcripts: tr, Addr: "example.com:7898"}},
+		{"no port", Config{Token: func() string { return tok }, Service: svc, Transcripts: tr, Addr: "127.0.0.1"}},
 	}
 	for _, c := range cases {
 		if _, err := New(c.cfg); err == nil {
@@ -67,7 +69,7 @@ func TestNewRefusals(t *testing.T) {
 		}
 	}
 	for _, addr := range []string{"", "127.0.0.1:7898", "localhost:7898", "[::1]:7898"} {
-		if _, err := New(Config{WriteToken: tok, Service: svc, Transcripts: tr, Addr: addr}); err != nil {
+		if _, err := New(Config{Token: func() string { return tok }, Service: svc, Transcripts: tr, Addr: addr}); err != nil {
 			t.Errorf("New(%q): %v", addr, err)
 		}
 	}
@@ -105,13 +107,66 @@ func repeatA(n int) string {
 	return string(b)
 }
 
-func TestEchoModel(t *testing.T) {
-	for in, want := range map[string]string{
-		"  yakos/auto ": "yakos/auto", "yakos/lead": "yakos/lead",
-		"bad\nmodel": "yakos/auto", "<script>": "yakos/auto", strings.Repeat("a", 200): "yakos/auto",
-	} {
-		if got := echoModel(in); got != want {
-			t.Errorf("echoModel(%q) = %q, want %q", in, got, want)
+// failingResponse is a ResponseWriter that takes okWrites frames and then fails
+// every write, as a socket does once its write deadline has passed.
+type failingResponse struct {
+	hdr       http.Header
+	okWrites  int
+	log       []string
+	deadlines []time.Time
+}
+
+func (w *failingResponse) Header() http.Header {
+	if w.hdr == nil {
+		w.hdr = http.Header{}
+	}
+	return w.hdr
+}
+func (w *failingResponse) WriteHeader(int) {}
+func (w *failingResponse) Flush()          { w.log = append(w.log, "flush") }
+func (w *failingResponse) SetWriteDeadline(t time.Time) error {
+	w.log = append(w.log, "deadline")
+	w.deadlines = append(w.deadlines, t)
+	return nil
+}
+func (w *failingResponse) Write(b []byte) (int, error) {
+	w.log = append(w.log, "write")
+	if w.okWrites > 0 {
+		w.okWrites--
+		return len(b), nil
+	}
+	return 0, errors.New("i/o timeout")
+}
+
+// A write that fails after a good one cancels the turn once, runs the abort
+// hook once, and drops every later frame; each write got its own deadline.
+func TestSSEWriterAbortsOnWriteError(t *testing.T) {
+	w := &failingResponse{okWrites: 1}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	aborts := 0
+	s := &sseWriter{w: w, rc: http.NewResponseController(w), timeout: 5 * time.Second,
+		cancel: cancel, onAbort: func() { aborts++ }}
+	s.put("data: one\n\n")
+	if ctx.Err() != nil || aborts != 0 {
+		t.Fatalf("a good write aborted the turn (ctx %v, aborts %d)", ctx.Err(), aborts)
+	}
+	s.put("data: two\n\n") // fails
+	if ctx.Err() == nil || aborts != 1 || !s.broken {
+		t.Fatalf("a failed write did not cancel the turn (ctx %v, aborts %d, broken %v)", ctx.Err(), aborts, s.broken)
+	}
+	before := len(w.log)
+	s.put("data: three\n\n")
+	s.comment()
+	if len(w.log) != before || aborts != 1 {
+		t.Errorf("frames written after the failure: %v, aborts %d", w.log[before:], aborts)
+	}
+	if len(w.deadlines) != 2 {
+		t.Fatalf("%d deadlines for 2 writes", len(w.deadlines))
+	}
+	for i, d := range w.deadlines {
+		if u := time.Until(d); u <= 0 || u > 5*time.Second {
+			t.Errorf("deadline %d is %v ahead, want within 5 s", i, u)
 		}
 	}
 }
