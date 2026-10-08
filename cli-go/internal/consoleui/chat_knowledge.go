@@ -80,6 +80,17 @@ func nonClaudeTurn(tr *Transcripts, yakosRoot, workspaceRoot, rt, conversationID
 	return pack.Text, taskOut
 }
 
+// knowledgeForPrecheck composes the knowledge block a non-claude pane would send,
+// without storing it, for the router's first-turn pre-check to scan (K-173).
+func (ch *chatHandlers) knowledgeForPrecheck(agent string) string {
+	return knowledge.Compose(knowledge.Options{
+		YakosRoot: ch.yakosRoot,
+		Project:   ch.workspaceRoot,
+		Agent:     agent,
+		AgentBody: resolveAgentSystemPrompt(ch.yakosRoot, ch.workspaceRoot, agent),
+	}).Text
+}
+
 // skillSlug returns the slug of a task that begins with /<slug> followed by
 // whitespace or the end of the text.
 func skillSlug(task string) (string, bool) {

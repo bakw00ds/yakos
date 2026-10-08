@@ -191,6 +191,10 @@ type chatHandlers struct {
 	// pair (K-136); see chat_account.go.  Always non-nil.
 	turns *turnLedger
 
+	// paneRoutes remembers the route each live interactive pane was decided
+	// under, so a follow-up turn announces it again (K-173). Always non-nil.
+	paneRoutes *paneRouteStore
+
 	// loopbackHost is true when the console runs on the loopback trust path
 	// (not networked); loopbackOwnerID is the host operator's identity. Only
 	// that identity may read the host's soul text (K-149 F1).
@@ -215,6 +219,7 @@ func newChatHandlers(hub *ChatHub, transcripts *Transcripts, svc *dispatch.Servi
 		svc:         svc,
 		serverCtx:   serverCtx,
 		turns:       newTurnLedger(),
+		paneRoutes:  newPaneRouteStore(),
 	}
 }
 
@@ -520,24 +525,38 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	var interactiveRefusal error
 	if req.Interactive && ch.svc != nil {
 		interactiveRoute = &routeView{Runtime: runtimeName, Pinned: routePinned}
+		sdkPane := req.StructuredQuestions && runtimeName == "claude"
+		// The knowledge pack a non-claude pane sends with every turn is request
+		// text too: scan it as the one-shot path does (K-140, K-173). Composed
+		// read-only here; the turn stores and sends its own copy later.
+		var precheckExtra []string
+		if runtimeName != "claude" && ch.yakosRoot != "" {
+			if blk := ch.knowledgeForPrecheck(req.Agent); blk != "" {
+				precheckExtra = []string{blk}
+			}
+		}
 		d, exErr := dispatch.Explain(r.Context(), dispatch.ExplainQuery{
 			YakosRoot: ch.yakosRoot, Project: ch.workspaceRoot, Agent: req.Agent,
 			Runtime: requestedRuntime, Model: requestedModel,
 			TaskBytes: int64(len(req.Task)), ConversationID: req.ConversationID,
-			Task: req.Task, // the sensitive class (K-140) reads it, as RunStream will
+			Task:  req.Task, // the sensitive class (K-140) reads it, as RunStream will
+			Extra: precheckExtra,
+			// An SDK pane's engine is a sidecar on ANTHROPIC_API_KEY and never runs
+			// the claude CLI, so the CLI/sign-in probe says nothing about it. The
+			// probe is skipped, not its error tolerated: the model checks
+			// (max_model ceiling, disable_models) and the sensitive refusals run
+			// exactly as for a CLI pane, and the engine's own start gate (K-137)
+			// answers for the key (K-173).
+			SkipProbe: sdkPane,
 		})
-		if exErr != nil && sdkPaneToleratesRouteError(req.StructuredQuestions, runtimeName, exErr) {
-			// The SDK engine is a sidecar on ANTHROPIC_API_KEY and never runs the
-			// claude CLI, so "CLI not found" says nothing about it. Let the engine
-			// gate (K-137) answer with its own operator-facing message. A sensitive
-			// task never lands here: its every router error is a RouteRefusedError.
-			exErr = nil
-		}
 		if exErr != nil {
 			interactiveRefusal = exErr
 		} else if isKnownRuntime(d.Runtime) {
 			runtimeName = d.Runtime
-			if modelName == "" && d.RuleID != router.RuleDefault {
+			// The decision's model is the one to run: a rule's, an SDK pane's
+			// (it has no CLI definition to read the agent's pin from), or the
+			// requested one after a max_model ceiling lowered it (K-173).
+			if d.ModelID != "" && (d.RuleID != router.RuleDefault || sdkPane || modelName != "") {
 				modelName, requestedModel = d.ModelID, d.ModelID
 			}
 			interactiveRoute = routeViewFrom(&dispatch.RouteInfo{
@@ -904,6 +923,60 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 
 		// Accumulate assistant text for a single coalesced assistant turn.
 		var assistantBuf strings.Builder
+		// Thinking deltas are coalesced into one thinking turn the same way, and
+		// both are flushed before a card is stored, so a replay keeps the order
+		// text, thinking, tool use, tool result (K-173).
+		var thinkingBuf strings.Builder
+		var thinkingTruncated, thinkingRedacted bool
+		flushAssistant := func() {
+			if text := assistantBuf.String(); text != "" {
+				_ = ch.transcripts.Append(TranscriptEntry{
+					SessionID:      dispReq.SessionID,
+					ConversationID: conversationID,
+					OperatorID:     capturedOperatorID,
+					Role:           RoleAssistant,
+					Text:           text,
+				})
+			}
+			assistantBuf.Reset()
+		}
+		flushThinking := func() {
+			if thinkingBuf.Len() > 0 || thinkingRedacted {
+				text, _ := scanSecrets(thinkingBuf.String())
+				_ = ch.transcripts.Append(TranscriptEntry{
+					SessionID:      dispReq.SessionID,
+					ConversationID: conversationID,
+					OperatorID:     capturedOperatorID,
+					Role:           RoleThinking,
+					Text:           text,
+					Truncated:      thinkingTruncated,
+					Redacted:       thinkingRedacted,
+				})
+			}
+			thinkingBuf.Reset()
+			thinkingTruncated, thinkingRedacted = false, false
+		}
+		// storeCard persists a tool card: secret-shaped values are redacted and the
+		// text is cut, because a transcript outlives the stream it came from.
+		storeCard := func(role TranscriptRole, tool, text string, isErr bool) {
+			flushThinking()
+			flushAssistant()
+			text, _ = scanSecrets(text)
+			trunc := len(text) > maxCardBytes
+			if trunc {
+				text = truncateUTF8(text, maxCardBytes)
+			}
+			_ = ch.transcripts.Append(TranscriptEntry{
+				SessionID:      dispReq.SessionID,
+				ConversationID: conversationID,
+				OperatorID:     capturedOperatorID,
+				Role:           role,
+				ToolName:       cleanLine(tool, 64),
+				Text:           text,
+				IsError:        isErr,
+				Truncated:      trunc,
+			})
+		}
 
 		// An interactive session's turns are accounted here, by turnLedger: the
 		// session outlives any single call, so the dispatch layer cannot open and
@@ -978,21 +1051,13 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 					}
 				}
 
-				// Append coalesced assistant turn, then summary turn. The buffer
-				// holds one turn's text: an interactive session emits a summary for
-				// every turn, so it is emptied here, or each stored assistant entry
-				// after the first would repeat all the turns before it (K-136; a
-				// one-shot dispatch has a single summary, which hid this).
-				if text := assistantBuf.String(); text != "" {
-					_ = ch.transcripts.Append(TranscriptEntry{
-						SessionID:      dispReq.SessionID,
-						ConversationID: conversationID,
-						OperatorID:     capturedOperatorID,
-						Role:           RoleAssistant,
-						Text:           text,
-					})
-				}
-				assistantBuf.Reset()
+				// Append coalesced thinking and assistant turns, then the summary
+				// turn. The buffers hold one turn's text: an interactive session
+				// emits a summary for every turn, so they are emptied here, or each
+				// stored entry after the first would repeat all the turns before it
+				// (K-136; a one-shot dispatch has a single summary, which hid this).
+				flushThinking()
+				flushAssistant()
 				_ = ch.transcripts.Append(TranscriptEntry{
 					SessionID:      dispReq.SessionID,
 					ConversationID: conversationID,
@@ -1005,23 +1070,22 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				})
 
 			case "token":
+				flushThinking()
 				assistantBuf.WriteString(chunk.Text)
 				if interactiveTurns {
 					ch.turns.noteOutput(conversationID, len(chunk.Text))
 				}
 
 			case "tool_use":
-				// Populate the tool_use SSE fields; transcript persistence is
-				// intentionally skipped (tool events are transient UI state, not
-				// conversation history — they are already implicitly reflected in
-				// the subsequent assistant text).
+				// Persisted as a card (K-173) so a reload replays it; see storeCard.
+				storeCard(RoleToolUse, chunk.ToolName, chunk.ToolInput, false)
 				ev.ToolName = chunk.ToolName
 				ev.ToolInput = chunk.ToolInput
 
 			case "tool_result":
 				// ToolOutput is already hard-truncated by emitToolChunk at the
-				// dispatch layer (≤ maxToolOutputBytes).  Not persisted to transcript
-				// to bound transcript growth; the tool result content is ephemeral UI.
+				// dispatch layer; storeCard bounds and scans what is persisted (K-173).
+				storeCard(RoleToolResult, chunk.ToolName, chunk.ToolOutput, chunk.IsError)
 				ev.ToolName = chunk.ToolName
 				ev.ToolOutput = chunk.ToolOutput
 				ev.IsError = chunk.IsError
@@ -1029,8 +1093,16 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			case "thinking":
 				// Extended thinking delta.  Owner-scoped (same as token/tool events):
 				// ChatHub.Route delivers only to the session owner's connections when
-				// the session is not shared.  Not persisted to the transcript —
-				// thinking is ephemeral UI state.
+				// the session is not shared. Coalesced and persisted as one thinking
+				// turn (K-173), cut at maxCardBytes.
+				flushAssistant()
+				if thinkingBuf.Len() < maxCardBytes {
+					thinkingBuf.WriteString(chunk.Thinking)
+				} else {
+					thinkingTruncated = true
+				}
+				thinkingTruncated = thinkingTruncated || chunk.ThinkingTruncated
+				thinkingRedacted = thinkingRedacted || chunk.ThinkingRedacted
 				ev.Thinking = chunk.Thinking
 				ev.ThinkingTruncated = chunk.ThinkingTruncated
 				ev.ThinkingRedacted = chunk.ThinkingRedacted
@@ -1069,6 +1141,9 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		}
 		if dispReq.Interactive && ch.interactiveMgr != nil {
 			ch.emitRoute(dispReq.SessionID, conversationID, capturedOperatorID, interactiveRoute, handoffInfo)
+			if interactiveRoute != nil {
+				ch.paneRoutes.put(conversationID, paneRoute{owner: capturedOperatorID, sessionID: dispReq.SessionID, view: *interactiveRoute})
+			}
 		}
 
 		// K-147: a codex or agy pane keeps its context across turns through a
@@ -1131,6 +1206,9 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				OwnerOperatorID: capturedOperatorID,
 				OnChunk:         onChunk,
 				YakosRoot:       ch.yakosRoot,
+				// The routed model (an explicit one, or a rule's), already checked
+				// against the ceiling and disable_models by the pre-check (K-173).
+				Model: modelName,
 			}
 
 			// Ensure the SDK session exists (create if new, return existing if same owner).
@@ -1937,6 +2015,20 @@ func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// A follow-up turn announces the pane's route again (K-173), the way every
+	// one-shot turn opens with one. The router decided once, at the first turn;
+	// this repeats that decision, it does not make a new one. It goes out before
+	// the frame so it precedes the reply, and only for the pane's owner, so a
+	// non-owner's refused send writes nothing to the owner's transcript. A send
+	// the engine then refuses as in flight (409) leaves one extra chip.
+	if exists, owned := ch.interactiveMgr.IsOwner(req.ConversationID, effectiveOperatorID); exists && owned {
+		if pr, ok := ch.paneRoutes.get(req.ConversationID, effectiveOperatorID); ok {
+			rv := pr.view
+			rv.OverrideRefused = "" // that notice was about the first turn's prefix
+			ch.emitRoute(pr.sessionID, req.ConversationID, effectiveOperatorID, &rv, nil)
+		}
+	}
+
 	// The turn's ledger entry is opened before the frame is written and dropped
 	// when the engine refuses it, so a refused send (404/403/409/500) leaves no
 	// event and a delivered one always finishes as a pair (K-136).
@@ -2227,22 +2319,4 @@ func resolveAgentSystemPrompt(yakosRoot, project, agentName string) string {
 		}
 	}
 	return ""
-}
-
-// sdkPaneToleratesRouteError reports whether a router error may be left to the
-// SDK engine's own start gate: the pane is a structured-questions (SDK) pane on
-// claude, the error is the claude runtime being unavailable on this machine, and
-// it is not a sensitive refusal or a project disable.
-func sdkPaneToleratesRouteError(structured bool, runtimeName string, err error) bool {
-	if !structured || runtimeName != "claude" {
-		return false
-	}
-	if _, refused := dispatch.AsRouteRefused(err); refused {
-		return false
-	}
-	var ex *dispatch.ExplicitRuntimeError
-	if !errors.As(err, &ex) {
-		return false
-	}
-	return ex.Runtime == "claude" && ex.Reason != dispatch.DisabledByProjectReason
 }

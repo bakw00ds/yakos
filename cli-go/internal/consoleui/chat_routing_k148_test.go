@@ -300,6 +300,19 @@ func TestK148_RuntimeSwitchCarriesADigest(t *testing.T) {
 	if strings.Join(users, "|") != "what is the capital of France|and its population" {
 		t.Errorf("user turns = %v", users)
 	}
+	// The banner is persisted next to the route turn (K-173), so a reload shows it.
+	var banners []consoleui.TranscriptEntry
+	for i, e := range entries {
+		if e.Role == consoleui.RoleHandoff {
+			banners = append(banners, e)
+			if i == 0 || entries[i-1].Role != consoleui.RoleRoute {
+				t.Errorf("the handoff turn does not follow a route turn: %v", entries[i-1].Role)
+			}
+		}
+	}
+	if len(banners) != 1 || banners[0].HandoffFrom != "claude" || banners[0].Runtime != "codex" || banners[0].Turns < 2 || banners[0].DigestBytes <= 0 {
+		t.Errorf("handoff turns = %+v", banners)
+	}
 	// Next turn on codex: it has its own session now, no digest, no handoff.
 	waitUntil(t, "codex session stored", func() bool { return k.store.NativeSession(conv, "codex", "alice") != "" })
 	frames, _ = k.turn("s-h3", conv, "thanks", map[string]any{"runtime": "codex"})
@@ -490,8 +503,9 @@ func TestTranscriptSchemaIsBackwardCompatible(t *testing.T) {
 }
 
 // An interactive pane is one long-lived engine, so the router decides once, at
-// its first turn: the handler sends that route; the engine's own per-turn runs do
-// not repeat it.
+// its first turn: the handler sends that route, and (K-173) repeats the same
+// decision on each follow-up so every turn opens with its chip; the engine's own
+// per-turn runs add none, and the ledger holds one decision per turn.
 func TestK148_InteractivePaneRoutesOncePerPane(t *testing.T) {
 	f := newResumeServer(t, "codex", fakeCodexScript)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -525,11 +539,13 @@ func TestK148_InteractivePaneRoutesOncePerPane(t *testing.T) {
 		t.Fatalf("send: %d", st)
 	}
 	collect(2)
-	if len(routes) != 1 {
-		t.Fatalf("want exactly one route for the pane, got %d", len(routes))
+	if len(routes) != 2 {
+		t.Fatalf("want one route per turn (2), got %d", len(routes))
 	}
-	if r := routeOf(t, routes[0]); r["runtime"] != "codex" || r["pinned"] != "pane" {
-		t.Errorf("route = %v", r)
+	for i, ev := range routes {
+		if r := routeOf(t, ev); r["runtime"] != "codex" || r["pinned"] != "pane" {
+			t.Errorf("route %d = %v", i, r)
+		}
 	}
 	store := consoleui.NewTranscripts(f.workDir)
 	entries, _ := store.Read(conv, "")
@@ -539,8 +555,8 @@ func TestK148_InteractivePaneRoutesOncePerPane(t *testing.T) {
 			n++
 		}
 	}
-	if n != 1 {
-		t.Errorf("transcript holds %d route turns, want 1", n)
+	if n != 2 {
+		t.Errorf("transcript holds %d route turns, want 2", n)
 	}
 }
 
@@ -633,6 +649,18 @@ func TestHandoffDigest_ShapeTable(t *testing.T) {
 		{"url credentials", "clone https://deploy:" + "s3cr3tPw" + "@git.example.com/x.git", "s3cr3tPw"},
 		{"client secret json", `{"client_` + `secret": "` + "qwerty123456" + `"}`, "qwerty123456"},
 		{"anthropic key", "sk-ant-" + strings.Repeat("x9", 47), "sk-ant-"},
+		// K-173: header and query shapes a pasted request carries.
+		{"authorization basic", `curl -H "Authorization: Basic ` + "dXNlcjpodW50ZXIy" + `" https://x.test`, "dXNlcjpodW50ZXIy"},
+		{"authorization basic lowercase", "authorization: basic " + "QWxhZGRpbjpPcGVuU2VzYW1l", "QWxhZGRpbjpPcGVuU2VzYW1l"},
+		{"proxy authorization", "Proxy-Authorization: Basic " + "cHJveHk6cGFzc3dvcmQ=", "cHJveHk6cGFzc3dvcmQ="},
+		{"authorization token scheme", "Authorization: Token " + "0123456789abcdef0123", "0123456789abcdef0123"},
+		{"authorization digest", `Authorization: Digest username="bob", response="` + "6629fae49393a05397450978507c4ef1" + `"`, "6629fae49393a05397450978507c4ef1"},
+		{"authorization bare value", "Authorization: " + "opaquevalue987654", "opaquevalue987654"},
+		{"bearer", "Authorization: Bearer " + "abcdefghijklmnop1234", "abcdefghijklmnop1234"},
+		{"x-api-key header", "x-api-" + "key: " + "k9d8s7f6g5h4j3", "k9d8s7f6g5h4j3"},
+		{"token query", "GET /v1/x?access_" + "token=" + "zz9988776655aa&y=1", "zz9988776655aa"},
+		{"id token query", "https://x.test/cb?id_" + "token=" + "abc123def456&state=1", "abc123def456"},
+		{"token header", "X-Auth-" + "Token: " + "tok0987654321", "tok0987654321"},
 	}
 	for _, c := range cases {
 		digest, _, n := consoleui.BuildHandoffDigestForTest([]consoleui.TranscriptEntry{{Role: consoleui.RoleUser, Text: c.text}}, "claude")

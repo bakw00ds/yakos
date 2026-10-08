@@ -57,6 +57,13 @@ never holds a login: ADR-0010. Detailed entries follow.
 - **Resume for codex and agy panes (K-147).** An interactive codex or agy pane
   keeps its context across turns (`codex exec resume`, agy `--conversation`),
   also across a console restart.
+- **Console routing left-outs (K-173).** An SDK pane is refused for a disabled or
+  over-ceiling model like a CLI pane, with no claude CLI on the machine, and runs
+  the routed model; follow-ups on a live interactive pane repeat the route event;
+  tool, thinking and handoff cards are stored and replayed after a reload; the
+  handoff digest redacts `Authorization` headers of every scheme; the interactive
+  first-turn sensitive check also scans the knowledge pack. A live pane still
+  cannot switch runtime. See `docs/routing.md`.
 - **Knowledge pack (K-149).** The console composes the always-loaded rules and
   the agent body once per conversation for codex and agy panes, appends a
   `/skill` to the turn tail, and shows it in the `/context` drawer.

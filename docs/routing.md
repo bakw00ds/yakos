@@ -496,8 +496,8 @@ policy_sha: 3f4135ea62d49d5ac61c14051d709ac1dc84442814bc2d268d3e4d3abcc09a72
 - A console interactive pane (the Interactive toggle) is routed once, at its
   first turn, by `dispatch.Explain` (the same step `yakos router explain` runs);
   the engine it starts then keeps that runtime for the whole conversation, so a
-  rule cannot move a live pane. Follow-up turns ride `/api/chat/send` and carry
-  no route (K-148).
+  rule cannot move a live pane. Follow-up turns ride `/api/chat/send` and repeat
+  the pane's route event without deciding again (K-173).
 - The runtime pre-checks (`PreferredRuntime`, `ResolveRuntime`) see the route
   class only when the caller passes the task (`RouteQuery.Task`, and `Extra` for
   upstream outputs); the console chat handler and `yakos dispatch` do. A caller
@@ -606,9 +606,11 @@ transcript and user-turn text; none of it enters a system prompt,
   user and assistant turns, each cut to 1500 bytes, 6 KiB in all, newest kept,
   oldest first, labelled as context and not as an instruction. It is scanned
   first: private-key blocks, cloud and token prefixes, JWTs, bearer values and
-  `key=value` secrets become `[redacted]`. The scan is a safety net for text
+  `key=value` secrets and `Authorization` headers of any scheme (Basic, Digest,
+  Token, Bearer) become `[redacted]`. The scan is a safety net for text
   headed to another vendor's model, not a guarantee. The transcript keeps the
-  operator's own words. A `handoff` event follows the `route` event, and the
+  operator's own words. A `handoff` event (also stored as a `handoff` transcript
+  turn, K-173) follows the `route` event, and the
   console shows the "context reset (cache)" banner: the new runtime starts without
   the earlier prompt cache. The router's own moves (sticky, fallback, auto) are
   not handoffs.
@@ -621,13 +623,35 @@ transcript and user-turn text; none of it enters a system prompt,
   turn) and `pinned` reads `router`. The handoff digest is scanned over the whole
   turn before it is cut, with the secret-scan hook's patterns plus URL
   credentials and credential-named `KEY=value` pairs.
-- **K-148b, left out on purpose.** Tool and thinking cards (K-144 events) are not
-  persisted in the transcript; a live pane's runtime cannot be switched (a
-  dispatch naming another runtime, codex to agy included, is refused with 409, so
-  the chip never names a runtime the engine is not on; start a new conversation);
-  the handoff banner is shown live but not persisted; and a follow-up sent to a
-  live interactive pane (`/api/chat/send`) emits no route event: the pane routes
-  once, at its first turn.
+- **Interactive panes (K-173).** A follow-up sent to a live interactive pane
+  (`/api/chat/send`) opens with the same `route` event and `route` transcript
+  turn as the first turn: the pane's one decision, repeated, never a new one. It
+  goes out before the frame, only for the pane's owner, so a refused send from
+  anyone else writes nothing; a send the engine then refuses as in flight (409)
+  leaves one extra chip. An SDK pane (structured questions) skips the CLI and
+  sign-in probe, because its engine is a sidecar on `ANTHROPIC_API_KEY`, and so
+  the router's model checks run for it exactly as for a CLI pane: a model the
+  project's `router.disable_models` lists, or one the agent's `max_model` ceiling
+  cannot rank, is refused with the same error frame, and a model above the
+  ceiling is lowered. The SDK engine is started with the routed model (an
+  explicit one, a rule's, or the agent's pin), never the sidecar's unchecked
+  default. A runtime the project disabled, and a sensitive request, are still
+  refused. The first-turn pre-check of a codex or agy pane also scans the
+  knowledge pack the pane will send, not only the user text.
+- **Replay after a reload (K-173).** Tool calls, tool results and thinking
+  blocks are stored as transcript turns (`tool_use`, `tool_result`, `thinking`;
+  `tool_name`, `is_error`, `truncated`, `redacted`) in the order they happened,
+  and the handoff banner as a `handoff` turn (`handoff_from`, `runtime` = target,
+  `turns`, `digest_bytes`, `redactions`) right after its `route` turn. Stored card
+  text is scanned for secret-shaped values and cut at 16 KiB. The handoff digest
+  reads user and assistant turns only, so cards never travel to another vendor.
+  The page rebuilds them as cards from data, with text nodes only.
+- **Left out on purpose.** A live pane's runtime cannot be switched (a dispatch
+  naming another runtime, codex to agy included, is refused with 409, and the
+  browser keeps its notice, so the chip never names a runtime the engine is not
+  on; start a new conversation). Switching would mean closing the engine and
+  starting another under the same conversation, hub session, ledger entry and
+  budget pin, which is not a small or safe change; it needs its own design.
 
 ## Policy writers: `yakos models` and `yakos router policy` (K-153)
 

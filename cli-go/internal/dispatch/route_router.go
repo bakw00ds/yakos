@@ -362,6 +362,8 @@ type ExplainQuery struct {
 	// would: the task, then upstream outputs, a knowledge block, digests.
 	Task  string
 	Extra []string
+	// SkipProbe skips the availability probe (see routeInput.SkipProbe).
+	SkipProbe bool
 }
 
 // Explain runs the routing step Run and RunStream run, probes included, and
@@ -372,7 +374,7 @@ func Explain(ctx context.Context, q ExplainQuery) (router.RouteDecision, error) 
 		RuntimeOverride: q.Runtime, ModelOverride: q.Model,
 		RuntimeEnvDefault: q.RuntimeEnvDefault, RuntimeFallbackOptIn: q.RuntimeFallbackOptIn, EvalRunID: q.EvalRunID,
 		Class: q.Class, TaskBytes: q.TaskBytes, ConversationID: q.ConversationID,
-		Task: q.Task, Extra: q.Extra,
+		Task: q.Task, Extra: q.Extra, SkipProbe: q.SkipProbe,
 	}, true)
 	if err != nil {
 		return router.RouteDecision{}, err

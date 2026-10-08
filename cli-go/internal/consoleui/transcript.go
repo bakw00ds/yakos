@@ -82,6 +82,18 @@ const (
 	// Model say where, Text is the reason, RuleID the rule. An older reader that
 	// does not know the role skips the line.
 	RoleRoute TranscriptRole = "route"
+	// RoleToolUse, RoleToolResult and RoleThinking record what the pane showed as
+	// cards (K-173), so a reload replays them. Text carries the tool input, the
+	// tool output (secret-shaped values redacted, size-bounded) or the coalesced
+	// thinking text; ToolName names the tool. They are display state: the handoff
+	// digest, the OpenAI gateway and the knowledge pack read only user and
+	// assistant turns and skip these. An older reader skips the lines.
+	RoleToolUse    TranscriptRole = "tool_use"
+	RoleToolResult TranscriptRole = "tool_result"
+	RoleThinking   TranscriptRole = "thinking"
+	// RoleHandoff records the "context reset (cache)" banner of a runtime switch
+	// (K-173): HandoffFrom, Runtime (the target), Turns, DigestBytes, Redactions.
+	RoleHandoff TranscriptRole = "handoff"
 )
 
 // TranscriptEntry is one NDJSON line in a chat transcript file.
@@ -139,6 +151,24 @@ type TranscriptEntry struct {
 	Pinned       string `json:"pinned,omitempty"`
 	// OverrideRefused: the runtime an @prefix asked for that the router refused.
 	OverrideRefused string `json:"override_refused,omitempty"`
+	// Provider and Class complete a route turn (K-173): the vendor and the route
+	// class (sensitive, ...), so a replayed chip matches the live one.
+	Provider string `json:"provider,omitempty"`
+	Class    string `json:"class,omitempty"`
+
+	// ToolName, IsError, Truncated and Redacted describe tool_use, tool_result and
+	// thinking turns (K-173): the tool, whether its result was an error, and
+	// whether the thinking text was cut or withheld by the runtime.
+	ToolName  string `json:"tool_name,omitempty"`
+	IsError   bool   `json:"is_error,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+	Redacted  bool   `json:"redacted,omitempty"`
+
+	// HandoffFrom, Turns, DigestBytes and Redactions describe a handoff turn.
+	HandoffFrom string `json:"handoff_from,omitempty"`
+	Turns       int    `json:"turns,omitempty"`
+	DigestBytes int    `json:"digest_bytes,omitempty"`
+	Redactions  int    `json:"redactions,omitempty"`
 }
 
 // Transcripts manages per-conversation NDJSON transcript files.

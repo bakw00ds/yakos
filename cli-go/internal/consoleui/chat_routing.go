@@ -15,6 +15,7 @@ import (
 	"errors"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -143,10 +144,17 @@ func (ch *chatHandlers) emitRoute(sessionID, conversationID, operatorID string, 
 		SessionID: sessionID, ConversationID: conversationID, OperatorID: operatorID,
 		Role: RoleRoute, Text: rv.Reason, Runtime: rv.Runtime, Model: rv.Model,
 		RuleID: rv.RuleID, FallbackFrom: rv.FallbackFrom, Pinned: rv.Pinned, OverrideRefused: rv.OverrideRefused,
+		Provider: rv.Provider, Class: rv.Class,
 	})
 	now := func() string { return time.Now().UTC().Format(time.RFC3339Nano) }
 	ch.hub.Route(SSEEvent{SessionID: sessionID, ConversationID: conversationID, Type: "route", Route: rv, TS: now()})
 	if hv != nil {
+		// Persisted with the route so a reload shows the banner too (K-173).
+		_ = ch.transcripts.Append(TranscriptEntry{
+			SessionID: sessionID, ConversationID: conversationID, OperatorID: operatorID,
+			Role: RoleHandoff, Runtime: hv.To, HandoffFrom: hv.From,
+			Turns: hv.Turns, DigestBytes: hv.DigestBytes, Redactions: hv.Redactions,
+		})
 		ch.hub.Route(SSEEvent{SessionID: sessionID, ConversationID: conversationID, Type: "handoff", Handoff: hv, TS: now()})
 	}
 }
@@ -256,6 +264,10 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}`),
 	regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}`),
+	// An Authorization header of any scheme (Basic, Digest, Token, Negotiate, a
+	// bare value), as curl -H or a raw request prints it. Bearer is also caught on
+	// its own above; this is the one that holds a Basic user:password blob (K-173).
+	regexp.MustCompile(`(?i)\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?(?:digest\s+[^\r\n]+|(?:(?:basic|negotiate|ntlm|token|bearer|hoba|mutual|aws4-hmac-sha256)\s+)?[^\s"',;\[][^\s"',;]{5,})`),
 	// A credential-looking name (it may sit inside a longer one: AWS_SECRET_ACCESS_KEY,
 	// GITHUB_TOKEN, "client_secret") followed by : or = and a value.
 	regexp.MustCompile(`(?i)[A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|secret|token|passwd|password|credential)s?[A-Za-z0-9_.-]*["']?\s*[:=]\s*["']?[^\s"',;\[][^\s"',;]{5,}`),
@@ -281,3 +293,51 @@ func scanSecrets(s string) (string, int) {
 	}
 	return s, n
 }
+
+// paneRoute is the route an interactive pane was decided under, kept for the
+// life of the pane so each follow-up turn can announce it again (K-173).
+type paneRoute struct {
+	owner     string
+	sessionID string // the hub session the pane's events ride
+	view      routeView
+}
+
+// paneRouteStore holds the latest route per interactive conversation. It is
+// bounded: past maxPaneRoutes the oldest entry is forgotten, which only means
+// that pane's follow-ups announce no route.
+type paneRouteStore struct {
+	mu    sync.Mutex
+	m     map[string]paneRoute
+	order []string
+}
+
+const maxPaneRoutes = 1024
+
+func newPaneRouteStore() *paneRouteStore { return &paneRouteStore{m: map[string]paneRoute{}} }
+
+func (s *paneRouteStore) put(conversationID string, p paneRoute) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.m[conversationID]; !ok {
+		s.order = append(s.order, conversationID)
+		if len(s.order) > maxPaneRoutes {
+			delete(s.m, s.order[0])
+			s.order = s.order[1:]
+		}
+	}
+	s.m[conversationID] = p
+}
+
+// get returns the pane's route only to the operator who owns the pane.
+func (s *paneRouteStore) get(conversationID, owner string) (paneRoute, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	p, ok := s.m[conversationID]
+	if !ok || p.owner != owner {
+		return paneRoute{}, false
+	}
+	return p, true
+}
+
+// maxCardBytes bounds the text a stored tool or thinking card keeps.
+const maxCardBytes = 16 << 10

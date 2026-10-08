@@ -941,6 +941,13 @@ type routeInput struct {
 	// Task and Extra are the text the sensitive classifier scans (K-140).
 	Task  string
 	Extra []string
+	// SkipProbe treats every candidate the project has not disabled as
+	// available: the availability probe (CLI on PATH, sign-in, adapter) does not
+	// run. The model checks (max_model ceiling, disable_models) and the
+	// sensitive-class refusals still do. A pane whose engine does not use the
+	// runtime's CLI (the SDK sidecar) sets it so it is refused exactly as a CLI
+	// pane is, without a CLI it never runs.
+	SkipProbe bool
 }
 
 // routed is the result of routing one dispatch.
@@ -982,6 +989,10 @@ func routeDispatchAt(ctx context.Context, in routeInput, explain bool) (*routed,
 	}
 
 	ci := loadChainInput(agent, in.Agent, in.Project, in.RuntimeOverride, in.RuntimeEnvDefault, in.RuntimeFallbackOptIn, true)
+	probe := runtimeProbe
+	if in.SkipProbe {
+		probe = func(context.Context, string) probeResult { return probeResult{OK: true} }
+	}
 	var warnTo io.Writer = routeLog
 	if explain {
 		warnTo = io.Discard
@@ -1020,7 +1031,7 @@ func routeDispatchAt(ctx context.Context, in routeInput, explain bool) (*routed,
 		refusals   int
 	)
 	for {
-		choice, notes, err = chooseRuntime(ctx, ci, runtimeProbe)
+		choice, notes, err = chooseRuntime(ctx, ci, probe)
 		if err != nil {
 			if _, refused := AsRouteRefused(err); refusals > 0 && ctx.Err() == nil && !refused {
 				err = fmt.Errorf("dispatch: no runtime left for agent %q: %s", in.Agent, skippedSummary(choice.Skipped))
