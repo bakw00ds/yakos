@@ -15,7 +15,9 @@ package consoleui
 //     timestamp + "." + body)>` with `X-Yakos-Timestamp: <unix seconds>`. The
 //     timestamp must be within +-5 minutes and a signature is accepted once
 //     (bounded cache of 1000), so a captured request cannot be replayed. The
-//     secret is read from the daemon environment at request time. There is no
+//     secret is read at request time from a 0600 file in the trusted state
+//     directory (webhook-secrets/<secret_env>) when one exists, else from the
+//     daemon environment; the file wins when both are set. There is no
 //     bare-secret header path.
 //   - Every "not available" cause (undeclared, not enabled, untrusted file,
 //     changed workflow, unset or short secret, bad/stale/replayed signature, oversized body)
@@ -117,7 +119,22 @@ func (h *flowsHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Enablement first (a small trusted file), then the workflow file: the
+	// Read the body once, bounded, before anything that depends on enablement,
+	// so the connection behaves the same (read, close or keep-alive) whether
+	// or not the hook is enabled (sec-348c R1). An oversized or unreadable body
+	// is "not available" too: before the signature is verified, only the
+	// uniform 404 may leave this handler.
+	if r.ContentLength > maxTriggerBodyBytes {
+		notAvailable()
+		return
+	}
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxTriggerBodyBytes))
+	if err != nil {
+		notAvailable()
+		return
+	}
+
+	// Enablement next (a small trusted file), then the workflow file: the
 	// workflow is only opened for a name the operator enabled.
 	sched, err := workflow.LoadSchedules(h.workspaceRoot)
 	if err != nil {
@@ -146,21 +163,9 @@ func (h *flowsHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		notAvailable()
 		return
 	}
-	secret := os.Getenv(envName)
+	secret := workflow.LookupWebhookSecret(envName)
 	if len(secret) < minWebhookSecretLen {
 		slog.Warn("flows: webhook refused, secret not configured", "workflow", name)
-		notAvailable()
-		return
-	}
-
-	// An oversized or unreadable body is "not available" too: before the
-	// signature is verified, only the uniform 404 may leave this handler.
-	if r.ContentLength > maxTriggerBodyBytes {
-		notAvailable()
-		return
-	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxTriggerBodyBytes))
-	if err != nil {
 		notAvailable()
 		return
 	}
@@ -174,16 +179,21 @@ func (h *flowsHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		notAvailable()
 		return
 	}
-	// Only a correctly signed request counts toward the rate limit, so a
-	// console-token holder without the secret cannot lock out the real sender.
-	if !h.trigGuard.allow(name) {
-		w.Header().Set("Retry-After", "60")
-		writeGenericError(w, http.StatusTooManyRequests, "too many requests")
-		return
-	}
+	// Replay check first: a replayed signed request is answered 404 and must
+	// not consume the rate budget (sec-348c R2). The signature is used up by
+	// this first sight, so a request answered 429 below must be re-signed to
+	// retry, which the docs already require.
 	if !h.trigGuard.firstUse(sig) {
 		slog.Warn("flows: webhook refused, replayed signature", "workflow", name)
 		notAvailable()
+		return
+	}
+	// Only a correctly signed, first-seen request counts toward the rate limit,
+	// so a console-token holder without the secret cannot lock out the real
+	// sender.
+	if !h.trigGuard.allow(name) {
+		w.Header().Set("Retry-After", "60")
+		writeGenericError(w, http.StatusTooManyRequests, "too many requests")
 		return
 	}
 	// The sender is authenticated; now the payload shape may be reported.

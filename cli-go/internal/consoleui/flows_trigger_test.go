@@ -153,10 +153,21 @@ func newTrigEnv(t *testing.T, block <-chan struct{}) *trigEnv {
 		if strings.HasPrefix(path, "GET ") {
 			method, path = http.MethodGet, strings.TrimPrefix(path, "GET ")
 		}
-		req, _ := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
+		var reqBody io.Reader = strings.NewReader(body)
+		chunked := false
+		if _, ok := headers["X-Test-Chunked"]; ok { // no Content-Length: sent chunked
+			reqBody, chunked = io.NopCloser(strings.NewReader(body)), true
+		}
+		req, _ := http.NewRequest(method, ts.URL+path, reqBody)
+		if chunked {
+			req.ContentLength = -1
+		}
 		req.Header.Set("Authorization", "Bearer "+tk)
 		req.Header.Set("Content-Type", "application/json")
 		for k, v := range headers {
+			if k == "X-Test-Chunked" {
+				continue
+			}
 			if k == "X-Test-Sign" { // sign this exact body with secret v
 				ts := strconv.FormatInt(time.Now().Unix()+signSeq.Add(1), 10) // distinct per call: a repeat is a replay
 				req.Header.Set("X-Yakos-Timestamp", ts)
@@ -351,6 +362,7 @@ func TestTrigger_ScanMissingFailsClosed(t *testing.T) {
 		return nil, dispatch.Result{}, nil
 	})
 	eng2.OutputScanFn = nil
+	t.Cleanup(func() { settleTriggeredRuns(t, eng2, wDir) }) // after wDir, so it runs first
 	writeWorkflow(t, wDir, "hooked", hookYAML)
 	srv := consoleui.MustNew(t, consoleui.Config{
 		Token: tk, KanbanBoardPath: t.TempDir() + "/kanban.md", KanbanProject: "test",
@@ -578,5 +590,116 @@ func TestTrigger_FIFOWorkflowAnswersAtOnce(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		releaseFifo(p)
 		t.Fatal("the webhook blocked on a FIFO workflow file")
+	}
+}
+
+// A replayed signed request is answered 404 and must not use up the per-minute
+// budget the real sender needs (sec-348c R2).
+func TestTrigger_ReplayDoesNotConsumeRateBudget(t *testing.T) {
+	block := make(chan struct{})
+	env := newTrigEnv(t, block)
+	env.enable(hookEnabled, 0o600)
+	path := "/flows/api/trigger/hooked"
+	h := rawSigned(trigSecret, time.Now(), `{}`)
+	first := env.doAs(trigID, h, path, `{}`)
+	var started struct {
+		RunID string `json:"run_id"`
+	}
+	_ = json.Unmarshal([]byte(readAll(t, first)), &started)
+	if first.StatusCode != http.StatusAccepted {
+		t.Fatalf("first signed call: %d", first.StatusCode)
+	}
+	for i := 0; i < 10; i++ {
+		r := env.doAs(trigID, h, path, `{}`)
+		if r.StatusCode != http.StatusNotFound {
+			t.Fatalf("replay %d: status %d, want 404", i, r.StatusCode)
+		}
+		r.Body.Close()
+	}
+	// The sender's fresh requests (five more fit the 6/min budget) are not 429.
+	for i := 0; i < 5; i++ {
+		r := env.doAs(trigID, secretHdr(trigSecret), path, `{}`)
+		if r.StatusCode != http.StatusConflict {
+			t.Errorf("fresh call %d after replays: status %d, want 409 (a run is active, the budget is not spent)", i, r.StatusCode)
+		}
+		r.Body.Close()
+	}
+	close(block)
+	waitForRunStatus(t, env.workDir, started.RunID, "completed")
+}
+
+// Chunked unsigned bodies (no Content-Length) must not tell an enabled hook
+// from a disabled one through the connection state (sec-348c R1).
+func TestTrigger_UnsignedChunkedBodyIsNoOracle(t *testing.T) {
+	env := newTrigEnv(t, nil)
+	path := "/flows/api/trigger/hooked"
+	chunked := map[string]string{"X-Test-Chunked": "1"}
+	probe := func() map[string][2]any {
+		out := map[string][2]any{}
+		for _, n := range []int{1 << 10, 65 << 10, 200 << 10, 300 << 10} {
+			r := env.doAs(trigID, chunked, path, strings.Repeat("a", n))
+			out[strconv.Itoa(n)] = [2]any{r.StatusCode, r.Close}
+			r.Body.Close()
+		}
+		return out
+	}
+	disabled := probe()
+	env.enable(hookEnabled, 0o600)
+	enabled := probe()
+	for k, d := range disabled {
+		if d != enabled[k] {
+			t.Errorf("chunked %s bytes: disabled=%v enabled=%v (status, connection close) differ", k, d, enabled[k])
+		}
+		if d[0] != http.StatusNotFound {
+			t.Errorf("chunked %s bytes: status %v, want 404", k, d[0])
+		}
+	}
+}
+
+// The secret may come from a 0600 file in the trusted state directory; the
+// file wins over the daemon's environment, and an untrusted file does not fall
+// back to it (K-172).
+func TestTrigger_SecretFileWinsOverEnv(t *testing.T) {
+	env := newTrigEnv(t, nil)
+	env.enable(hookEnabled, 0o600)
+	path := "/flows/api/trigger/hooked"
+	const fileSecret = "file-secret-0123456789abc"
+	p := workflow.WebhookSecretPath(trigSecretEnv)
+	if p == "" {
+		t.Fatal("no secret path")
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(filepath.Dir(p), 0o700)
+	if err := os.WriteFile(p, []byte(fileSecret+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(p, 0o600)
+
+	r := env.doAs(trigID, secretHdr(trigSecret), path, `{}`) // the env secret no longer opens it
+	if r.StatusCode != http.StatusNotFound {
+		t.Errorf("env secret with a file present: status %d, want 404", r.StatusCode)
+	}
+	r.Body.Close()
+	r = env.doAs(trigID, secretHdr(fileSecret), path, `{}`)
+	var started struct {
+		RunID string `json:"run_id"`
+	}
+	_ = json.Unmarshal([]byte(readAll(t, r)), &started)
+	if r.StatusCode != http.StatusAccepted {
+		t.Fatalf("file secret: status %d, want 202", r.StatusCode)
+	}
+	waitForRunStatus(t, env.workDir, started.RunID, "completed")
+
+	if runtime.GOOS != "windows" { // a file others can read is not trusted: closed, no env fallback
+		_ = os.Chmod(p, 0o644)
+		for _, sec := range []string{fileSecret, trigSecret} {
+			r = env.doAs(trigID, secretHdr(sec), path, `{}`)
+			if r.StatusCode != http.StatusNotFound {
+				t.Errorf("untrusted secret file, secret %q: status %d, want 404", sec[:4], r.StatusCode)
+			}
+			r.Body.Close()
+		}
 	}
 }

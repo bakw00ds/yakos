@@ -22,7 +22,28 @@ nodes: [...]
 `secret_env` must match `^[A-Z][A-Z0-9_]{0,63}$` and start with `YAKOS_`. Validation rejects a bad cron
 expression or secret name when the workflow is saved or run.
 
-## Enabling them: the schedules file
+## Enabling them
+
+From the project directory (or with `--project DIR`):
+
+```
+yakos flows schedule enable <workflow> [--cron] [--webhook]
+yakos flows schedule disable <workflow>
+```
+
+`enable` turns on the triggers the workflow declares (or only the ones you name),
+pins the workflow file's SHA-256 and writes the schedules file below: mode
+`0600`, replaced atomically, trust-checked before it is read (a symlink, another
+user's file or one others can write is refused, never overwritten), and recorded
+as a `config_changed` line in the dispatch log. Run `enable` again after you
+reviewed a changed workflow to re-pin it. `disable` removes the entry. Neither
+prints a path. Running `enable` is your consent, so read the workflow first.
+
+### The schedules file
+
+The file is keyed by the project's canonical path, not its folder name, so there
+is nothing to migrate: `<hash>` below is derived from the symlink-resolved path
+and the file repeats that path in `workspace:`. A hand-edited file still works.
 
 `~/.yakos-state/schedules/<slug>-<hash>.yaml`
 
@@ -107,7 +128,7 @@ the same workflow is in flight is skipped, not queued: a line goes to
 (`{"outcome":"skipped","reason":"run already active"}`) and a webhook caller
 gets `409`. Started and refused triggers are logged there too.
 
-The guard covers the console and the scheduler's engine only. The JSON-RPC
+The guard covers the console and the scheduler only (they share one engine). The JSON-RPC
 `workflow.run` and the CLI build their own engines and are not counted, so a
 run started that way does not block a trigger (or the reverse).
 
@@ -128,8 +149,8 @@ console route requires and the signature below.
 - Sign the request. Set `X-Yakos-Timestamp` to the current Unix time in
   seconds and `X-Yakos-Signature: sha256=<hex>` where the value is
   `HMAC-SHA256(secret, timestamp + "." + body)` in lowercase hex. The secret is
-  the value of the `secret_env` variable in the daemon's environment (read at
-  request time, at least 16 characters). There is no bare-secret header.
+  read at request time, at least 16 characters, from a file or the daemon's
+  environment (see "Where the secret comes from"). There is no bare-secret header.
 
   ```
   ts=$(date +%s); body='{"issue":"login broken"}'
@@ -142,8 +163,10 @@ console route requires and the signature below.
   signature is accepted once (the last 1000 are remembered): a captured request
   cannot be replayed. A sender's retry must be re-signed with a fresh timestamp.
 - At most 6 requests per minute per workflow name (`429`, `Retry-After: 60`),
-  counted only for a request whose signature verified, so a caller without the
-  secret cannot lock out the real sender.
+  counted only for a request whose signature verified and was not a replay, so a
+  caller without the secret cannot lock out the real sender and a replayed
+  request cannot spend the budget. A request answered `429` has used its
+  signature up, so the retry must be re-signed.
 - `Content-Type: application/json` (the console's CSRF guard requires it for
   every mutation); the body is the payload, at most 64 KiB, valid UTF-8, and
   optional. An oversized body answers 404; non-UTF-8 answers 400 only once the
@@ -164,6 +187,21 @@ console route requires and the signature below.
 | 400 | Body is not valid UTF-8 (only for a correctly signed request) |
 | 422 | Payload refused by the injection scan |
 | 429 | Rate limit |
+
+### Where the secret comes from
+
+For each `secret_env` name the daemon looks for the file
+`~/.yakos-state/webhook-secrets/<secret_env>` first. If it exists it is the
+secret and the environment variable is ignored, even when both are set. The file
+must be a regular file you own with mode `0600`, in a directory you own that
+others cannot write (`mkdir -m 700`, then `umask 077; printf %s "$SECRET" > file`),
+at most 4 KiB; one trailing newline is trimmed. A file that exists but fails
+those checks keeps the webhook off: the daemon does not fall back to the
+environment. With no file, the daemon's environment variable is used as before.
+
+The request body is read (at most 64 KiB; a larger body is a 404 and closes the connection)
+before the schedules file is looked at, so the connection behaves the same for
+an enabled and a disabled hook.
 
 The call is not idempotent and takes no `Idempotency-Key`; the one-active-run
 rule is what keeps a sender's retries from piling up runs.
