@@ -7,9 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.63.0.0] — 2026-10-08
+
+Minor release: the multi-harness router program lands in full (K-139 to K-156).
+Routing rules, pins, fallbacks and a sensitive class run at the one dispatch
+chokepoint; codex and agy get stream parsers, hooks, resumed panes and a
+knowledge pack; new surfaces are routed console Chat, an OpenAI-compatible
+endpoint, an Anthropic gateway with `yakos start --routed`, Flows triggers with
+`yakos flows schedule enable|disable`, the Models & Providers tab with opt-in
+browser writes, and the REPL. Follow-ups K-163 to K-177 harden the bounded
+config reader, the codex and agy hooks and the endpoint and gateway tokens, and
+add the opt-in Jev routing shadow. Behavior changes are marked in UPGRADING.md.
+
 ### Added
 
-The multi-harness router program (K-139 to K-155) in one list; the behavior
+The multi-harness router program (K-139 to K-156) in one list; the behavior
 changes are marked in UPGRADING.md. Why yakOS drives each vendor's binary and
 never holds a login: ADR-0010. Detailed entries follow.
 
@@ -234,6 +246,10 @@ never holds a login: ADR-0010. Detailed entries follow.
 
 ### Fixed
 
+- **Flows: JSON-RPC `workflow.status` applies the run-owner check (K-166).** It
+  returned the whole run state to any caller, while the REST `/flows/api/run`
+  was already owner-gated. It now checks the run owner and returns the
+  sanitised status. The fix landed with the Flows triggers work (K-152, #348).
 - **Windows: `statepath` edit locks no longer fail on a delete-pending lock
   (K-163).** Creating the lock while the previous holder's file was still
   delete-pending failed with "cannot take the edit lock"; `lockEdit` now waits
