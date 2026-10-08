@@ -208,9 +208,8 @@ What the gate does not cover (all unverified or by design):
   codex `apply_patch` input layout and the agy file-tool argument names are
   mapped best effort (`hookio/shape.go`); an unmapped tool name reaches the hooks
   under its own name and is not gated by `path-allowlist` or `secret-scan`.
-- A shell command that writes a file (`echo K=... > .env`) is not inspected by
-  `secret-scan` or `path-allowlist`, which gate file-write tools. A follow-up
-  (K-170, shell-write decoding) closes the common forms.
+- Shell writes are decoded heuristically, not sandboxed; see "Shell writes"
+  below for what is and is not caught.
 - Agy's behaviour when a hook command cannot start was never observed (agy cannot
   be driven to a hook without a signed-in model call). The launcher removes the
   question: it always starts, and it prints agy's deny itself.
@@ -227,19 +226,45 @@ overrides, as for an undecodable envelope. A harness started in a subdirectory o
 the project is judged by that subdirectory's `.claude/`, which usually holds no
 policy: start it at the project root.
 
+Shell writes (K-170): for a codex or agy shell tool (`Bash`, `run_command`, and the
+argv-array form), `path-allowlist` and `secret-scan` also receive one synthesized
+`Write` per file the command is decoded as writing, with the command text as its
+content. The decoder (`hookio/shellwrites.go`, `shellinterp.go`) reads structure,
+never free text in an error message. It is a conservative heuristic, not a
+sandbox.
+
+| Caught | Not caught |
+|---|---|
+| `>` `>>` `>\|` `&>` `<>` `N>` `>&file`; `cat <<EOF > f`; here-strings and here-documents fed to a shell or interpreter | a script or program that does the write: `python3 build.py`, `make`, `npm run x`, `sh script.sh`, `source f`, a binary |
+| `$(...)`, backticks, `<(...)`, anywhere in a word, recursively (depth 6, 64 KiB) | a command word built at run time (`$EDITOR f`) |
+| `tee`, `cp`, `mv` (source too), `install` (`-t`, `-d`), `ln`, `sed -i`, `perl -i`, `dd of=`, `curl -o`, `wget -O`, `find -exec <writer> {}`, `find -fprint` | `touch`, `truncate`, `chmod`, `rm`, `mkdir`; `tar -x`, `unzip`, `git checkout/apply/restore`, `patch`, `rsync`, `scp`, `curl -O`, `awk -i inplace` |
+| `sh/bash/zsh -c`, `eval`, wrappers (`sudo`, `env`, `nohup`, `time`, `timeout`, `nice`, `command`, `exec`, `xargs`) and `VAR=x` prefixes | output files chosen by the tool, and anything where this lexer and the real shell disagree |
+| static `VAR=x`, `export`, `cd DIR` (and `( ... )` scoping), literal brace lists | a variable assigned from a command, a loop variable, an unset variable (reported dynamic, below) |
+| literal-path write calls in `python -c`, `node -e`, `perl -e`, `ruby -e`, `php -r` and their here-documents, and literal shell strings passed to `os.system`, `subprocess`, `exec`, `system` | a path computed at run time inside the program (reported dynamic when the call is recognisable) |
+
+A target that is recognised as a write but cannot be resolved (`> $OUT`,
+`> $(mktemp)`, `> ~/x`, `echo ... \| sh`, `bash -c "$CMD"`) is dynamic:
+`path-allowlist` refuses it whenever the dispatched agent has an entry in the
+policy file, because a policy cannot be applied to a path nobody knows. Targets are
+judged exactly as a Write tool call: an absolute path outside the project, a path
+that leaves it, or a symlink out is refused. `/dev/null`, `/dev/stdout`,
+`/dev/stderr`, `/dev/stdin`, `/dev/tty` and `/dev/fd/N` are ignored. A matching
+exact `hook-bypass.md` entry applies as for any path-allowlist block.
+
 Live smoke (K-170, 2026-10-08, codex 0.154.0): `yakos hooks install --harness codex`
 into a scratch HOME, then `codex exec --dangerously-bypass-hook-trust` against a
 local stub of the Responses API (a scripted tool call, no vendor model), with
-`CODEX_HOME`, `HOME` and the XDG variables in a scratch tree. Observed: the
-installed PreToolUse hooks ran for a shell tool call (hook log lines, agent
-`reviewer`), a benign `echo hi` ran and `supervisor-stream` logged the
-PostToolUse, and with the installed binary made non-executable, or deleted, the
-call was refused by the launcher ("Command blocked by PreToolUse hook") and never
-ran. Not verified live: agy. `agy -p` with a scratch HOME honours the home
-override but, with no sign-in and no network, never reached a hook; agy has no
-model-endpoint override to stub, and the operator's sign-in was not used. For agy
-the evidence is the recorded K-156 envelopes and the fake-harness end-to-end
-tests.
+`CODEX_HOME`, `HOME` and the XDG variables in a scratch tree. Observed: an
+`echo K=1 > .env` call by agent `reviewer` was blocked by `path-allowlist` (codex
+printed "Command blocked by PreToolUse hook", the stub saw it as the tool result,
+the file was not created, the hook log recorded `block`/`deny pattern matched`);
+`echo hi` ran and `supervisor-stream` logged the PostToolUse; `echo x > $OUT` was
+refused as undecidable; with the installed binary made non-executable, or deleted,
+the call was refused by the launcher. Not verified live: agy. `agy -p` with a
+scratch HOME honours the home override but, with no sign-in and no network, never
+reached a hook; agy has no model-endpoint override to stub, and the operator's
+sign-in was not used. For agy the evidence is the recorded K-156 envelopes and the
+fake-harness end-to-end tests.
 
 Optional endpoint: with `hooks_endpoint: true` in `~/.yakos-state/router-policy.yml`
 (owner-only, like the other keys), `yakos serve` mounts `POST

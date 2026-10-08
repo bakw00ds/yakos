@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 	"github.com/bakw00ds/yakos/internal/hooks/registry"
 	"github.com/bakw00ds/yakos/internal/runtime"
 )
@@ -341,5 +342,163 @@ func TestUnknownProjectFailsClosed(t *testing.T) {
 	d.Env = map[string]string{"CLAUDE_PROJECT_DIR": t.TempDir()}
 	if r := Run(context.Background(), "codex", "secret-scan", envelope(t, "codex", "Write", "a.txt", "hello"), d); r.ExitCode == 2 {
 		t.Errorf("project from CLAUDE_PROJECT_DIR refused: %+v", r)
+	}
+}
+
+// shellDeps builds Deps for a project that holds the given policy.
+func shellDeps(t *testing.T, agent, policy string) Deps {
+	t.Helper()
+	proj := t.TempDir()
+	if policy != "" {
+		if err := os.MkdirAll(filepath.Join(proj, ".claude"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(proj, ".claude", "path-allowlist.json"), []byte(policy), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wc := t.TempDir()
+	d := deps(t, false)
+	d.Agent = agent
+	d.Resolve = func(string) (registry.Config, string) {
+		return registry.Config{WorkCurrentDir: wc, ProjectDir: proj, StateDir: t.TempDir()}, wc
+	}
+	return d
+}
+
+func shellEnvelope(shape, cmd string, argv []string) []byte {
+	var v any
+	var cmdv any = cmd
+	if argv != nil {
+		cmdv = argv
+	}
+	if shape == "codex" {
+		v = map[string]any{"hook_event_name": "PreToolUse", "tool_name": "Bash", "cwd": "/w", "tool_input": map[string]any{"command": cmdv}}
+	} else {
+		v = map[string]any{"workspacePaths": []string{"/w"}, "toolCall": map[string]any{"name": "run_command", "args": map[string]any{"CommandLine": cmd}}}
+	}
+	b, _ := json.Marshal(v)
+	return b
+}
+
+func denied(r hookio.Response) bool {
+	return r.ExitCode == 2 || strings.Contains(string(r.Stdout), `"decision":"deny"`)
+}
+
+// K-170 (b): a shell command that writes a file is refused by path-allowlist
+// exactly as the Write tool is, in both harness shapes.
+func TestShellWritesGatedByPathAllowlist(t *testing.T) {
+	const policy = `{"reviewer":{"deny":[".env","secrets/**"]},"backend":{"allow":["src/**"]}}`
+	cases := []struct {
+		agent, cmd string
+		deny       bool
+	}{
+		{"reviewer", "echo hi > .env", true},
+		{"reviewer", "echo hi >> .env", true},
+		{"reviewer", "echo hi | tee .env", true},
+		{"reviewer", "cp notes.txt .env", true},
+		{"reviewer", "mv a .env", true},
+		{"reviewer", "sed -i 's/a/b/' .env", true},
+		{"reviewer", "dd if=a of=.env", true},
+		{"reviewer", "python3 -c \"open('.env','w').write('x')\"", true},
+		{"reviewer", "cat <<EOF > .env\nK=1\nEOF", true},
+		{"reviewer", "echo $(echo hi > .env)", true},
+		{"reviewer", "bash -c 'echo hi > secrets/a.key'", true},
+		{"reviewer", "cd secrets && echo hi > a.key", true},
+		{"reviewer", "F=.env; echo hi > $F", true},
+		{"reviewer", "echo hi > $OUT", true}, // deny-only policy: the dynamic rule is what refuses it
+		{"reviewer", "echo hi | tee $(mktemp)", true},
+		{"reviewer", "bash -c \"$CMD\"", true},
+		{"reviewer", "echo hi > notes.txt", false},
+		{"reviewer", "ls -la && git status", false},
+		{"reviewer", "cat .env", false},
+		{"backend", "echo hi > src/a.go", false},
+		{"backend", "sed -i 's/a/b/' src/a.go src/b.go", false},
+		{"backend", "cd src && echo hi > a.go", false},
+		{"backend", "cp a src/b.go", false},
+		{"backend", "echo hi > README.md", true},
+		{"backend", "tee README.md", true},
+		{"backend", "sed -i 's/a/b/' README.md", true},
+		{"backend", "cp a ../outside", true},
+		{"backend", "cd .. && echo hi > a", true},
+		{"backend", "echo hi > /tmp/scratch", true},
+		{"backend", "echo hi > $OUT", true},      // undecidable target under a policy
+		{"backend", "echo hi > $(mktemp)", true}, // undecidable target under a policy
+		{"backend", "echo 'echo x' | sh", true},  // script read from stdin
+		{"backend", "echo hi > /dev/null", false},
+		{"backend", "go test ./... 2>&1 | tail -5", false},
+		{"nobody-listed", "echo hi > .env", false}, // no policy for this agent: as on claude
+		{"nobody-listed", "echo hi > $OUT", false},
+	}
+	for _, shape := range []string{"codex", "agy"} {
+		for _, c := range cases {
+			d := shellDeps(t, c.agent, policy)
+			r := Run(context.Background(), shape, "path-allowlist", shellEnvelope(shape, c.cmd, nil), d)
+			if denied(r) != c.deny {
+				t.Errorf("%s/%s: %q denied=%v, want %v (%+v)", shape, c.agent, c.cmd, denied(r), c.deny, r)
+			}
+		}
+	}
+	// codex sends an argv array for some shell tools.
+	d := shellDeps(t, "reviewer", policy)
+	if r := Run(context.Background(), "codex", "path-allowlist", shellEnvelope("codex", "", []string{"bash", "-lc", "echo hi > .env"}), d); !denied(r) {
+		t.Errorf("argv-form command not gated: %+v", r)
+	}
+	// With no policy file nothing is enforced, dynamic targets included.
+	d = shellDeps(t, "backend", "")
+	if r := Run(context.Background(), "codex", "path-allowlist", shellEnvelope("codex", "echo hi > $OUT; echo x > .env", nil), d); denied(r) {
+		t.Errorf("blocked with no policy file: %+v", r)
+	}
+	// A refusal names the problem, not the command.
+	d = shellDeps(t, "backend", policy)
+	r := Run(context.Background(), "codex", "path-allowlist", shellEnvelope("codex", "echo hi > README.md", nil), d)
+	if !strings.Contains(string(r.Stderr), "README.md") || !strings.Contains(string(r.Stderr), "allow-list") {
+		t.Errorf("reason does not name the path and the rule: %q", r.Stderr)
+	}
+}
+
+// A PostToolUse shell envelope is not decoded for writes (nothing to prevent).
+func TestShellWritesNotDecodedAfterTheFact(t *testing.T) {
+	d := shellDeps(t, "reviewer", `{"reviewer":{"deny":[".env"]}}`)
+	b, _ := json.Marshal(map[string]any{"hook_event_name": "PostToolUse", "tool_name": "Bash", "cwd": "/w",
+		"tool_input": map[string]any{"command": "echo hi > .env"}, "tool_response": map[string]any{"stdout": ""}})
+	if r := Run(context.Background(), "codex", "path-allowlist", b, d); denied(r) {
+		t.Errorf("PostToolUse blocked: %+v", r)
+	}
+}
+
+// K-170 (b): secret-scan sees a secret written by a shell command.
+func TestShellWritesGatedBySecretScan(t *testing.T) {
+	for _, shape := range []string{"codex", "agy"} {
+		d := shellDeps(t, "lead", "")
+		bad := "echo ANTHROPIC_API_KEY=" + key + " > .env"
+		if r := Run(context.Background(), shape, "secret-scan", shellEnvelope(shape, bad, nil), d); !denied(r) {
+			t.Errorf("%s: a secret written by echo was not blocked: %+v", shape, r)
+		}
+		if r := Run(context.Background(), shape, "secret-scan", shellEnvelope(shape, "echo hello > notes.txt", nil), d); denied(r) {
+			t.Errorf("%s: a benign write blocked: %+v", shape, r)
+		}
+		// Not a write: nothing to prevent, as before.
+		if r := Run(context.Background(), shape, "secret-scan", shellEnvelope(shape, "echo "+key, nil), d); denied(r) {
+			t.Errorf("%s: a command that writes nothing was blocked: %+v", shape, r)
+		}
+	}
+}
+
+// One synthesized Write per decoded target, carrying the command as content.
+func TestShellWriteInputsOnePerTarget(t *testing.T) {
+	ins, err := hookio.DecodeShape("codex", shellEnvelope("codex", "echo a > f; echo b > g", nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	extra := hookio.ShellWriteInputs(ins)
+	if len(extra) != 2 || extra[0].Tool != "Write" || extra[1].Tool != "Write" {
+		t.Fatalf("synthesized inputs: %+v", extra)
+	}
+	if hookio.ToolFilePath(extra[0]) != "f" || hookio.ToolFilePath(extra[1]) != "g" {
+		t.Errorf("targets: %q %q", hookio.ToolFilePath(extra[0]), hookio.ToolFilePath(extra[1]))
+	}
+	if len(hookio.ShellWriteInputs([]hooktype.HookInput{{Tool: "Read", Event: "PreToolUse"}})) != 0 {
+		t.Error("a non-shell tool produced writes")
 	}
 }

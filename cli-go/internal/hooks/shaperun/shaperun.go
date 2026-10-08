@@ -85,6 +85,11 @@ func Run(ctx context.Context, shape, name string, data []byte, d Deps) hookio.Re
 	if event != "PreToolUse" && event != "PostToolUse" {
 		return hookio.Respond(shape, "PreToolUse", false, "")
 	}
+	// A shell command that writes a file is gated as a Write to that file by
+	// the two hooks that judge file writes (K-170 b).
+	if event == "PreToolUse" && (name == "path-allowlist" || name == "secret-scan") {
+		ins = append(ins, hookio.ShellWriteInputs(ins)...)
+	}
 
 	// A bound project (the endpoint's nonce) outranks everything the caller or
 	// the envelope says: the hooks judge the call against that project only.

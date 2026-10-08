@@ -409,3 +409,66 @@ func TestShapeWithoutClaudeProjectDirNeverUsesProcessCwd(t *testing.T) {
 		t.Errorf("benign write in the envelope's project blocked: exit %d %q", code, out)
 	}
 }
+
+// K-170 (b): through the real binary and the installed hooks files, a shell
+// command that writes a forbidden file is refused in both harnesses, and a
+// harmless one is not.
+func TestFakeHarnessesRefuseShellWritesOutsidePolicy(t *testing.T) {
+	e := newSvcEnv(t)
+	var env []string
+	for _, kv := range e.env {
+		if !strings.HasPrefix(kv, "CLAUDE_PROJECT_DIR=") && !strings.HasPrefix(kv, "YAKOS_AGENT_TYPE=") {
+			env = append(env, kv)
+		}
+	}
+	e.env = append(env, "YAKOS_AGENT_TYPE=reviewer")
+	if err := os.MkdirAll(filepath.Join(e.work, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(e.work, ".claude", "path-allowlist.json"), []byte(`{"reviewer":{"deny":[".env"]}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cx, ws := t.TempDir(), t.TempDir()
+	if _, _, err := hooksinstall.InstallShape("codex", cx, e.bin); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := hooksinstall.InstallShape("agy", ws, e.bin); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(hooksinstall.ShapeTarget("codex", cx))
+	codexCmds := preCommands(t, raw, false)
+	raw, _ = os.ReadFile(hooksinstall.ShapeTarget("agy", ws))
+	agyCmds := preCommands(t, raw, true)
+	codex := func(cmd string) []byte {
+		b, _ := json.Marshal(map[string]any{"session_id": "s", "cwd": e.work, "hook_event_name": "PreToolUse",
+			"tool_name": "Bash", "tool_input": map[string]any{"command": cmd}})
+		return b
+	}
+	agy := func(cmd string) []byte {
+		b, _ := json.Marshal(map[string]any{"conversationId": "c", "workspacePaths": []string{e.work},
+			"toolCall": map[string]any{"name": "run_command", "args": map[string]any{"CommandLine": cmd}}})
+		return b
+	}
+	for _, tc := range []struct {
+		cmd  string
+		deny bool
+	}{
+		{"echo K=1 > .env", true},
+		{"printf x | tee -a .env", true},
+		{"sed -i 's/a/b/' .env", true},
+		{"cat <<EOF > .env\nK=1\nEOF", true},
+		{"echo x > $(echo .env)", true},
+		{"ls -la && echo done > notes.txt", false},
+	} {
+		for name, run := range map[string]func() (string, int, int){
+			"codex": func() (string, int, int) { return e.runCommands(t, codexCmds, codex(tc.cmd)) },
+			"agy":   func() (string, int, int) { return e.runCommands(t, agyCmds, agy(tc.cmd)) },
+		} {
+			out, code, _ := run()
+			blocked := code == 2 || strings.Contains(out, `"decision":"deny"`)
+			if blocked != tc.deny {
+				t.Errorf("%s: %q blocked=%v, want %v (exit %d, out %q)", name, tc.cmd, blocked, tc.deny, code, out)
+			}
+		}
+	}
+}
