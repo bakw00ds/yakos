@@ -252,7 +252,8 @@ func TestWriteCounterFallsBackToADirectWrite(t *testing.T) {
 // be a wasted syscall pair per waiter. A stale lock is still reaped well inside
 // the budget.
 func TestStaleLockIsReapedAfterTheFifthMiss(t *testing.T) {
-	lock := filepath.Join(t.TempDir(), "x.lock")
+	dir := t.TempDir()
+	lock := filepath.Join(dir, "x.lock")
 	if err := os.Mkdir(lock, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -260,13 +261,30 @@ func TestStaleLockIsReapedAfterTheFifthMiss(t *testing.T) {
 	if err := os.Chtimes(lock, old, old); err != nil {
 		t.Fatal(err)
 	}
-	start := time.Now()
-	rel, ok := acquireLockAs(lock, "t", time.Second)
+	t.Setenv("YAKOS_TEST_SEAMS", "1")
+	t.Setenv("YAKOS_TEST_LOCK_STATS", "1")
+	// Counted in tries, not in milliseconds: the schedule of sleeps between tries
+	// is what a slow runner stretches (a Windows timer tick is 15 ms), and the
+	// budget here is only a hang guard.
+	rel, ok := acquireLockAs(lock, "t", 30*time.Second)
 	if !ok {
 		t.Fatal("a stale lock was not recovered")
 	}
 	rel()
-	if d := time.Since(start); d > 600*time.Millisecond {
-		t.Errorf("recovery took %v", d)
+	b, err := os.ReadFile(filepath.Join(dir, ".supervisor-lock-stats"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tries := -1
+	for _, f := range strings.Fields(string(b)) {
+		if v, ok := strings.CutPrefix(f, "tries="); ok {
+			tries = atoiOrFail(t, v)
+		}
+	}
+	// Tries 0..4 miss; the check runs at the fifth miss and try 5 takes the lock.
+	// Reaped on the first miss would take it at try 1. A literal, not reapAt, so
+	// changing the constant fails here.
+	if want := 5; tries != want {
+		t.Errorf("recovered after %d tries, want %d (reaped at the fifth miss)", tries, want)
 	}
 }

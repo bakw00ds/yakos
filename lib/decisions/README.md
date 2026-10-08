@@ -39,3 +39,10 @@ YAKOS_DECISION_MOCK=lib/decisions/examples/supervisor-prefilter.mock.json \
 ```
 
 `examples/` holds fixtures only; nothing in it is a question set.
+
+## Surfaces
+
+| Surface | Caller | Mode |
+|---|---|---|
+| `supervisor-prefilter` | the supervisor-stream hook | shadow |
+| `routing-tier` | `dispatch.Account` (K-177) | shadow, opt-in via `routing_shadow: true` in the user-level `decision-policy.yml`; sends the first 2 KiB of a non-sensitive task off the host, see `docs/routing.md` |

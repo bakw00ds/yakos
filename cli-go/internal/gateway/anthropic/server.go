@@ -124,6 +124,9 @@ type Config struct {
 	// badTokenGap is the minimum time between bad_token audit lines; 0 means
 	// one second, negative turns the limit off (tests).
 	badTokenGap time.Duration
+	// badTokenNow, when set (tests), is the clock the bad_token limit reads, so a
+	// test steps time instead of racing or sleeping through the gap.
+	badTokenNow func() time.Time
 }
 
 // Server is the gateway.
