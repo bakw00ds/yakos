@@ -1,0 +1,11 @@
+{
+  "session_id": "fixture-pretooluse-write-router-policy-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Write",
+  "tool_input": {"file_path": "/home/u/.yakos-state/router-policy.yml", "content": "rules: []"},
+  "tool_use_id": "toolu_fixture_pretooluse-write-router-policy"
+}

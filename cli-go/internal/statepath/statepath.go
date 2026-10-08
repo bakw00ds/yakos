@@ -63,6 +63,15 @@ func DispatchLogIn(dir string) string { return filepath.Join(dir, dispatchLogNam
 // K-129), so letting YAKOS_DISPATCH_LOG relocate those files would let a
 // cloned repository plant its own policy or credential profile.
 //
+// An absolute $HOME is trusted as given, even when it lies inside a project
+// directory (K-176, sec-356 Q1). That is deliberate: every reader of these
+// files resolves the same $HOME, so a process whose HOME a project controls
+// already sees the project's files as the user's own, and a writer that used
+// the passwd entry instead would write a file the readers never look at. The
+// writers (yakos models and router policy) are therefore a correctness and audit
+// layer, not a boundary against code that can set the caller's environment.
+// What stops an agent from running them is the budget-guard hook.
+//
 // It returns "" when no home directory can be determined; callers must then
 // treat the feature as off rather than fall back to a temp directory.
 func TrustedDir() string {

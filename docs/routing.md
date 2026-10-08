@@ -695,7 +695,45 @@ Policy is written from a terminal:
   `YAKOS_DISPATCH_LOG` says, because a project can set that variable. The log is
   opened and locked before the file is written; if it cannot be opened the command
   exits 1 and writes nothing. The audit records the OS user, not an authenticated
-  identity.
+  identity. Since K-176 the line also carries `actor` (`agent` when the caller's
+  environment holds an agent marker, `YAKOS_AGENT_TYPE`, a Claude session id,
+  `CLAUDECODE` or `CLAUDE_PROJECT_DIR`; otherwise `operator`), and `agent` and
+  `session_id` when the environment names them. These are labels from the
+  caller's own environment, not an authenticated identity.
+- Agents may not run the writers. The `budget-guard` hook (both twins) refuses a
+  Bash tool call that runs `yakos models enable|disable|alias|pin|pricing`,
+  `yakos router policy set` or `yakos flows schedule enable|disable`, in every
+  project and without a `.yakos.yml`, with no `hook-bypass.md` scope (an agent
+  can write that file). It also refuses a Write or Edit of `router-policy.yml` or
+  `model-registry.yml` (matched on the base name, so a `..` or a symlinked parent
+  in the path does not help; the match ignores case, because a case-insensitive
+  filesystem opens `Router-Policy.yml` as the real file). A Bash command that
+  names either file, such as a redirect, append, `sed -i`, `cp`, `tee`, heredoc
+  or `ln -s`, is refused the same way as one that names the budget state files;
+  only a single-line `cat`, `head`, `tail`, `less`, `more`, `ls`, `stat`, `wc`,
+  `grep`, `jq` or `file` with no shell metacharacters passes. A commit message
+  that names these files therefore needs `git commit -F <file>`, the cost
+  already accepted for the budget files. `models list|show|probe` and
+  `router policy get|explain` pass. Matching is on the command text, with
+  backslash-newline continuations joined and then quotes and backslashes removed,
+  like the budget commands. The operator runs the writers from their own shell.
+- Limits of the hook, all pre-existing and shared with `yakos budget set`:
+  variable indirection, `$'..'` quoting, a renamed symlink or glob path to the
+  binary, `base64 | sh`, `xargs`, a function or alias wrapper and `$(...)` are out
+  of reach of text matching, so it is a speed bump, not a sandbox. A Bash command
+  that only quotes a writer phrase (an `echo`, a `grep`, a commit message) is
+  blocked as well; put such text in a file with the Write tool and refer to the
+  file. The audit identity is a label only: an operator shell started inside
+  Claude Code inherits `CLAUDECODE` and reads as `actor=agent`, and an agent that
+  evades the hook and strips the markers reads as `operator`. The hook covers
+  tool calls only; there is no REST or MCP write path for these files at this
+  version, and one added later needs its own gate.
+- Trust root: the writers target `$HOME/.yakos-state` (an absolute `$HOME`, as
+  every reader resolves it). A `$HOME` that lies inside a project directory is
+  trusted as given. This is accepted: a process whose `HOME` a project controls
+  already controls the readers too, and writers that used the passwd entry would
+  write a file the readers never read. The writers are an audit and correctness
+  layer, not a boundary against code that can set the caller's environment.
 
 ## Models & Providers tab (K-153)
 
