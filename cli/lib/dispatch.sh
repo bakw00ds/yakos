@@ -417,12 +417,11 @@ epoch_start="$(ct_iso_to_epoch "$ts_start" 2>/dev/null || date +%s)"
 # with coreutils) execs its command and cannot run a function: "failed to run
 # command 'yk_rt_dispatch'", exit 127, before any runtime starts. ct_timeout is
 # right for an external command and wrong here, so a function gets a shell-native
-# deadline instead: it runs as a background job (its own process group when stdin
-# is not a terminal), the parent polls it, and on expiry, or on INT, TERM or HUP
-# to the parent, the job and every descendant get TERM, then KILL after a grace
-# period. Same contract as timeout(1): exit 124 on expiry, else the command's
-# own status. stdin is passed through (a background job would otherwise get
-# /dev/null). Any other command still goes through ct_timeout.
+# deadline instead: it runs as a background job in its own process group, the
+# parent polls it, and on expiry, or on INT, TERM or HUP to the parent, the group
+# gets TERM, then KILL after a grace period. Same contract as timeout(1): exit 124
+# on expiry, else the command's own status. stdin is passed through, except a
+# terminal, which a background group must not read. Any other command still goes through ct_timeout.
 
 # _dispatch_descendants <pid>: pid's descendants, one per line (empty without ps).
 _dispatch_descendants() {
@@ -440,22 +439,22 @@ _dispatch_descendants() {
         }'
 }
 
-# _dispatch_kill_tree <pid> <group|walk>: TERM, a grace period, then KILL, for pid
-# and everything below it. In group mode pid leads its own process group (set -m),
-# which also holds a grandchild that double-forked and was reparented to init, so
-# the group is the kill; the ps-snapshot walk covers the tty case (no job control)
-# and a child that left the group.
+# _dispatch_kill_tree <pid>: TERM, a grace period, then KILL, for pid's process
+# group. pid leads its own group (set -m in _dispatch_run_bounded, tty or not), so
+# the group holds every descendant, a grandchild that double-forked and was
+# reparented to init included, and no ps is needed. The ps-snapshot walk only adds
+# a child that left the group (setsid); without ps the group kill still runs.
 _dispatch_kill_tree() {
-    local pid="$1" mode="$2" victims grace=0
+    local pid="$1" victims grace=0
     victims="$(_dispatch_descendants "$pid" | tr '\n' ' ')"
-    if [ "$mode" = group ]; then kill -TERM -- "-$pid" 2>/dev/null || true; fi
+    kill -TERM -- "-$pid" 2>/dev/null || true
     # shellcheck disable=SC2086  # a space-separated list of pids
     kill -TERM "$pid" $victims 2>/dev/null || true
-    while kill -0 "$pid" 2>/dev/null && [ "$grace" -lt 10 ]; do
+    while kill -0 -- "-$pid" 2>/dev/null && [ "$grace" -lt 10 ]; do
         sleep 0.2
         grace=$((grace + 1))
     done
-    if [ "$mode" = group ]; then kill -KILL -- "-$pid" 2>/dev/null || true; fi
+    kill -KILL -- "-$pid" 2>/dev/null || true
     # shellcheck disable=SC2086
     kill -KILL "$pid" $victims 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
@@ -470,27 +469,32 @@ _dispatch_run_bounded() {
     local secs_arg="$secs"
     secs="$(_dispatch_deadline_secs "$secs_arg")" \
         || ct_die "dispatch: timeout '$secs_arg' must be a whole number of seconds from 1 to 604800"
-    local pid rc=0 deadline mode=walk
-    # Own process group for the job, so a kill reaches every descendant. Not with
-    # a terminal on stdin: a background group that reads the tty is stopped
-    # (SIGTTIN), and there the walk plus the tty's own SIGINT do the work.
-    if [ ! -t 0 ]; then
-        mode=group
-        set -m
+    local pid rc=0 deadline
+    # The job gets its own process group (set -m), on a terminal too: Ctrl-C goes
+    # to the foreground group, which is dispatch itself, whose trap kills the job's
+    # group. A background group that reads the tty is stopped (SIGTTIN), so on a
+    # terminal the adapter's stdin is /dev/null; a headless run reads none.
+    set -m
+    # Fail closed: without job control the job would share dispatch's group and
+    # could not be killed whole.
+    [ -o monitor ] || { set +m; ct_die "dispatch: job control is unavailable, so the adapter cannot be bounded"; }
+    if [ -t 0 ]; then
+        "$@" </dev/null &
+    else
+        "$@" <&0 &
     fi
-    "$@" <&0 &
     pid=$!
-    if [ "$mode" = group ]; then set +m; fi
+    set +m
     # A non-interactive shell leaves a background job deaf to SIGINT, so without
     # these the adapter would outlive its caller, with no deadline and no ledger
-    # row. Kill the tree, drop the scratch files, exit 130.
-    # shellcheck disable=SC2064  # the pid and mode are fixed now, on purpose
-    trap "_dispatch_kill_tree $pid $mode; rm -f \"\${out_tmp:-}\" \"\${usage_tmp:-}\" \"\${stderr_tmp:-}\" 2>/dev/null; exit 130" INT TERM HUP
+    # row. Kill the group, drop the scratch files, exit 130.
+    # shellcheck disable=SC2064  # the pid is fixed now, on purpose
+    trap "_dispatch_kill_tree $pid; rm -f \"\${out_tmp:-}\" \"\${usage_tmp:-}\" \"\${stderr_tmp:-}\" 2>/dev/null; exit 130" INT TERM HUP
     # SECONDS counts whole seconds, so +1 keeps the deadline from firing early.
     deadline=$((SECONDS + secs + 1))
     while kill -0 "$pid" 2>/dev/null; do
         if [ "$SECONDS" -ge "$deadline" ]; then
-            _dispatch_kill_tree "$pid" "$mode"
+            _dispatch_kill_tree "$pid"
             trap - INT TERM HUP
             return 124
         fi

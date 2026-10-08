@@ -149,13 +149,15 @@ sigreset_exec() {
     fi
 }
 signal_case() {
-    local sig="$1" n="$2" s1 s2
+    local sig="$1" n="$2" noPs="${3:-}" s1 s2 spath="$WORKDIR/mkt:$WORKDIR/stubbin:$PATH"
+    [ -n "$noPs" ] && spath="$WORKDIR/nops:$spath"
     s1=$((40000 + n * 7 + $$ % 1000)); s2=$((50000 + n * 7 + $$ % 1000))
-    echo "Test 6.$n: SIG$sig to dispatch kills the adapter tree and exits 130"
+    echo "Test 6.$n: SIG$sig to dispatch kills the adapter tree and exits 130${noPs:+ (ps unavailable)}"
+    rm -rf "$WORKDIR/dtmp"; mkdir -p "$WORKDIR/dtmp"
     export MOCK_TO_PIDFILE="$WORKDIR/pids$n" MOCK_TO_SLEEP="$s1" MOCK_TO_SLEEP2="$s2"
     : > "$MOCK_TO_PIDFILE"
     set -m
-    MOCK_TO_MODE=dfork PATH="$WORKDIR/stubbin:$PATH" sigreset_exec bash "$YAKOS_LIB/dispatch.sh" test-agent task \
+    MOCK_TO_MODE=dfork PATH="$spath" TMPDIR="$WORKDIR/dtmp" sigreset_exec bash "$YAKOS_LIB/dispatch.sh" test-agent task \
         --runtime mock-to --project "$PROJ" --timeout 120 </dev/null >"$OUT" 2>"$ERR" &
     local dpid=$!
     set +m
@@ -183,15 +185,107 @@ signal_case() {
         bad "survivors:$alive"
         pkill -KILL -f "sleep ($s1|$s2)\$" 2>/dev/null || true
     fi
+    if [ -z "$(ls -A "$WORKDIR/dtmp")" ]; then
+        ok "the trap removed the out/usage/stderr scratch files"
+    else
+        bad "scratch files left behind: $(ls "$WORKDIR/dtmp" | tr '\n' ' ')"
+    fi
 }
+# macOS mktemp -t ignores TMPDIR, so a shim sends dispatch's scratch files to
+# $WORKDIR/dtmp, where the cleanup assertions can see them.
+mkdir -p "$WORKDIR/mkt"
+REAL_MKTEMP="$(command -v mktemp)"
+printf '#!/bin/sh\nexec "%s" "%s/dtmp/f.XXXXXX"\n' "$REAL_MKTEMP" "$WORKDIR" > "$WORKDIR/mkt/mktemp"
+chmod +x "$WORKDIR/mkt/mktemp"
+# ps gone: the group kill must not depend on it (and must not fail open).
+mkdir -p "$WORKDIR/nops"
+printf '#!/bin/sh\nexit 127\n' > "$WORKDIR/nops/ps"; chmod +x "$WORKDIR/nops/ps"
 signal_case INT 1
 signal_case TERM 2
 signal_case HUP 3
+signal_case INT 4 nops
+signal_case TERM 5 nops
+
+# Ctrl-C on a real terminal: dispatch runs as the foreground job of a pty session
+# (python pty.fork, no new session of our own), the Ctrl-C character is typed into
+# the master, and the double-forked grandchild must die with the rest.
+echo "Test 6.6: Ctrl-C on a pty kills the adapter tree and exits 130"
+if command -v python3 >/dev/null 2>&1; then
+    s1=$((41000 + $$ % 1000)); s2=$((51000 + $$ % 1000))
+    export MOCK_TO_PIDFILE="$WORKDIR/pids6" MOCK_TO_SLEEP="$s1" MOCK_TO_SLEEP2="$s2"
+    : > "$MOCK_TO_PIDFILE"
+    rm -rf "$WORKDIR/dtmp"; mkdir -p "$WORKDIR/dtmp"
+    cat > "$WORKDIR/pty-ctrlc.py" <<'PYEOF'
+import os, pty, sys, time
+pidfile = os.environ["MOCK_TO_PIDFILE"]
+argv = sys.argv[1:]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp(argv[0], argv)
+import select
+deadline = time.time() + 20
+seen = b""
+while time.time() < deadline:
+    r, _, _ = select.select([fd], [], [], 0.2)
+    if r:
+        try:
+            seen += os.read(fd, 4096)
+        except OSError:
+            break
+    with open(pidfile) as f:
+        if len(f.read().split()) >= 3:
+            break
+try:
+    os.write(fd, b"\x03")
+except OSError:
+    sys.stderr.write("child gone before Ctrl-C; output: " + seen.decode("utf-8", "replace")[-600:] + "\n")
+    print(998)
+    sys.exit(0)
+end = time.time() + 15
+status = None
+while time.time() < end:
+    r, _, _ = select.select([fd], [], [], 0.1)
+    if r:
+        try:
+            os.read(fd, 4096)
+        except OSError:
+            pass
+    done, st = os.waitpid(pid, os.WNOHANG)
+    if done:
+        status = st
+        break
+    time.sleep(0.1)
+if status is None:
+    os.kill(pid, 9)
+    print(999)
+elif os.WIFEXITED(status):
+    print(os.WEXITSTATUS(status))
+else:
+    print(128 + os.WTERMSIG(status))
+PYEOF
+    prc="$(MOCK_TO_MODE=dfork PATH="$WORKDIR/mkt:$WORKDIR/stubbin:$PATH" TMPDIR="$WORKDIR/dtmp" python3 -I "$WORKDIR/pty-ctrlc.py" \
+        bash "$YAKOS_LIB/dispatch.sh" test-agent task --runtime mock-to --project "$PROJ" --timeout 120 2>"$WORKDIR/pty.err" | tail -1)"
+    [ "$prc" = 130 ] && ok "dispatch exited 130 on Ctrl-C" || bad "dispatch exited ${prc:-?}, want 130: $(tail -12 "$WORKDIR/pty.err" 2>/dev/null)"
+    sleep 1
+    alive=""
+    while read -r p; do
+        [ -n "$p" ] && kill -0 "$p" 2>/dev/null && alive="$alive $p"
+    done < "$MOCK_TO_PIDFILE"
+    if [ -z "$alive" ] && ! pgrep -f "sleep ($s1|$s2)\$" >/dev/null 2>&1; then
+        ok "no adapter process survived the pty Ctrl-C (grandchild included)"
+    else
+        bad "survivors after pty Ctrl-C:$alive"
+        pkill -KILL -f "sleep ($s1|$s2)\$" 2>/dev/null || true
+    fi
+    [ -z "$(ls -A "$WORKDIR/dtmp")" ] && ok "pty: scratch files removed" || bad "pty: scratch files left: $(ls "$WORKDIR/dtmp" | tr '\n' ' ')"
+else
+    echo "  [skip] python3 not available"
+fi
 
 echo "Test 7: deadline syntax"
 deadline_ok() {   # <value> <expected-exit>: --timeout value runs the adapter
     MOCK_TO_MODE=ok run_dispatch "$1"; local rc=$?
-    [ "$rc" -eq "$2" ] && ok "--timeout $1 -> exit $rc" || bad "--timeout $1 -> exit $rc, want $2: $(tail -1 "$ERR")"
+    [ "$rc" -eq "$2" ] && ok "--timeout $1 -> exit $rc" || bad "--timeout $1 -> exit $rc, want $2: $(tail -4 "$ERR")"
 }
 deadline_refused() {   # <value>: refused before the job starts
     MOCK_TO_MODE=ok run_dispatch "$1"; local rc=$?

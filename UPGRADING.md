@@ -117,7 +117,9 @@ enforces its own deadline (K-169, below).
 - **`dispatch.sh` enforces its deadline everywhere.** The adapter runs under a
   shell-native deadline (exit 124 on expiry), so it no longer depends on a
   `timeout` binary. Ctrl-C, SIGTERM and SIGHUP to `dispatch.sh` now stop the
-  adapter and everything it started (exit 130).
+  adapter's whole process group, a double-forked grandchild included, on a
+  terminal too (exit 130). On a terminal the adapter's stdin is `/dev/null`: a
+  background group must not read the tty, and a headless run reads none.
 - **The `--timeout` syntax is stricter (a break).** Whole seconds, with the
   GNU suffixes `s`, `m`, `h` and `d` (`30`, `30s`, `2m`). Leading zeros are
   decimal (`08` is 8). These are now refused before the job starts: `0`, a
