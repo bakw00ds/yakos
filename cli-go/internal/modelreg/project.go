@@ -3,12 +3,12 @@ package modelreg
 import (
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
-	"path/filepath"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 // A project's .yakos.yml may narrow what runs on its behalf and never widen it:
@@ -45,28 +45,16 @@ func LoadProject(project string) (ProjectPolicy, []string) {
 	if project == "" {
 		return ProjectPolicy{}, nil
 	}
-	path := filepath.Join(project, ".yakos.yml")
-	fi, err := os.Stat(path)
+	// The shared bounded reader refuses a link, a FIFO, a device and a file over
+	// projfile.MaxBytes without blocking; this key keeps its own, tighter cap.
+	data, err := projfile.Read(project)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return ProjectPolicy{}, nil
 		}
-		return ProjectPolicy{}, []string{projectReadWarning(err)}
-	}
-	// A FIFO or device named .yakos.yml would block or stream forever.
-	if !fi.Mode().IsRegular() {
-		return ProjectPolicy{}, []string{".yakos.yml: not a regular file; the models: key is ignored"}
-	}
-	if fi.Size() > maxProjectBytes {
-		return ProjectPolicy{}, []string{fmt.Sprintf(".yakos.yml: larger than %d bytes; the models: key is ignored", maxProjectBytes)}
-	}
-	f, err := os.Open(path) //nolint:gosec // project config path, stat-checked above
-	if err != nil {
-		return ProjectPolicy{}, []string{projectReadWarning(err)}
-	}
-	defer func() { _ = f.Close() }()
-	data, err := io.ReadAll(io.LimitReader(f, maxProjectBytes+1))
-	if err != nil {
+		if projfile.IsRefused(err) && errors.Unwrap(err) == nil {
+			return ProjectPolicy{}, []string{".yakos.yml: " + err.Error() + "; the models: key is ignored"}
+		}
 		return ProjectPolicy{}, []string{projectReadWarning(err)}
 	}
 	if len(data) > maxProjectBytes {

@@ -193,6 +193,28 @@ never holds a login: ADR-0010. Detailed entries follow.
   and `/api/router/policy`. Browser writes are held for K-153b; see
   `docs/routing.md`.
 
+### Fixed
+
+- **A project `.yakos.yml` is read through one bounded reader (K-164).** A
+  symlinked `.yakos.yml`, a FIFO, a device or a file over 1 MiB used to hang
+  or exhaust memory in every reader (a link to `/dev/zero` filled gigabytes,
+  a FIFO blocked `doctor`, the budget commands and the hooks that run on every
+  tool call). Behavior change: such a file is now refused with a warning that
+  names no path, and a refused file counts as absent everywhere. The
+  supervisor then keeps the agent name `supervisor`, its built-in budget and
+  its model ceiling, in the budget package, in both `supervisor-stream` hook
+  twins and in `yakos doctor`, so a renamed supervisor can never run
+  unbudgeted. `yakos doctor` prints a fixed line when the file was refused,
+  `doctor --production` no longer opens FIFOs and links while scanning for
+  secrets, and the Go hooks, `yakos decide`, `yakos supervise`, `yakos
+  standards`, `yakos refresh` and the router read the file the same way.
+  A `.yakos.yml` that is a symlink must be replaced with a regular file.
+- **Gateway aliases are off when there is no trusted state directory (K-165).**
+  `yakos start` with an empty `HOME` used to read `gateway_classes` from
+  `/tmp/.yakos-state`, a path any local user can plant. It now resolves the
+  state directory through the same trusted lookup as dispatch, and with none the
+  per-class aliases are not exported.
+
 ## [0.62.0.0] — 2026-10-06
 
 Minor release: the multi-harness routing wave. Go dispatch honors agent

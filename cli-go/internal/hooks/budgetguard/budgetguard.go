@@ -35,6 +35,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 const hookName = "budget-guard"
@@ -126,7 +127,11 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	yakosYML := filepath.Join(projectDir, ".yakos.yml")
 	cfg, err := loadBudgetConfig(yakosYML)
 	if err != nil || cfg == nil {
-		// No config or parse error → no enforcement.
+		// No config or parse error → no enforcement. A refused file (link, not a
+		// regular file, over the cap) is treated as absent, and says so.
+		if projfile.IsRefused(err) {
+			out.Stderr = fmt.Appendf(out.Stderr, "%s: %s\n", hookName, projfile.Notice(err))
+		}
 		return out, nil
 	}
 	if cfg.Enabled != nil && !*cfg.Enabled {
@@ -362,7 +367,7 @@ type yakosYMLBudget struct {
 // loadBudgetConfig reads and parses the budget section from .yakos.yml.
 // Returns nil (no error) when the file is absent or has no budget section.
 func loadBudgetConfig(path string) (*BudgetConfig, error) {
-	data, err := os.ReadFile(path) //nolint:gosec
+	data, err := projfile.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil

@@ -30,6 +30,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 	"github.com/bakw00ds/yakos/internal/hooks/yamlblock"
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 const hookName = "plan-quality-gate"
@@ -184,7 +185,7 @@ func orDefault(v, def string) string {
 // The comparison is the scorer's own: the value after comment and quote
 // stripping, exactly "false".
 func isGateDisabledByYAML(projectDir string) bool {
-	data, err := os.ReadFile(filepath.Join(projectDir, ".yakos.yml")) //nolint:gosec
+	data, err := projfile.Read(projectDir)
 	if err != nil {
 		return false
 	}
