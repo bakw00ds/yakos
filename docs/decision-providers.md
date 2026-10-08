@@ -363,3 +363,10 @@ re-evaluated before it is applied to another.
 The client is written against the published API at
 https://docs.typesafe.ai/api and tested against local servers and the mock
 provider. CI has no key; live calls happen only on an operator machine.
+
+### Routing surface: planned, shadow-only
+
+The tier-selection surface (k111 design section 2.5) is decided as shadow-only and
+is not built. See [routing.md](routing.md#jev-and-routing-shadow-only-not-built):
+the suggestion would be recorded as `tier_suggested_by_jev` on the ledger row and
+would never change a route.

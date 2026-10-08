@@ -148,3 +148,17 @@ itself on loopback:
 Function calling, images and audio, embeddings, `n > 1`, per-request sampling, a
 `GET /v1/models/<id>` route, and a non-loopback listener (the mTLS path of
 ADR-0005 would carry that).
+
+## Related
+
+- [routing.md](routing.md): how the router picks the runtime and model behind
+  `yakos/auto` and `yakos/agent/<id>`, and the sensitive class.
+- [ADR-0011](adr/ADR-0011.md): the Anthropic pass-through gateway on 7897, a
+  different listener with a different token and a different trust boundary. This
+  endpoint (7898) is OpenAI-shaped and drives the yakOS harnesses; it never talks
+  to a vendor API itself and never sees a subscription login.
+- [ADR-0010](adr/ADR-0010.md): why requests are served by spawning the vendor
+  binaries.
+- Local model servers are not a provider yet; the documented slot is in
+  [routing.md](routing.md#local-providers-a-documented-slot). An external client
+  that wants a local model today uses that server directly.

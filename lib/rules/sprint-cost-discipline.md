@@ -1,6 +1,6 @@
 ---
 name: sprint-cost-discipline
-description: Bounds the cost of a multi-PR sprint — PR size cap, one non-forking reviewer per PR, a narrow fresh agent per round, narrow re-reviews, ceiling preflight, per-agent scratch, a token budget per PR, and replace-don't-wait liveness. Always-loaded.
+description: Bounds the cost of a multi-PR sprint — PR size cap, one non-forking reviewer per PR, a narrow fresh agent per round, narrow re-reviews, ceiling preflight, per-agent scratch, a token budget per PR, replace-don't-wait liveness, and merge gating (post-merge steps on merge success, mergeable re-read, stacked-PR base deletion). Always-loaded.
 references:
   - rule:lead-dispatch-discipline
   - rule:verification-discipline
@@ -59,8 +59,32 @@ tokens). Model choice was not a driver.
   PR; the lead stops the round at 2× and surfaces it to the operator
   rather than letting a round run open-ended.
 - **Replace, don't wait.** An agent with no message or file activity for
-  30 minutes is checked for liveness; if its last report is in the
-  transcript, use it rather than re-running the round.
+  30 minutes is checked for liveness (process list, worktree mtime, the
+  transcript); if its last report is already in the transcript, use it
+  rather than re-running the round. If it is alive but silent, or
+  nothing shows, stop it and dispatch a fresh narrow agent from the
+  pushed sha: do not wait on it past one more check. Message delivery
+  can lag by hours, so first look for a report that has arrived
+  (2026-10-06: two agents were replaced and their late reports then
+  showed they had finished).
+- **Gate every post-merge step on the merge succeeding.** `gh pr merge`
+  can refuse (for example CONFLICTING after a sibling PR merged). Chain
+  the worktree and branch removal, the kanban move and the decisions
+  entry with `&&` after it, and confirm the PR state is `MERGED` and
+  `main` moved before recording anything (2026-10-07: an unconditional
+  `;` chain removed a live worktree and logged a merge that never
+  happened, #338).
+- **Re-read `mergeable` right before merging.** A green check and a SHIP
+  verdict were true of an earlier base. Read `mergeable` and `headRefOid`
+  again immediately before `gh pr merge`; CONFLICTING means a merge
+  round, not a retry. A conflicting PR also gets no pull-request CI.
+- **Stacked PRs: open the follow-on against `main` after the parent
+  merges.** With squash merges, deleting the parent's branch closes a
+  PR whose base it was, and a closed PR cannot be re-targeted (2026-10-08:
+  #357 closed when `--delete-branch` removed its base after #356, and
+  #358 replaced it). Either open the follow-on against `main` once the
+  parent has merged, or keep the parent's branch until the follow-on has
+  been rebased onto `main` and re-targeted.
 
 ## References
 

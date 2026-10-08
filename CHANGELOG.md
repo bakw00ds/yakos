@@ -9,11 +9,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+The multi-harness router program (K-139 to K-155) in one list; the behavior
+changes are marked in UPGRADING.md. Why yakOS drives each vendor's binary and
+never holds a login: ADR-0010. Detailed entries follow.
+
+- Routing: rules, pins, fallbacks, cooldown, sensitive class and model ceilings
+  at the one dispatch chokepoint (K-139, K-139b, K-139c, K-140), per-class
+  Claude aliases (K-141), `runtime: auto` in Flows (K-142), `yakos router explain`
+  and `dispatch --explain`. Reference: `docs/routing.md`.
+- Harness parity: full codex and agy stream parsers (K-144), hooks as a service
+  (K-145), detect-and-report scans (K-146), resumed codex and agy panes (K-147),
+  a knowledge pack for non-claude panes (K-149). Reference:
+  `docs/runtime-matrix.md`.
+- Surfaces: routed console Chat (K-148), the OpenAI-compatible endpoint (K-150),
+  the Anthropic gateway (K-151), Flows triggers (K-152), the Models & Providers
+  tab and policy writers (K-153), the REPL (K-154).
+
+- **docs: ADR-0010, the runtime-matrix rewrite and the routing map (K-155).**
+  ADR-0010 records harness-native routing, the vendor-policy facts it rests on
+  with dates, and the one assumption no source settles (spawning the unmodified
+  `claude` binary under the operator's own login). `docs/runtime-matrix.md` leads
+  with a parity table (routing, hooks, sandbox, resume, parsers, scans,
+  accounting, chat pane, `yakos start`, sign-in) and no longer describes the
+  codex and agy chat streams as buffered. `docs/routing.md` gains a map and the
+  decision order, and documents the local-provider slot (`kind: local`, `api`
+  `anthropic-messages` or `openai-responses`) and the shadow-only Jev routing
+  surface as types and decisions only: neither is built.
+- **docs(rules): `sprint-cost-discipline` gains the merge-gating lessons.**
+  Post-merge steps run only after `gh pr merge` succeeded; `mergeable` is re-read
+  right before merging; a stacked PR's base branch is not deleted under it with
+  squash merges; and "replace, don't wait" now says what to check before replacing.
+- **Dispatch and chat (K-144).** Full `codex exec --json` and agy `stream-json`
+  parsers replace the buffered path: text, thinking, tool calls and results, usage
+  and the native session id reach the console, the REPL and the scans. A version
+  of codex or agy that differs from the recorded one is flagged by
+  `yakos doctor --policy`.
+- **Hooks for codex and agy (K-145).** `YAKOS_IMPL=go yakos hooks install --harness codex|agy`
+  writes a hooks file that runs the Go `budget-guard`, `path-allowlist`,
+  `secret-scan` and `supervisor-stream` through `yakos hook run --shape`. The
+  command path is absolute and the trust flag is added only for a file whose bytes
+  equal what this binary renders. Optional loopback endpoint `hooks_endpoint:
+  true`. Details and limits: `docs/runtime-matrix.md`.
+- **Scans over codex and agy events (K-146).** Every normalized tool result and
+  text event is scanned for injection and risk patterns; findings are written as
+  detect-and-report records (they never gate the lead), with optional
+  `kill_on_critical` in the trusted user policy.
+- **Resume for codex and agy panes (K-147).** An interactive codex or agy pane
+  keeps its context across turns (`codex exec resume`, agy `--conversation`),
+  also across a console restart.
+- **Knowledge pack (K-149).** The console composes the always-loaded rules and
+  the agent body once per conversation for codex and agy panes, appends a
+  `/skill` to the turn tail, and shows it in the `/context` drawer.
+- **Console chat routing (K-148).** Pane routing mode, `@claude|@codex|@agy`
+  overrides, a route chip, and a scanned handoff digest when a conversation moves
+  to another runtime. See `docs/routing.md`.
+- **Sensitive routing class (K-140).** A request holding a secret-shaped string or
+  a never-path goes only to claude (or a local runtime) and is refused if that is
+  unavailable. Not an egress guarantee.
+- **Router (K-139, K-139b, K-139c).** Rules R1 to R6 in the trusted
+  `router-policy.yml`, a cooldown, sticky conversations, `yakos router explain`
+  and `yakos dispatch --explain`, and a golden-file CI step for the explain output.
+- **Claude Code request-class aliases (K-141).** `gateway_classes` in the trusted
+  policy moves sub-agent (and other) classes to a chosen Claude model through the
+  `ANTHROPIC_DEFAULT_*_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL` variables, applied
+  once per process so the prompt cache stays stable.
+- **Flows `runtime: auto` and `model: auto` (K-142).** The router chooses per
+  node; the decision is recorded in `run.json`.
+- **Flows triggers (K-152).** `cron` and `webhook` triggers fire only when
+  enabled in `~/.yakos-state/schedules/<slug>-<hash>.yaml`, pinned to the
+  workflow file's sha256. See `docs/flows.md`.
+- **OpenAI-compatible endpoint (K-150).** `YAKOS_IMPL=go yakos serve --openai-endpoint` (or
+  `openai_endpoint: true` in the trusted policy) serves `/v1/models` and
+  `/v1/chat/completions` on `127.0.0.1:7898`, authenticated by the REST write
+  token; models are `yakos/auto`, `yakos/agent/<id>` and `<runtime>/<model>`.
+  Tools and function calling are refused. See
+  `docs/openai-compatible-endpoint.md`.
+
 - **Anthropic pass-through gateway on 127.0.0.1:7897 (K-151, ADR-0011).** Off
-  by default. `yakos serve --gateway` (or `anthropic_gateway: true` in the
+  by default. `YAKOS_IMPL=go yakos serve --gateway` (or `anthropic_gateway: true` in the
   trusted `~/.yakos-state/router-policy.yml`) serves `/v1/messages`,
   `/v1/messages/count_tokens` and `/v1/models` and forwards them to
-  `api.anthropic.com` only, streaming SSE as it arrives. `yakos start --routed`
+  `api.anthropic.com` only, streaming SSE as it arrives. `YAKOS_IMPL=go yakos start --routed`
   (claude only) launches Claude Code with `ANTHROPIC_BASE_URL`,
   `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` and `ANTHROPIC_AUTH_TOKEN` set and
   `ANTHROPIC_API_KEY` removed from the child. Every gateway request must carry

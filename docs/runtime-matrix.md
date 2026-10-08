@@ -5,10 +5,38 @@ sessions on multiple agentic CLIs. This document tracks which features
 each adapter supports, what gets soft-degraded, and the operator-facing
 trade-offs.
 
-Last updated: 2026-10-05 (K-133/K-134: Go adapters for codex 0.154.0 and
-agy 1.2.x; codex runs in its OS sandbox and agy gets `--sandbox`, which K-158
-measured not to be containment; the capability matrix drops gemini, whose shim
-was removed on 2026-09-01 in favor of agy).
+Last updated: 2026-10-08 (K-155, end of the multi-harness router program).
+The parity table below is built from the merged state: routing (K-139 to K-142),
+stream parsers (K-144), hooks as a service (K-145), event scans (K-146), resume
+(K-147), knowledge pack (K-149), the gateway and endpoint (K-150, K-151), the
+REPL (K-154). Earlier history: K-133/K-134 added the Go adapters for codex
+0.154.0 and agy 1.2.x (codex runs in its OS sandbox; agy gets `--sandbox`, which
+K-158 measured not to be containment). The gemini shim was removed on 2026-09-01
+in favor of agy. Why yakOS drives the vendor binaries and never holds a login:
+[ADR-0010](adr/ADR-0010.md).
+
+## Parity at a glance
+
+One row per thing an operator asks about. A cell says what is true on the Go path
+(`yakos dispatch` since K-143, the console, the REPL, MCP, JSON-RPC, REST, gRPC
+and Flows). Detail for each row is in the section named in the last column.
+
+| Row | claude | codex (0.154.0) | agy (1.2.x, parser recorded on 1.3.1) | Detail |
+|---|---|---|---|---|
+| Routing | rules, pins, fallbacks, sensitive class, ceilings; per-class Claude aliases and the gateway (Claude to Claude only) | rules, pins, fallbacks, ceilings after the overlay maps aliases; not a sensitive-class destination (claude or local only) | the same; not a sensitive-class destination (claude or local only) | [routing.md](routing.md) |
+| Model flag | `--model <tier>` | `-m <id>`; no aliases by default (harness default) | `--model <id>` (effort inside the id) | per-runtime sections |
+| Hooks | 7 events, native | PreToolUse and PostToolUse after `yakos hooks install --harness codex` (needs `YAKOS_IMPL=go`); user-level file in the yakOS `CODEX_HOME`; none without it | the same after `--harness agy`, per workspace; none without it | [Hooks as a service](#hooks-as-a-service-for-codex-and-agy-k-145) |
+| Sandbox | permission mode | OS sandbox, `workspace-write`, network off | `--sandbox`: writes blocked by default; reads, network and BypassSandbox escalation open; not a containment boundary | [Sandbox and approvals](#sandbox-and-approvals-k-133) |
+| Resume | `--resume <id>` | `codex exec resume <thread_id>` | `--conversation <id>` | [Codex and agy panes](#codex-and-agy-panes-k-147) |
+| Stream parser | stream-json, token deltas, tool and thinking cards | `exec --json` JSONL; whole `agent_message` items, tool and reasoning cards | stream-json NDJSON; `text_delta` fragments, tool cards | [Usage fields](#usage-fields-by-harness) |
+| Parser version check | n/a | recorded on 0.154.0; `yakos doctor --policy` warns on skew | recorded on 1.3.1; same | `doctor --policy` |
+| Scans | `output-injection-scan` hook, in-session | detect-and-report over normalized events; optional `kill_on_critical` | the same | [Output scan](#output-scan-over-normalized-events-k-146) |
+| Knowledge (rules, skills) | native (`lib/rules`, `.claude`) | composed once per conversation into `developer_instructions`; `/skill` appended to the turn | prefix of the first turn of a native session | [knowledge-pack.md](knowledge-pack.md) |
+| Accounting | tokens plus the harness's `total_cost_usd` as `api_equivalent_usd` (subscription) or spend (API key) | tokens only (`turn.completed`); no dollars | tokens only; resumed turns counted from their own steps | [Usage fields](#usage-fields-by-harness) |
+| Chat pane | tokens stream; interactive CLI engine (or SDK engine with an API key) | one-shot, or interactive through the resume engine | the same as codex | [Console Chat](#console-chat-streaming-behavior-v04000) |
+| `yakos start` | REPL by default; `--native claude` for the TUI; `--routed` for the gateway (needs `YAKOS_IMPL=go`) | REPL; `--native codex` | REPL; `--native agy` | [repl.md](repl.md), [ADR-0012](adr/ADR-0012.md) |
+| Sign-in | its own `/login` or an API key | `yakos auth login codex` (yakOS-owned `CODEX_HOME`) or `OPENAI_API_KEY` | one interactive `agy` sign-in, or `ANTIGRAVITY_API_KEY`; `yakos doctor --policy` hints when missing | [Auth model](#auth-model) |
+| Local providers | not supported by Anthropic against non-Claude models | `--oss --local-provider` slot: documented, not built | none | [routing.md](routing.md#local-providers-a-documented-slot) |
 
 ## Capability matrix
 
@@ -17,7 +45,7 @@ was removed on 2026-09-01 in favor of agy).
 | Adapter shipping | v0.3 (always) | v0.4.0 | with the gemini shim's replacement (see CHANGELOG) |
 | `inline-agents` (CLI-flag JSON injection) | ✅ `--agents` | ❌ file-based only | ❌ file-based only |
 | `path-allowlist-hard` | ✅ `--add-dir` | ✅ the sandbox workspace is the working directory | ⚠ `--add-dir` sets the workspace, but reads and network are not restricted (K-158) |
-| `hooks` | ✅ 7 events | ⚠ PreToolUse/PostToolUse via `yakos hooks install --harness codex` (4 Go hooks, see below); no gate until installed | ⚠ PreToolUse/PostToolUse via `yakos hooks install --harness agy --dir <workspace>` (4 Go hooks); no gate until installed |
+| `hooks` | ✅ 7 events | ⚠ PreToolUse/PostToolUse via `YAKOS_IMPL=go yakos hooks install --harness codex` (4 Go hooks, see below); no gate until installed | ⚠ PreToolUse/PostToolUse via `YAKOS_IMPL=go yakos hooks install --harness agy --dir <workspace>` (4 Go hooks); no gate until installed |
 | `mcp-flag` (CLI flag) | ✅ `--mcp-config` | ❌ via `config.toml` | ❌ via `.agents/mcp_config.json` |
 | `system-prompt-flag` | ✅ `--append-system-prompt` | ❌ no flag; `-c developer_instructions="..."` works (verified) | ❌ no flag; persona prepended to the prompt |
 | Model flag | ✅ `--model <tier>` | ✅ `-m <id>` | ✅ `--model <id>` |
@@ -27,7 +55,7 @@ was removed on 2026-09-01 in favor of agy).
 | Machine-readable stream | ✅ `--output-format stream-json` | ✅ `exec --json` (JSONL) | ✅ `--output-format stream-json` (NDJSON, `event` key; recorded) |
 | Headless resume | ✅ `--resume <id>` | ✅ `codex exec resume <thread_id>` | ✅ `--conversation <id>` |
 | `yakos dispatch` implementation (K-143) | ✅ Go by default | ✅ Go by default | ✅ Go by default |
-| Sandbox flag (K-133) | n/a (permission mode) | ✅ `--sandbox workspace-write`: an OS sandbox, network off by default | ⚠ `--sandbox` blocks writes outside the workspace by default only; not a containment boundary (K-158, below) |
+| Sandbox flag (K-133) | n/a (permission mode) | ✅ `--sandbox workspace-write`: an OS sandbox, network off by default | ⚠ `--sandbox`: writes blocked by default; reads, network and BypassSandbox escalation open; not a containment boundary (K-158, below) |
 | Agent file yakOS writes | (none — JSON injection) | `.codex/agents/yakos-<id>.toml` | `.agents/skills/yakos-<id>/SKILL.md` |
 | Output scan (K-146) | ✅ the `output-injection-scan` PostToolUse hook, in-session; the dispatch stream is not re-scanned | ⚠ detect-and-report: every normalized `tool_result` and text event is scanned in dispatch | ⚠ detect-and-report: every normalized `tool_result` and text event is scanned in dispatch |
 
@@ -53,7 +81,7 @@ non-sensitive work or run inside an external OS sandbox (K-159).
 | | default | flags | opt-out |
 |---|---|---|---|
 | codex | sandboxed, cannot prompt | `exec --sandbox workspace-write -c approval_policy="never"`; `exec resume` takes `-c sandbox_mode="workspace-write"` (it has no `--sandbox`) | `--dangerously-bypass-approvals-and-sandbox` |
-| agy | `--sandbox` passed; blocks writes outside the workspace by default, not a containment boundary (K-158) | `--sandbox --dangerously-skip-permissions` | `--dangerously-skip-permissions` only |
+| agy | `--sandbox` passed; writes blocked by default; reads, network and BypassSandbox escalation open; not a containment boundary (K-158) | `--sandbox --dangerously-skip-permissions` | `--dangerously-skip-permissions` only |
 
 Opt-out is one file, read only from `~/.yakos-state/router-policy.yml`:
 
@@ -109,7 +137,7 @@ changes nothing else.
 ### Hooks as a service for codex and agy (K-145)
 
 Without an installed hooks file neither harness has a PreToolUse gate, and both
-stay sandboxed as above. `yakos hooks install --harness codex|agy` writes one
+stay sandboxed as above. `YAKOS_IMPL=go yakos hooks install --harness codex|agy` (the Go path only) writes one
 that runs yakOS's Go hooks (`budget-guard`, `path-allowlist`, `secret-scan` on
 PreToolUse; `supervisor-stream` on PostToolUse) through `yakos hook run --shape
 codex|agy <name>`. The command text is fixed (no run id, no temp path) and the
@@ -263,8 +291,10 @@ persona as it is, so its limit is the raw size.
   and `ultra` for three).
 - Stream: `exec --json` emits JSONL (`thread.started`, `turn.started`,
   `item.*`, `turn.completed` with `usage`, `turn.failed`). Recordings and the
-  commands are in `tests/fixtures/runtime-streams/`. Until the codex stream parser
-  lands (K-135) the Chat pane shows the raw lines as one block.
+  commands are in `tests/fixtures/runtime-streams/`. `codexLineParser` (K-135,
+  K-144) turns them into text, tool, reasoning and usage events for the console,
+  the REPL and the scans; a codex that prints something the parser does not
+  recognise is shown as plain text, never dropped.
 - Auth: `OPENAI_API_KEY`, or the login in the `CODEX_HOME` dispatch uses. See
   Auth model.
 
@@ -514,7 +544,7 @@ behave differently per runtime:
 
 - claude: hook stdin/stdout shape documented; yakOS's reference
   hooks under `lib/hooks/` are written against this contract.
-- codex, agy: no PreToolUse gate until `yakos hooks install --harness
+- codex, agy: no PreToolUse gate until `YAKOS_IMPL=go yakos hooks install --harness
   codex|agy` has written the hooks file (see "Hooks as a service" above);
   both harnesses stay sandboxed either way.
 
@@ -556,9 +586,9 @@ The profile location is always `$HOME/.yakos-state/codex-home`, not
 `YAKOS_DISPATCH_LOG`'s directory: a `CODEX_HOME` carries a `config.toml` (notify
 commands, MCP servers), so a project must not be able to point codex at one.
 
-## Mixed-runtime dispatch (v0.4.2, planned)
+## Mixed-runtime dispatch
 
-In v0.4.2, agent frontmatter gains a `runtime:` field:
+Agent frontmatter has a `runtime:` field (since v0.4.2):
 
 ```yaml
 ---
@@ -568,9 +598,9 @@ model: o4-mini
 ---
 ```
 
-`yakos dispatch <agent-name> "<task>"` reads the field, spawns the
-right CLI in non-interactive mode, captures the output, and returns
-to the caller. The lead (in any runtime) calls this via Bash. This
+`yakos dispatch <agent-name> "<task>"` reads the field, asks the router
+([routing.md](routing.md)) for the runtime and model, spawns the right CLI in
+non-interactive mode, captures the output, and returns to the caller. The lead (in any runtime) calls this via Bash. This
 lets a project mix runtimes per-agent — e.g., orchestration on
 claude, code-review on codex, doc-writing on agy.
 
@@ -710,17 +740,20 @@ explicit opt-in (agents cap at `opus` by default). Override per-dispatch with
 ## Console Chat streaming behavior (v0.40.0.0+)
 
 The unified console Chat tab uses an unframed execution mode (agent definition
-as system prompt, direct `-p`, `--include-partial-messages`):
+as system prompt, direct `-p`, `--include-partial-messages`). Every runtime goes
+through its `LineParser` (K-144), so the pane receives the same event kinds:
+token text, thinking, tool use and tool result, then a closing summary.
 
 | Runtime | Streaming behavior |
 |---|---|
-| `claude` | Token-by-token streaming via SSE. First token latency governed by `--include-partial-messages` mode. |
-| `codex` | Buffered — the full response arrives as one chunk + summary. The chunk is codex's raw `--json` lines until the stream parser lands (K-135). |
-| `agy` | Buffered — the full response arrives as one chunk + summary. The chunk is agy's raw `stream-json` lines until the stream parser lands (K-135). |
+| `claude` | Token by token over SSE. |
+| `codex` | Event by event: a message arrives whole when codex finishes the item; tool and reasoning cards stream as they happen. Not token by token. |
+| `agy` | Text fragments (`text_delta`) as agy sends them; tool cards as they happen. |
 
-Partial streaming is a claude-specific capability. The Chat UI labels buffered
-runtimes clearly so operators know to expect a single response rather than a
-live stream.
+The route chip, handoff banner and `@runtime` overrides are described in
+[routing.md](routing.md#console-chat-routing-k-148). A runtime whose stream the
+parser does not recognise falls back to plain text, shown as one block. A pane's
+tool and thinking cards are live only; the transcript keeps the text.
 
 ## Interactive chat engines (K-137)
 
@@ -772,7 +805,9 @@ against a redacted state and returns probabilities. yakOS integrates it as a
 [ADR-0009](adr/ADR-0009.md)), so it can never be selected with `--runtime`,
 named in `runtime:` or `runtime-fallback:` frontmatter, or offered in the
 console chat runtime list. `yakos validate` and `yakos agent lint` reject
-`runtime: jev` with a hard error.
+`runtime: jev` with a hard error. A shadow-only `routing` question (a tier
+suggestion recorded on the ledger, never acted on) is decided but not built; see
+[routing.md](routing.md#jev-and-routing-shadow-only-not-built).
 
 ## Adding a new runtime
 

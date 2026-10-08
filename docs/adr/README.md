@@ -14,5 +14,6 @@ the Michael Nygard format (Context / Decision / Consequences).
 | [ADR-0007](ADR-0007.md) | Terminal REPL as a thin client of the console interactive engine (shared bidirectional session) | Superseded by ADR-0008 |
 | [ADR-0008](ADR-0008.md) | Native `claude` TUI shared between terminal and web via daemon-owned PTY | Accepted — amended 2026-06-18: Phase 1 topology changed to login-shell-owned PTY (T2-relay); daemon is a relay, not the PTY owner; Phase 2 bidirectional input shipped with independent security review completed |
 | [ADR-0009](ADR-0009.md) | Typed decision providers (TypeSafe Jev) as a hook-side abstraction, not a runtime | Proposed |
+| [ADR-0010](ADR-0010.md) | Harness-native routing: yakOS spawns the official binaries and never holds a vendor login | Accepted |
 | [ADR-0011](ADR-0011.md) | The Anthropic pass-through gateway (127.0.0.1:7897) and its trust boundary | Accepted |
 | [ADR-0012](ADR-0012.md) | `yakos start` opens a yakOS REPL; the vendor TUI becomes `--native` | Accepted (partially supersedes ADR-0008) |
