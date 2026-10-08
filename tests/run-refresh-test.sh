@@ -833,6 +833,30 @@ case "$out20" in *"removed stale symlink leak.md"*) : ;; *) ok20=0; fail "no war
 [ "$ok20" = 1 ] && ok "stale link to a refused agent removed; others untouched"
 
 # ===========================================================================
+# Test 21: a link whose target ends in a newline. $(readlink) drops the newline, so
+# the target was judged by a decoy file with the name minus it. nl.md -> "big<NL>"
+# (5 MiB) must be refused; the decoy "big" is small. Fixture built by perl, not by
+# a literal newline in the script text.
+# ===========================================================================
+echo ""
+echo "Test 21: refresh refuses a link whose target name ends in a newline"
+T21="$WORKDIR/t21"
+mkdir -p "$T21/root/lib/hooks" "$T21/root/lib/settings" "$T21/root/lib/agents" "$T21/project/.claude" "$T21/home"
+echo '{"hooks": {}}' > "$T21/root/lib/settings/settings.template.json"
+echo "# good" > "$T21/root/lib/agents/good.md"
+echo "decoy" > "$T21/root/lib/agents/big"
+(cd "$T21/root/lib/agents" && perl -e 'open(F, ">", "big\n") or die; print F "x" x (5*1048576); close F; symlink("big\n", "nl.md") or die;')
+out21="$(HOME="$T21/home" YAKOS_ROOT="$T21/root" YAKOS_LIB="$YAKOS_LIB" \
+    bash "$REFRESH_SH" --project "$T21/project" 2>&1 </dev/null || true)"
+ok21=1
+[ -L "$T21/home/.claude/agents/good.md" ] || { ok21=0; fail "good.md was not linked"; }
+if [ -e "$T21/home/.claude/agents/nl.md" ] || [ -L "$T21/home/.claude/agents/nl.md" ]; then
+    ok21=0; fail "nl.md (target ends in a newline, 5 MiB) was linked"
+fi
+case "$out21" in *"nl.md not linked"*) : ;; *) ok21=0; fail "no warning for nl.md" ;; esac
+[ "$ok21" = 1 ] && ok "a link to a name ending in a newline is judged by the real target"
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""

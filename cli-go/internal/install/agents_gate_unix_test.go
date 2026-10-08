@@ -56,3 +56,20 @@ func TestInstall_DoesNotLinkAgentsComposeRefuses(t *testing.T) {
 		}
 	}
 }
+
+func TestInstall_SkipLineCannotCarryANewline(t *testing.T) {
+	root := newFakeYakosRoot(t)
+	name := "a" + string(rune(10)) + "forged: line.md"
+	if err := os.WriteFile(filepath.Join(root, "lib", "agents", name), make([]byte, agentscompose.MaxAgentFileBytes+1), 0o644); err != nil {
+		t.Skipf("no newline in file names here: %v", err)
+	}
+	cfg := baseConfig(t, root)
+	if _, err := Run(cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range strings.Split(cfg.ErrWriter.(*bytes.Buffer).String(), "\n") {
+		if strings.HasPrefix(l, "forged:") {
+			t.Errorf("a file name forged a log line: %q", l)
+		}
+	}
+}

@@ -135,3 +135,32 @@ func TestSyncAgents_RemovesAStaleLinkToARefusedSourceOnly(t *testing.T) {
 		t.Errorf("a real file was touched: %q, %v", b, err)
 	}
 }
+
+// A link whose target name ends in a newline is judged by the real target, as the
+// bash twin now does (it once judged it by a decoy named without the newline).
+func TestSyncAgents_LinkToANameEndingInANewlineIsJudgedByTheRealTarget(t *testing.T) {
+	root, home := t.TempDir(), t.TempDir()
+	src := filepath.Join(root, "lib", "agents")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "big"), []byte("decoy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "big"+string(rune(10))), make([]byte, agentscompose.MaxAgentFileBytes+1), 0o644); err != nil {
+		t.Skipf("no newline in file names here: %v", err)
+	}
+	if err := os.Symlink("big"+string(rune(10)), filepath.Join(src, "nl.md")); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	var out bytes.Buffer
+	if _, err := syncAgents(root, home, false, &out); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(home, ".claude", "agents", "nl.md")); err == nil {
+		t.Errorf("a link to an oversize file was linked")
+	}
+	if !strings.Contains(out.String(), "nl.md not linked") {
+		t.Errorf("no warning: %q", out.String())
+	}
+}

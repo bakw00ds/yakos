@@ -109,7 +109,7 @@ err()   { printf '  [err]  %s\n' "$*"; errors=$((errors + 1)); }
 # agentscompose.InspectAgentFile; the doctor counts below mean "files Compose
 # would read", as the Go doctor's do. Nothing is opened, so a FIFO cannot block.
 _doctor_agent_ok() {
-    local f="$1" hops=0 target rdir root rroot size inside=0
+    local f="$1" orig="$1" hops=0 target rdir root rroot size inside=0
     shift
     if [ -L "$f" ]; then
         while [ -L "$f" ]; do
@@ -121,6 +121,10 @@ _doctor_agent_ok() {
                 *) f="$(dirname -- "$f")/$target" ;;
             esac
         done
+        # $(readlink) drops a trailing newline of the target, so a link to "p<NL>"
+        # would be judged by a decoy "p". The resolved path must be the very file the
+        # link leads to.
+        [ "$f" -ef "$orig" ] || return 1
         [ -f "$f" ] || return 1
         rdir="$(CDPATH='' cd -P -- "$(dirname -- "$f")" 2>/dev/null && pwd -P)" || return 1
         for root in "$@"; do

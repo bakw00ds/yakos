@@ -599,7 +599,7 @@ _resolve_agents_source_root() {
 # one inside AGENTS_DIR. ~/.claude/agents is global, so nothing else is linked
 # into it (mirrors InspectAgentFile; internal/refresh/symlinks.go).
 _agent_src_ok() {
-    local f="$1" dir="$2" hops=0 target base rdir realdir size
+    local f="$1" orig="$1" dir="$2" hops=0 target base rdir realdir size
     realdir="$(CDPATH='' cd -P -- "$dir" 2>/dev/null && pwd -P)" || return 1
     if [ -L "$f" ]; then
         # Resolve by hand: readlink -f is not on stock macOS.
@@ -612,6 +612,10 @@ _agent_src_ok() {
                 *) f="$(dirname -- "$f")/$target" ;;
             esac
         done
+        # $(readlink) drops a trailing newline of the target, so a link to "p<NL>"
+        # would be judged by a decoy "p". The resolved path must be the very file the
+        # link leads to.
+        [ "$f" -ef "$orig" ] || return 1
         [ -f "$f" ] || return 1
         base="$(basename -- "$f")"
         rdir="$(CDPATH='' cd -P -- "$(dirname -- "$f")" 2>/dev/null && pwd -P)" || return 1

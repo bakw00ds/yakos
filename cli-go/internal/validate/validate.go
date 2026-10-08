@@ -413,7 +413,7 @@ func checkLineBudgets(cfg Config, r *Result, w io.Writer, base string) {
 		if !strings.HasSuffix(name, ".md") || name == "INDEX.md" || name == "README.md" {
 			return nil
 		}
-		n := countLines(p, nil)
+		n := countLines(p, []string{rulesDir})
 		if n < 60 || n > 150 {
 			r.addWarn(cfg, w, fmt.Sprintf("%s: rule is %d lines (budget 60-150)", p, n))
 		}
@@ -451,6 +451,7 @@ func checkPlaybookReferences(cfg Config, r *Result, w io.Writer, base string) {
 	}
 	agentRoots := agentRootsFor(cfg, base)
 	skillRoots := skillRootsFor(cfg, base)
+	rulesDir := filepath.Join(base, "rules")
 	for _, root := range roots {
 		isAgents := root == agentsDir
 		isSkills := root == skillsDir
@@ -472,6 +473,8 @@ func checkPlaybookReferences(cfg Config, r *Result, w io.Writer, base string) {
 			var readErr error
 			if isAgents {
 				data, readErr = agentscompose.ReadAgentFileIn(p, agentRoots)
+			} else if root == rulesDir {
+				data, readErr = agentscompose.ReadAgentFileIn(p, []string{rulesDir})
 			} else {
 				data, readErr = agentscompose.ReadRegularFile(p)
 			}

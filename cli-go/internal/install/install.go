@@ -437,7 +437,7 @@ func linkFilesIn(sub, yakosRootAbs, claudeDir, home string, force, dryRun bool, 
 		// never a link to some other file, a FIFO or a device.
 		if sub == "agents" {
 			if p, ierr := agentscompose.InspectAgentFile(srcPath, agentRoots); ierr != nil || p != agentscompose.ProblemNone {
-				_, _ = fmt.Fprintf(ew, "install: skip: agents/%s not linked: not a regular file within the size cap, or a symlink out of lib/agents\n", rel)
+				_, _ = fmt.Fprintf(ew, "install: skip: agents/%s not linked: not a regular file within the size cap, or a symlink out of lib/agents\n", printable(rel))
 				rpt.Skipped++
 				return nil
 			}
@@ -739,4 +739,15 @@ func dirOnPath(dir string) bool {
 		}
 	}
 	return false
+}
+
+// printable replaces control characters in a file name, so a name with a newline
+// in it cannot forge a line of the install log.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, s)
 }

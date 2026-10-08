@@ -128,3 +128,17 @@ func TestReadTreeFile_RefusalsArePathFree(t *testing.T) {
 		t.Errorf("the refusal names the link target: %v", err)
 	}
 }
+
+// A rules link out of the rules directory is read by neither the line-budget pass
+// nor the playbook-reference pass: its line count and its references would be
+// content of a file that is not a rule.
+func TestRules_ALinkOutOfTheRulesDirectoryIsNotRead(t *testing.T) {
+	root, proj, _ := agentFilesProject(t)
+	outside := filepath.Join(t.TempDir(), "notes.md")
+	writeFile(t, outside, strings.Repeat("line 111\n", 200)+"- playbook:very-secret-playbook\n")
+	symlinkOrSkip(t, outside, filepath.Join(proj, ".claude", "rules", "leak.md"))
+	out, _ := validateProject(t, root, proj)
+	if strings.Contains(out, "201 lines") || strings.Contains(out, "very-secret-playbook") {
+		t.Errorf("the content of a file outside the rules directory was used:\n%s", out)
+	}
+}
