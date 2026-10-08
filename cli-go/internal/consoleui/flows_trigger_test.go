@@ -130,6 +130,11 @@ func newTrigEnv(t *testing.T, block <-chan struct{}) *trigEnv {
 		return []byte("ok"), dispatch.Result{}, nil
 	}
 	eng := workflow.NewEngineForTest(workflow.EngineConfig{Bus: bus, WorkDir: wDir, YakosRoot: root, Project: ws}, fn)
+	// Registered after every TempDir above, so it runs before they are
+	// removed: no triggered run may still be writing under wDir (Windows
+	// fails the RemoveAll cleanup otherwise, K-172). The engine marks a run
+	// inactive only after Run has returned.
+	t.Cleanup(func() { settleTriggeredRuns(t, eng, "hooked") })
 	srv := consoleui.MustNew(t, consoleui.Config{
 		Token: tk, KanbanBoardPath: t.TempDir() + "/kanban.md", KanbanProject: "test",
 		MetricsProjectDir: t.TempDir(), PerfWorkDir: t.TempDir(), Bus: bus, WorkDir: wDir,
@@ -168,6 +173,22 @@ func newTrigEnv(t *testing.T, block <-chan struct{}) *trigEnv {
 	}
 	writeWorkflow(t, wDir, "hooked", hookYAML)
 	return env
+}
+
+// settleTriggeredRuns waits until none of the named workflows has a run in
+// flight on eng.
+func settleTriggeredRuns(t *testing.T, eng *workflow.Engine, names ...string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for _, n := range names {
+		for eng.RunActive(n) {
+			if time.Now().After(deadline) {
+				t.Errorf("run of %q still active at cleanup", n)
+				return
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
 }
 
 var hookEnabled = "version: 1\nworkspace: {WS}\nworkflows:\n  hooked:\n    webhook: true\n    secret_env: " + trigSecretEnv + "\n    workflow_sha: " + shaHex(hookYAML) + "\n"

@@ -35,7 +35,27 @@ func newTestEngine(t *testing.T, fn workflow.EngineRunFn) (*workflow.Engine, str
 		WorkDir:   workDir,
 	}
 	workflow.SetEngineRunFn(eng, fn)
+	// Registered after the TempDir, so it runs before the directory is
+	// removed: a triggered run must not still be writing under workDir.
+	t.Cleanup(func() { settleTriggered(t, eng) })
 	return eng, workDir
+}
+
+// settleTriggered blocks until no triggered or scheduled run of the test
+// workflow is in flight on eng. The engine marks a run inactive only after
+// Run returns (all state files written), and StartTriggered claims the slot
+// before it returns, so this is race-free after any Tick. On Windows an open
+// file under t.TempDir() fails the RemoveAll cleanup (K-172).
+func settleTriggered(t *testing.T, eng *workflow.Engine) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for eng.RunActive("nightly") {
+		if time.Now().After(deadline) {
+			t.Errorf("triggered run still active at cleanup")
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 }
 
 // immediateOKFn returns a fake EngineRunFn that completes immediately with the
