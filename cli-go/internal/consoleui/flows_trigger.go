@@ -179,11 +179,9 @@ func (h *flowsHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		notAvailable()
 		return
 	}
-	// Replay check first: a replayed signed request is answered 404 and must
-	// not consume the rate budget (sec-348c R2). The signature is used up by
-	// this first sight, so a request answered 429 below must be re-signed to
-	// retry, which the docs already require.
-	if !h.trigGuard.firstUse(sig) {
+	// Replay check first, without recording: a replayed signed request is
+	// answered 404 and must not consume the rate budget (sec-348c R2).
+	if h.trigGuard.replayed(sig) {
 		slog.Warn("flows: webhook refused, replayed signature", "workflow", name)
 		notAvailable()
 		return
@@ -194,6 +192,14 @@ func (h *flowsHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	if !h.trigGuard.allow(name) {
 		w.Header().Set("Retry-After", "60")
 		writeGenericError(w, http.StatusTooManyRequests, "too many requests")
+		return
+	}
+	// The signature is recorded only now that the request proceeds: a 429
+	// must not push a live signature out of the cache (sec-362 F2), so it can
+	// be retried as is. A concurrent duplicate or a full cache fails closed.
+	if !h.trigGuard.record(sig) {
+		slog.Warn("flows: webhook refused, replayed signature or replay cache full", "workflow", name)
+		notAvailable()
 		return
 	}
 	// The sender is authenticated; now the payload shape may be reported.

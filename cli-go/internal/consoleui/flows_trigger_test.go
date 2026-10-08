@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -597,7 +598,12 @@ func TestTrigger_FIFOWorkflowAnswersAtOnce(t *testing.T) {
 // budget the real sender needs (sec-348c R2).
 func TestTrigger_ReplayDoesNotConsumeRateBudget(t *testing.T) {
 	block := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(block) }) }
 	env := newTrigEnv(t, block)
+	// Registered after newTrigEnv's settle cleanup, so it runs first: an
+	// aborted assertion must not leave the run blocked for the 30 s settle.
+	t.Cleanup(release)
 	env.enable(hookEnabled, 0o600)
 	path := "/flows/api/trigger/hooked"
 	h := rawSigned(trigSecret, time.Now(), `{}`)
@@ -624,8 +630,79 @@ func TestTrigger_ReplayDoesNotConsumeRateBudget(t *testing.T) {
 		}
 		r.Body.Close()
 	}
-	close(block)
+	release()
 	waitForRunStatus(t, env.workDir, started.RunID, "completed")
+}
+
+// Signed requests answered 429 must not enter the replay cache or push a live
+// signature out of it: a captured request stays refused after a flood
+// (sec-362 F2).
+func TestTrigger_RateLimitedFloodDoesNotEvictLiveSignature(t *testing.T) {
+	block := make(chan struct{})
+	var once sync.Once
+	release := func() { once.Do(func() { close(block) }) }
+	env := newTrigEnv(t, block)
+	t.Cleanup(release)
+	env.enable(hookEnabled, 0o600)
+	path := "/flows/api/trigger/hooked"
+	captured := rawSigned(trigSecret, time.Now(), `{"captured":1}`)
+	first := env.doAs(trigID, captured, path, `{"captured":1}`)
+	var started struct {
+		RunID string `json:"run_id"`
+	}
+	_ = json.Unmarshal([]byte(readAll(t, first)), &started)
+	if first.StatusCode != http.StatusAccepted {
+		t.Fatalf("captured request: %d", first.StatusCode)
+	}
+	limited := 0
+	for i := 0; i < 1010; i++ {
+		body := `{"n":` + strconv.Itoa(i) + `}`
+		r := env.doAs(trigID, rawSigned(trigSecret, time.Now(), body), path, body)
+		if r.StatusCode == http.StatusTooManyRequests {
+			limited++
+		}
+		r.Body.Close()
+	}
+	if limited < 1001 {
+		t.Fatalf("only %d requests were rate limited, the flood did not run", limited)
+	}
+	r := env.doAs(trigID, captured, path, `{"captured":1}`)
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusNotFound {
+		t.Errorf("captured request replayed after a 429 flood: status %d, want 404", r.StatusCode)
+	}
+	release()
+	waitForRunStatus(t, env.workDir, started.RunID, "completed")
+}
+
+// A correctly signed chunked body over the limit is refused by the bounded
+// read, not buffered (sec-362 F4).
+func TestTrigger_SignedChunkedOversizeBodyIs404(t *testing.T) {
+	env := newTrigEnv(t, nil)
+	env.enable(hookEnabled, 0o600)
+	path := "/flows/api/trigger/hooked"
+	big := strings.Repeat("a", 65<<10)
+	h := rawSigned(trigSecret, time.Now(), big)
+	h["X-Test-Chunked"] = "1"
+	r := env.doAs(trigID, h, path, big)
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusNotFound {
+		t.Errorf("signed chunked 65 KiB body: status %d, want 404", r.StatusCode)
+	}
+	// Control: the same signed chunked body at the limit gets past the read.
+	ok := strings.Repeat("a", 64<<10)
+	h2 := rawSigned(trigSecret, time.Now().Add(time.Second), ok)
+	h2["X-Test-Chunked"] = "1"
+	r2 := env.doAs(trigID, h2, path, ok)
+	var started struct {
+		RunID string `json:"run_id"`
+	}
+	_ = json.Unmarshal([]byte(readAll(t, r2)), &started)
+	if r2.StatusCode == http.StatusNotFound {
+		t.Errorf("signed chunked 64 KiB body: status 404, want it past the body read")
+	} else if started.RunID != "" {
+		waitForRunStatus(t, env.workDir, started.RunID, "completed")
+	}
 }
 
 // Chunked unsigned bodies (no Content-Length) must not tell an enabled hook

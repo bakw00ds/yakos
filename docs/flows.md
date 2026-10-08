@@ -160,13 +160,15 @@ console route requires and the signature below.
     http://127.0.0.1:PORT/flows/api/trigger/webhook-triage
   ```
 - The timestamp must be within 5 minutes of the daemon's clock, and each
-  signature is accepted once (the last 1000 are remembered): a captured request
-  cannot be replayed. A sender's retry must be re-signed with a fresh timestamp.
+  signature is accepted once (up to 1000 live ones are remembered; past that,
+  requests are refused rather than an older signature forgotten): a captured request
+  cannot be replayed. After an accepted request, a retry must be re-signed with a fresh timestamp.
 - At most 6 requests per minute per workflow name (`429`, `Retry-After: 60`),
   counted only for a request whose signature verified and was not a replay, so a
   caller without the secret cannot lock out the real sender and a replayed
-  request cannot spend the budget. A request answered `429` has used its
-  signature up, so the retry must be re-signed.
+  request cannot spend the budget. A signature is recorded only when the
+  request proceeds, so a request answered `429` can be retried unchanged (while
+  its timestamp is still fresh); a re-signed retry also works.
 - `Content-Type: application/json` (the console's CSRF guard requires it for
   every mutation); the body is the payload, at most 64 KiB, valid UTF-8, and
   optional. An oversized body answers 404; non-UTF-8 answers 400 only once the
@@ -195,7 +197,7 @@ For each `secret_env` name the daemon looks for the file
 secret and the environment variable is ignored, even when both are set. The file
 must be a regular file you own with mode `0600`, in a directory you own that
 others cannot write (`mkdir -m 700`, then `umask 077; printf %s "$SECRET" > file`),
-at most 4 KiB; one trailing newline is trimmed. A file that exists but fails
+at most 4 KiB; trailing CR and LF characters are trimmed. A file that exists but fails
 those checks keeps the webhook off: the daemon does not fall back to the
 environment. With no file, the daemon's environment variable is used as before.
 
