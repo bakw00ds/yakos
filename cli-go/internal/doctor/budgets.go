@@ -47,9 +47,8 @@ func (r *runner) checkAgentBudgets() {
 		}
 	}
 	// A refused project file (a symlink, not a regular file, over the size cap,
-	// unreadable) is read as absent, so its agent_budgets: and its supervisor name are
-	// off. The operator would not otherwise learn that their limits are not applied. The
-	// line is fixed text keyed off a structured answer; it names no path and carries
+	// unreadable) is read as absent, so none of its project settings apply. The operator
+	// would not otherwise learn that their limits are not applied. The line is fixed text keyed off a structured answer; it names no path and carries
 	// nothing from the file.
 	refused := budget.ProjectRefused(project)
 	if len(rows) == 0 && perr == nil && !refused {
@@ -60,7 +59,7 @@ func (r *runner) checkAgentBudgets() {
 		r.warn(SectionAgentBudgets, "%v", perr)
 	}
 	if refused {
-		r.warn(SectionAgentBudgets, ".yakos.yml was not read (a symlink, not a regular file, over %d bytes, or unreadable): its agent_budgets and supervisor name are ignored, so the built-in budgets apply", projfile.MaxBytes)
+		r.warn(SectionAgentBudgets, ".yakos.yml was not read (a symlink, not a regular file, over %d bytes, or unreadable): every project setting in it is ignored (budget, models, injection_scan, decisions, supervisor-gate), so the built-in defaults apply", projfile.MaxBytes)
 	}
 	for _, x := range rows {
 		st := x.st

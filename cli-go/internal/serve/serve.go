@@ -270,6 +270,10 @@ type Config struct {
 	// Empty means the real state dir. For tests.
 	OpenAIPolicyDir string
 
+	// OpenAITokenDir overrides the directory holding openai-endpoint-token.
+	// Empty means the real state dir. For tests.
+	OpenAITokenDir string
+
 	// Gateway turns on the Anthropic pass-through gateway (K-151), as
 	// `yakos serve --gateway` does; `anthropic_gateway: true` in the trusted
 	// policy does too. GatewayPassthroughSubscription lets sk-ant-oat* tokens
@@ -1004,7 +1008,7 @@ func Run(ctx context.Context, cfg Config) error {
 	// OpenAI-compatible endpoint (K-150): off unless asked for.
 	openAIErrCh := make(chan error, 1)
 	if openAIEndpointEnabled(cfg.OpenAIEndpoint, cfg.OpenAIPolicyDir) {
-		if err := startOpenAIGateway(ctx, cfg, dispatchSvc, restWriteToken, openAIErrCh); err != nil {
+		if err := startOpenAIGateway(ctx, cfg, dispatchSvc, openAIErrCh); err != nil {
 			return err
 		}
 	} else {

@@ -1,16 +1,21 @@
 package serve
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/gateway/openai"
+	"github.com/bakw00ds/yakos/internal/restapi"
 	"github.com/bakw00ds/yakos/internal/routerpolicy"
 )
 
@@ -65,15 +70,24 @@ func freePort(t *testing.T) string {
 	return ln.Addr().String()
 }
 
-// startOpenAIGateway serves /v1/models behind the bearer token, and stops with ctx.
+// startOpenAIGateway serves /v1/models behind its own bearer token, and stops with ctx.
 func TestStartOpenAIGatewayServesAndStops(t *testing.T) {
 	addr := freePort(t)
-	tok := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	cfg := Config{WorkspaceRoot: t.TempDir(), YakosRoot: t.TempDir(), OpenAIAddr: addr}
+	tokDir := t.TempDir()
+	cfg := Config{WorkspaceRoot: t.TempDir(), YakosRoot: t.TempDir(), OpenAIAddr: addr, OpenAITokenDir: tokDir}
 	errCh := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
-	if err := startOpenAIGateway(ctx, cfg, dispatch.NewService(dispatch.ServiceConfig{}), tok, errCh); err != nil {
+	if err := startOpenAIGateway(ctx, cfg, dispatch.NewService(dispatch.ServiceConfig{}), errCh); err != nil {
 		t.Fatal(err)
+	}
+	tok, err := openai.ReadToken(tokDir)
+	if err != nil {
+		t.Fatalf("the first start did not mint the endpoint token: %v", err)
+	}
+	if runtimeIsPosix() {
+		if fi, err := os.Stat(openai.TokenPath(tokDir)); err != nil || fi.Mode().Perm() != 0o600 {
+			t.Errorf("token file mode %v, %v; want 0600", fi.Mode(), err)
+		}
 	}
 	get := func(auth string) int {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/v1/models", nil)
@@ -94,6 +108,32 @@ func TestStartOpenAIGatewayServesAndStops(t *testing.T) {
 	if got := get(tok); got != http.StatusOK {
 		t.Errorf("token: %d", got)
 	}
+	// The REST tokens are different credentials, minted by the real writer in the
+	// same state dir, and are not accepted here.
+	rest, err := restapi.LoadOrGenerateTokens(tokDir)
+	if err != nil || rest.Write == "" || rest.Read == "" {
+		t.Fatalf("LoadOrGenerateTokens = %+v, %v", rest, err)
+	}
+	if rest.Write == tok || rest.Read == tok {
+		t.Fatal("the REST tokens equal the endpoint token")
+	}
+	if got := get(rest.Write); got != http.StatusUnauthorized {
+		t.Errorf("the REST write token: %d, want 401", got)
+	}
+	if got := get(rest.Read); got != http.StatusUnauthorized {
+		t.Errorf("the REST read token: %d, want 401", got)
+	}
+	// Rotating the file revokes the old token on the running endpoint at once.
+	next, err := openai.RotateToken(tokDir)
+	if err != nil || next == tok {
+		t.Fatalf("RotateToken = %q, %v", next, err)
+	}
+	if got := get(tok); got != http.StatusUnauthorized {
+		t.Errorf("the rotated-out token: %d, want 401", got)
+	}
+	if got := get(next); got != http.StatusOK {
+		t.Errorf("the new token: %d", got)
+	}
 	cancel()
 	select {
 	case err := <-errCh:
@@ -105,6 +145,73 @@ func TestStartOpenAIGatewayServesAndStops(t *testing.T) {
 	}
 }
 
+// A restart keeps the token (it is minted only when absent), and the start-up
+// banner names the file, never the token.
+func TestStartOpenAIGatewayKeepsTheTokenAndNeverPrintsIt(t *testing.T) {
+	tokDir := t.TempDir()
+	first, err := openai.LoadOrCreateToken(tokDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	rd, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldErr := os.Stderr
+	os.Stderr = wr
+	cfg := Config{WorkspaceRoot: t.TempDir(), YakosRoot: t.TempDir(), OpenAIAddr: freePort(t), OpenAITokenDir: tokDir}
+	errCh := make(chan error, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	startErr := startOpenAIGateway(ctx, cfg, dispatch.NewService(dispatch.ServiceConfig{}), errCh)
+	cancel()
+	<-errCh
+	os.Stderr = oldErr
+	_ = wr.Close()
+	banner, _ := io.ReadAll(rd)
+	if startErr != nil {
+		t.Fatal(startErr)
+	}
+	if got, err := openai.ReadToken(tokDir); err != nil || got != first {
+		t.Errorf("a restart replaced the token: %q, %v", got, err)
+	}
+	if !strings.Contains(string(banner), openai.TokenPath(tokDir)) {
+		t.Errorf("the banner does not name the token file: %s", banner)
+	}
+	if strings.Contains(string(banner), first) || strings.Contains(logs.String(), first) {
+		t.Error("the endpoint token reached stderr or the log")
+	}
+}
+
+// An endpoint token file that cannot be trusted or made leaves the endpoint off
+// with a warning (the daemon carries on), and nothing listens.
+func TestStartOpenAIGatewayTokenFileFailureLeavesItOff(t *testing.T) {
+	if !runtimeIsPosix() {
+		t.Skip("posix permissions")
+	}
+	parent := t.TempDir()
+	notADir := filepath.Join(parent, "state")
+	if err := os.WriteFile(notADir, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	addr := freePort(t)
+	cfg := Config{WorkspaceRoot: t.TempDir(), OpenAIAddr: addr, OpenAITokenDir: notADir}
+	errCh := make(chan error, 1)
+	if err := startOpenAIGateway(context.Background(), cfg, dispatch.NewService(dispatch.ServiceConfig{}), errCh); err != nil {
+		t.Fatalf("a token file failure was fatal: %v", err)
+	}
+	if _, open := <-errCh; open {
+		t.Error("errCh carried a value, want closed")
+	}
+	if c, err := net.DialTimeout("tcp", addr, time.Second); err == nil {
+		_ = c.Close()
+		t.Error("the endpoint listens without a token")
+	}
+}
+
 // A taken port is a warning, not a failed daemon, and errCh is closed so
 // shutdown does not wait on a server that never started.
 func TestStartOpenAIGatewayBindFailureIsNotFatal(t *testing.T) {
@@ -113,10 +220,9 @@ func TestStartOpenAIGatewayBindFailureIsNotFatal(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = ln.Close() }()
-	cfg := Config{WorkspaceRoot: t.TempDir(), OpenAIAddr: ln.Addr().String()}
+	cfg := Config{WorkspaceRoot: t.TempDir(), OpenAIAddr: ln.Addr().String(), OpenAITokenDir: t.TempDir()}
 	errCh := make(chan error, 1)
-	tok := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	if err := startOpenAIGateway(context.Background(), cfg, dispatch.NewService(dispatch.ServiceConfig{}), tok, errCh); err != nil {
+	if err := startOpenAIGateway(context.Background(), cfg, dispatch.NewService(dispatch.ServiceConfig{}), errCh); err != nil {
 		t.Fatalf("bind failure was fatal: %v", err)
 	}
 	select {
@@ -131,10 +237,9 @@ func TestStartOpenAIGatewayBindFailureIsNotFatal(t *testing.T) {
 
 // A non-loopback address never binds.
 func TestStartOpenAIGatewayRefusesNonLoopback(t *testing.T) {
-	cfg := Config{WorkspaceRoot: t.TempDir(), OpenAIAddr: "0.0.0.0:7898"}
+	cfg := Config{WorkspaceRoot: t.TempDir(), OpenAIAddr: "0.0.0.0:7898", OpenAITokenDir: t.TempDir()}
 	errCh := make(chan error, 1)
-	tok := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	if err := startOpenAIGateway(context.Background(), cfg, dispatch.NewService(dispatch.ServiceConfig{}), tok, errCh); err == nil {
+	if err := startOpenAIGateway(context.Background(), cfg, dispatch.NewService(dispatch.ServiceConfig{}), errCh); err == nil {
 		t.Fatal("a wildcard address was accepted")
 	}
 }

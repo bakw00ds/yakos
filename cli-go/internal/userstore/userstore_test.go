@@ -402,6 +402,27 @@ func TestCreate_InvalidUsername_ReturnsError(t *testing.T) {
 	}
 }
 
+// TestCreate_RejectsOpenAICompatOwner: the owner label of the OpenAI-compatible
+// endpoint cannot be a username (K-174), in any case, through every entry point.
+func TestCreate_RejectsOpenAICompatOwner(t *testing.T) {
+	t.Parallel()
+	s := openEmpty(t)
+	for _, name := range []string{"openai-compat", "OpenAI-Compat", "OPENAI-COMPAT"} {
+		if err := s.Create(name, "password-long-enough", netid.RoleRead); err == nil {
+			t.Errorf("Create(%q): expected error (reserved owner label)", name)
+		}
+		if err := userstore.ValidateUsername(name); err == nil {
+			t.Errorf("ValidateUsername(%q): expected error", name)
+		}
+		if err := s.CreateFirstAdmin(name, "password-long-enough"); err == nil {
+			t.Errorf("CreateFirstAdmin(%q): expected error", name)
+		}
+	}
+	if err := s.Create("openai-compat2", "password-long-enough", netid.RoleRead); err != nil {
+		t.Errorf("Create(openai-compat2): %v", err)
+	}
+}
+
 // TestCreate_ReservedPrefixes verifies that usernames beginning with "op-" or
 // "lbop-" (case-insensitive) are rejected.  These prefixes are reserved for the
 // console's loopback owner-identity tokens; allowing a real username to match

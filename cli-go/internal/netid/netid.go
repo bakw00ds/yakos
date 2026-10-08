@@ -72,6 +72,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -509,6 +510,18 @@ func CNFromRequest(r *http.Request) (cn string, ok bool) {
 	return CNFromTLS(r.TLS)
 }
 
+// OpenAICompatOwner is the owner label every conversation made through the
+// OpenAI-compatible endpoint carries (K-150). It is reserved: no user, client
+// certificate name or certificate CN may take it, or that principal would read
+// and resume the endpoint's conversations.
+const OpenAICompatOwner = "openai-compat"
+
+// IsReservedOwner reports whether name is an owner label no operator may hold.
+// The match ignores case and surrounding space.
+func IsReservedOwner(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), OpenAICompatOwner)
+}
+
 // CNFromTLS extracts the client certificate CN from a TLS connection state.
 // Returns ("", false) if cs is nil, contains no verified peer certificates, or
 // the leaf certificate has an empty Subject CN (SAN-only).
@@ -520,6 +533,12 @@ func CNFromTLS(cs *tls.ConnectionState) (cn string, ok bool) {
 		return "", false
 	}
 	cn = cs.VerifiedChains[0][0].Subject.CommonName
+	if IsReservedOwner(cn) {
+		// A certificate whose CN is a reserved owner label must not become that
+		// principal: the label owns transcripts the OpenAI-compatible endpoint
+		// made. Treated like a CN-less certificate (K-174).
+		return "", false
+	}
 	if cn == "" {
 		// A CN-less (SAN-only) certificate has no operator identity. Treating
 		// it as ("", true) would merge every such certificate into one shared

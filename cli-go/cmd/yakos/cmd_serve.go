@@ -18,12 +18,14 @@ import (
 	"github.com/bakw00ds/yakos/internal/consolecmd"
 	internalconsoleui "github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/daemonclient"
+	openaigw "github.com/bakw00ds/yakos/internal/gateway/openai"
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/shaperun"
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/mtlscmd"
 	internalperfdash "github.com/bakw00ds/yakos/internal/perfdash"
 	internalserve "github.com/bakw00ds/yakos/internal/serve"
+	"github.com/bakw00ds/yakos/internal/statepath"
 	"github.com/bakw00ds/yakos/internal/wsbus"
 	"golang.org/x/net/websocket"
 )
@@ -41,6 +43,7 @@ import (
 //	--pidfile <path>                   Override the default PID file path.
 //	--ws-addr <addr>                   WebSocket bind address (default 127.0.0.1:7891).
 //	--rotate-ws-token                  Rotate the WS bearer token and exit.
+//	--rotate-openai-token              Rotate the OpenAI-compatible endpoint token and exit.
 //	--detach                           Print advisory (actual backgrounding is the operator's job).
 //	--console-bootstrap-cert <name>    Override the CN used for the auto-issued bootstrap
 //	                                   client cert on first networked start (default: OS username).
@@ -70,6 +73,7 @@ func runServe(yakosRoot string, args []string) {
 	rotateToken := false
 	rotatePerfToken := false
 	rotateConsoleToken := false
+	rotateOpenAIToken := false
 	noPerfDash := false
 	noConsole := false
 	consoleBootstrapCertName := ""
@@ -109,6 +113,7 @@ func runServe(yakosRoot string, args []string) {
 		{Name: "--rotate-ws-token", Kind: cliflag.Bool, Bool: &rotateToken},
 		{Name: "--rotate-perf-token", Kind: cliflag.Bool, Bool: &rotatePerfToken},
 		{Name: "--rotate-console-token", Kind: cliflag.Bool, Bool: &rotateConsoleToken},
+		{Name: "--rotate-openai-token", Kind: cliflag.Bool, Bool: &rotateOpenAIToken},
 		{Name: "--no-perf", Kind: cliflag.Bool, Bool: &noPerfDash},
 		{Name: "--no-console", Kind: cliflag.Bool, Bool: &noConsole},
 		{Name: "--console-bootstrap-cert", Kind: cliflag.String, Str: &consoleBootstrapCertName, ValueDesc: "a name"},
@@ -163,6 +168,20 @@ func runServe(yakosRoot string, args []string) {
 		}
 		_ = tok
 		fmt.Fprintf(os.Stdout, "perf token rotated: %s\n", internalperfdash.PerfTokenFilePath(stateDir))
+		os.Exit(0)
+	}
+
+	// --rotate-openai-token: mint a new OpenAI-compatible endpoint token and
+	// exit. The token is not printed (it is a credential); read it from the file.
+	// A running endpoint reads the file per request, so the old token stops
+	// working at once and no restart is needed.
+	if rotateOpenAIToken {
+		stateDir := statepath.Dir()
+		if _, err := openaigw.RotateToken(stateDir); err != nil {
+			fmt.Fprintf(os.Stderr, "serve: rotate-openai-token: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Fprintf(os.Stdout, "openai endpoint token rotated: %s\n", openaigw.TokenPath(stateDir))
 		os.Exit(0)
 	}
 
@@ -642,9 +661,13 @@ Flags:
                             re-auth). Off by default; see docs/routing.md.
   --openai-endpoint         Serve the OpenAI-compatible endpoint (/v1/models,
                             /v1/chat/completions) on 127.0.0.1:7898, loopback only,
-                            bearer = the REST write token. Same as openai_endpoint: true
-                            in ~/.yakos-state/router-policy.yml. See
-                            docs/openai-compatible-endpoint.md.
+                            bearer = the endpoint's own token in
+                            ~/.yakos-state/openai-endpoint-token (minted on first start;
+                            the REST write token is not accepted). Same as
+                            openai_endpoint: true in ~/.yakos-state/router-policy.yml.
+                            See docs/openai-compatible-endpoint.md.
+  --rotate-openai-token     Mint a new OpenAI-compatible endpoint token and exit. A
+                            running endpoint rejects the old token at once.
   --gateway                 Serve the Anthropic pass-through gateway (/v1/messages,
                             /v1/messages/count_tokens, /v1/models) on 127.0.0.1:7897
                             for a routed 'yakos start'. Loopback only, forwards to

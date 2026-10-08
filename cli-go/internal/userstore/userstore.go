@@ -1034,6 +1034,9 @@ func validateUsername(name string) error {
 	// as an adoptable anonymous token by the transcript ownership check, allowing
 	// another user to read that user's transcripts.  Blocking these prefixes at
 	// account creation removes the collision class entirely.
+	if netid.IsReservedOwner(name) {
+		return fmt.Errorf("username %q is reserved", name)
+	}
 	lower := strings.ToLower(name)
 	if strings.HasPrefix(lower, "op-") {
 		return fmt.Errorf("username %q is invalid: names starting with 'op-' are reserved", name)
