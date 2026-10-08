@@ -43,6 +43,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
 	"github.com/bakw00ds/yakos/internal/hooks/secretscan"
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 const (
@@ -211,7 +212,10 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 	projectDir := h.resolveProjectDir(in)
 
 	// Config disable check.
-	doc := h.loadDoc(projectDir)
+	doc, refusal := h.loadDoc(projectDir)
+	if refusal != "" {
+		out.Stderr = fmt.Appendf(out.Stderr, "%s: %s\n", hookName, refusal)
+	}
 	var cfg *supervisorConfig
 	if doc != nil {
 		cfg = doc.Supervisor
@@ -588,20 +592,26 @@ func (h *Hook) checkRiskRegex(combined string, extras []string) string {
 
 // ---- config loading ----------------------------------------------------------
 
-func (h *Hook) loadDoc(projectDir string) *yakosYMLSupervisor {
+// loadDoc reads the project's supervisor config. A file projfile refuses (a link,
+// not a regular file, over the cap) is ABSENT, as in the budget package and the bash
+// twin, so the supervisor keeps its default agent name and with it the built-in
+// budget; the second result is then the path-free notice for stderr.
+func (h *Hook) loadDoc(projectDir string) (*yakosYMLSupervisor, string) {
 	if projectDir == "" {
-		return nil
+		return nil, ""
 	}
-	yakosYML := filepath.Join(projectDir, ".yakos.yml")
-	data, err := os.ReadFile(yakosYML) //nolint:gosec
+	data, err := projfile.Read(projectDir)
 	if err != nil {
-		return nil
+		if projfile.IsRefused(err) {
+			return nil, projfile.Notice(err)
+		}
+		return nil, ""
 	}
 	var doc yakosYMLSupervisor
 	if err := yaml.Unmarshal(data, &doc); err != nil {
-		return nil
+		return nil, ""
 	}
-	return &doc
+	return &doc, ""
 }
 
 // ---- buffer management -------------------------------------------------------

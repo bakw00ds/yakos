@@ -37,8 +37,6 @@ package outputinjectionscan
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -46,6 +44,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"github.com/bakw00ds/yakos/internal/hooks/hooklog"
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 const (
@@ -278,7 +277,7 @@ func (h *Hook) configDisabled(in hooktype.HookInput) bool {
 	if projectDir == "" {
 		return false
 	}
-	data, err := os.ReadFile(filepath.Join(projectDir, ".yakos.yml")) //nolint:gosec
+	data, err := projfile.Read(projectDir)
 	if err != nil {
 		return false
 	}

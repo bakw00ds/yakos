@@ -40,13 +40,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/bakw00ds/yakos/internal/binver"
-	"github.com/bakw00ds/yakos/internal/passthrough"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/bakw00ds/yakos/internal/binver"
+	"github.com/bakw00ds/yakos/internal/passthrough"
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 // Severity describes the importance of a finding.
@@ -1177,12 +1179,16 @@ func (r *runner) checkProduction() {
 	// Budget + supervisor.
 	_, _ = fmt.Fprintln(r.w, "")
 	_, _ = fmt.Fprintln(r.w, "Budget + supervisor:")
-	yakosYML := filepath.Join(projectPath, ".yakos.yml")
-	if _, err := os.Stat(yakosYML); os.IsNotExist(err) {
+	// projfile bounds the read: a FIFO named .yakos.yml hung `doctor --production`, and
+	// a link to /dev/zero filled memory. A refused file is reported, not read.
+	data, rerr := projfile.Read(projectPath)
+	switch {
+	case os.IsNotExist(rerr):
 		pfail(".yakos.yml missing (run yakos init)")
-	} else {
-		data, rerr := os.ReadFile(yakosYML) //nolint:gosec
-		if rerr == nil {
+	case rerr != nil:
+		pwarn("%s", projfile.Notice(rerr))
+	default:
+		{
 			content := string(data)
 			if hasBudgetBlock(content) {
 				pok("budget block present in .yakos.yml")

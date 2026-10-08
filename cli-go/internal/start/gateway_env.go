@@ -10,17 +10,27 @@ import (
 )
 
 // gatewayStateDir is the directory the router policy is read from for this
-// launch. An injected HomeDir or Env (tests) wins; otherwise the same trusted
-// directory dispatch uses. It never falls back to a temp directory.
+// launch, or "" when the feature is off.
+//
+// In production (cfg.Env == nil) it is routerpolicy.StateDir(), the one trusted
+// location dispatch uses: cfg.HomeDir is not consulted, because the launcher
+// fills it with "/tmp" when HOME is empty and a shared temp directory must never
+// decide which models a session gets (K-165, the K-129 class). With no trusted
+// state directory the answer is "" and gateway aliases are off, as in dispatch.
+// Tests inject Env, and then HomeDir (or HOME in Env) names the state directory;
+// an empty injected home also means off.
 func gatewayStateDir(cfg Config, env map[string]string) string {
+	if cfg.Env == nil {
+		return routerpolicy.StateDir()
+	}
 	home := cfg.HomeDir
-	if home == "" && cfg.Env != nil {
+	if home == "" {
 		home = envGet(env, "HOME")
 	}
-	if home != "" {
-		return filepath.Join(home, ".yakos-state")
+	if home == "" {
+		return ""
 	}
-	return routerpolicy.StateDir()
+	return filepath.Join(home, ".yakos-state")
 }
 
 // printGatewayEnv writes the class aliases the runtime would get, as

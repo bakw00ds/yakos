@@ -26,7 +26,6 @@ package projectcfg
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -34,6 +33,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 // FileName is the project config file, relative to the project root.
@@ -193,29 +194,18 @@ func Load(project string) (Config, []string) {
 	}
 	path := filepath.Join(project, FileName)
 
-	fi, err := os.Stat(path)
+	// projfile refuses a link, a FIFO, a device and a file over its cap without
+	// blocking (a FIFO named .yakos.yml would block, a link to /dev/zero stream,
+	// forever); this reader keeps its own, tighter cap on top.
+	data, err := projfile.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return Config{}, nil
 		}
-		return Config{}, []string{fmt.Sprintf("%s: %v", path, err)}
-	}
-	// A FIFO or device named .yakos.yml would block or stream forever.
-	if !fi.Mode().IsRegular() {
-		return Config{}, []string{path + ": not a regular file; ignored"}
-	}
-	if fi.Size() > maxFileBytes {
-		return Config{}, []string{fmt.Sprintf("%s: larger than %d bytes; ignored", path, maxFileBytes)}
-	}
-
-	f, err := os.Open(path) //nolint:gosec // project config path, stat-checked above
-	if err != nil {
-		return Config{}, []string{fmt.Sprintf("%s: %v", path, err)}
-	}
-	defer func() { _ = f.Close() }()
-	data, err := io.ReadAll(io.LimitReader(f, maxFileBytes+1))
-	if err != nil {
-		return Config{}, []string{fmt.Sprintf("%s: %v", path, err)}
+		if projfile.IsRefused(err) {
+			return Config{}, []string{path + ": " + err.Error() + "; ignored"}
+		}
+		return Config{}, []string{path + ": " + err.Error()}
 	}
 	if len(data) > maxFileBytes {
 		return Config{}, []string{fmt.Sprintf("%s: larger than %d bytes; ignored", path, maxFileBytes)}

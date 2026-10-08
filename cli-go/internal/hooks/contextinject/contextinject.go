@@ -24,16 +24,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/bakw00ds/yakos/internal/hooks/hookio"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/hooks/hookio"
+
 	"gopkg.in/yaml.v3"
 
 	"github.com/bakw00ds/yakos/internal/hooks/hooktype"
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 const hookName = "context-inject"
@@ -220,7 +222,7 @@ func (h *Hook) Run(_ context.Context, in hooktype.HookInput) (hooktype.HookOutpu
 // ---- helpers -----------------------------------------------------------------
 
 func loadContextInjectConfig(yakosYML string) (*yakosYMLContextInject, error) {
-	data, err := os.ReadFile(yakosYML) //nolint:gosec
+	data, err := projfile.ReadFile(yakosYML)
 	if err != nil {
 		return nil, err
 	}
