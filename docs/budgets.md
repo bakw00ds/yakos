@@ -347,7 +347,10 @@ supervisor gets the lower of its own ceiling and the supervisor's.
 `yakos budget set` and `reset`, and edits to the budget state files
 (`budget-policy.yml`, `budget-spend.json`, `budget-resets.json`, `budget.lock`,
 and the dispatch log `dispatch-log*.ndjson`, whose truncation would wipe spend),
-and `yakos dispatch supervisor`, are blocked for agents by the `budget-guard` hook (both twins), in every
+`yakos dispatch supervisor`, and the policy writers `yakos models enable|disable|alias|pin|pricing` and
+`yakos router policy set` and `yakos flows schedule enable|disable` (K-176, see
+`docs/routing.md`), and Write or Edit of `router-policy.yml` and `model-registry.yml`,
+are blocked for agents by the `budget-guard` hook (both twins), in every
 project and without any `.yakos.yml`. There is no `hook-bypass.md` scope for it,
 because an agent can write that file. Read-only commands (`budget status`,
 `budget check`, `cat` of a state file) pass. The operator runs the blocked ones
@@ -356,6 +359,17 @@ from their own shell. Quotes and backslashes are stripped before matching, so `y
 limits of matching command text. This is a speed bump against an agent lifting its
 own stop, not a sandbox: any same-user code can still edit the state directory.
 Appends by yakos itself are unaffected, since they do not go through tool calls.
+
+Known limits, shared by every blocked command: a backslash-newline continuation
+is joined before matching, but `$'..'` quoting, a renamed symlink or glob path to
+the binary, `base64 | sh`, `xargs` and function or alias wrappers also evade the
+text match. A command that merely quotes a blocked phrase (an `echo`, a `grep`, a
+commit message that names `yakos budget set`) is blocked too: write that text to a
+file with the Write tool and refer to the file. An operator shell started inside
+Claude Code inherits `CLAUDECODE`, so the policy writers' audit line reads
+`actor=agent`; the `actor` field is a label from the environment, not an
+authenticated identity. The hook covers Bash and file tool calls only; REST and MCP
+write paths are out of its scope (none exist for these controls at this version).
 
 ## How spend is computed
 

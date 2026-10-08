@@ -1,0 +1,11 @@
+{
+  "session_id": "fixture-pretooluse-bash-models-pricing-quoted-0001",
+  "transcript_path": "/tmp/fake-transcript.jsonl",
+  "cwd": "/tmp/fake-project",
+  "permission_mode": "default",
+  "agent_type": "go-api",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {"command": "cd x && ./bin/yakos models \"pricing\" gpt-5.5 --billing api --input 1 --output 2"},
+  "tool_use_id": "toolu_fixture_pretooluse-bash-models-pricing-quoted"
+}
