@@ -804,6 +804,35 @@ done
 [ "$ok19" = 1 ] && ok "only readable agents linked; refused ones warned"
 
 # ===========================================================================
+# Test 20 (K-167 fix round 1): a link an earlier refresh made to a source that is
+# refused now is removed (with a warning); a link pointing elsewhere and a real
+# file are left alone. Mirrors TestSyncAgents_RemovesAStaleLinkToARefusedSourceOnly.
+# ===========================================================================
+echo ""
+echo "Test 20: refresh removes a stale link to a refused agent, and only that"
+T20="$WORKDIR/t20"
+mkdir -p "$T20/root/lib/hooks" "$T20/root/lib/settings" "$T20/root/lib/agents" "$T20/project/.claude" "$T20/home/.claude/agents"
+echo '{"hooks": {}}' > "$T20/root/lib/settings/settings.template.json"
+echo "secret" > "$T20/outside.md"
+ln -s "$T20/outside.md" "$T20/root/lib/agents/leak.md"
+dd if=/dev/zero of="$T20/root/lib/agents/huge.md" bs=1048576 count=5 2>/dev/null
+dd if=/dev/zero of="$T20/root/lib/agents/real.md" bs=1048576 count=5 2>/dev/null
+echo "mine" > "$T20/mine.md"
+ln -s "$T20/root/lib/agents/leak.md" "$T20/home/.claude/agents/leak.md"
+ln -s "$T20/mine.md" "$T20/home/.claude/agents/huge.md"
+echo "operator" > "$T20/home/.claude/agents/real.md"
+out20="$(HOME="$T20/home" YAKOS_ROOT="$T20/root" YAKOS_LIB="$YAKOS_LIB" \
+    bash "$REFRESH_SH" --project "$T20/project" 2>&1 </dev/null || true)"
+ok20=1
+if [ -e "$T20/home/.claude/agents/leak.md" ] || [ -L "$T20/home/.claude/agents/leak.md" ]; then
+    ok20=0; fail "the stale link to a refused source was kept"
+fi
+case "$out20" in *"removed stale symlink leak.md"*) : ;; *) ok20=0; fail "no warning for the removed link" ;; esac
+[ "$(readlink "$T20/home/.claude/agents/huge.md")" = "$T20/mine.md" ] || { ok20=0; fail "a link pointing elsewhere was touched"; }
+[ "$(cat "$T20/home/.claude/agents/real.md")" = "operator" ] || { ok20=0; fail "a real file was touched"; }
+[ "$ok20" = 1 ] && ok "stale link to a refused agent removed; others untouched"
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""

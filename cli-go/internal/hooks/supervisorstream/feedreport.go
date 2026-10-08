@@ -113,8 +113,8 @@ var beforeOpenHook func(path string)
 // openRegularNoFollow opens path for writing without ever following a link or
 // touching a non-regular file: Lstat refuses an existing non-regular entry, the
 // open carries O_NOFOLLOW and O_NONBLOCK where the platform has them, and the opened descriptor
-// must be a regular file that is the same file Lstat saw (a swap between the two
-// is refused). Permissions are set by the caller on the descriptor, never the path.
+// must be a regular file with a single name that is the same file Lstat saw (a swap
+// between the two, or a hard link to some other file, is refused). Permissions are set by the caller on the descriptor, never the path.
 func openRegularNoFollow(path string, flag int, perm os.FileMode) (*os.File, error) {
 	pre, lerr := os.Lstat(path)
 	if lerr == nil && !pre.Mode().IsRegular() {
@@ -133,7 +133,7 @@ func openRegularNoFollow(path string, flag int, perm os.FileMode) (*os.File, err
 		return nil, err
 	}
 	fi, err := f.Stat()
-	if err != nil || !fi.Mode().IsRegular() || (lerr == nil && !os.SameFile(pre, fi)) {
+	if err != nil || !fi.Mode().IsRegular() || hardLinked(fi) || (lerr == nil && !os.SameFile(pre, fi)) {
 		_ = f.Close()
 		return nil, os.ErrInvalid
 	}

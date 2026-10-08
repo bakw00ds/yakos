@@ -78,6 +78,19 @@ func syncAgents(yakosRoot, home string, dryRun bool, w io.Writer) (AgentPhaseRep
 		if p, ierr := agentscompose.InspectAgentFile(srcPath, roots); ierr != nil || p != agentscompose.ProblemNone {
 			_, _ = fmt.Fprintf(w, "    [warn] agents: %s not linked: %s\n", name, agentSrcRefusal)
 			rpt.Warns++
+			// A link an earlier refresh made to what is now refused would keep the
+			// global roster loading it. Remove that link, and only that link: one that
+			// points anywhere else, or a real file, is not ours to touch.
+			if l, lerr := os.Lstat(dstPath); lerr == nil && l.Mode()&os.ModeSymlink != 0 {
+				if cur, rerr := os.Readlink(dstPath); rerr == nil && cur == srcPath {
+					if dryRun {
+						_, _ = fmt.Fprintf(w, "    [dry-run] agents: would remove stale symlink %s\n", name)
+					} else if os.Remove(dstPath) == nil {
+						_, _ = fmt.Fprintf(w, "    [warn] agents: removed stale symlink %s: its source is refused\n", name)
+						rpt.Warns++
+					}
+				}
+			}
 			continue
 		}
 

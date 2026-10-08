@@ -155,3 +155,67 @@ func TestAppendPending_GiantLineIsCut(t *testing.T) {
 		t.Errorf("giant line kept: %v %v", fi, err)
 	}
 }
+
+// The write open only gets as far as the regular-file check when a reader is on
+// the other end of the FIFO: with none, O_WRONLY|O_NONBLOCK fails with ENXIO
+// first. So attach a non-blocking reader to the swapped-in FIFO, which lets the
+// open succeed, and require the call to refuse it and write nothing.
+func TestReportFeedFinding_FifoWithAReaderIsRefusedByTheRegularFileCheck(t *testing.T) {
+	wc := t.TempDir()
+	fifo := filepath.Join(wc, "supervisor-findings.ndjson")
+	var reader *os.File
+	restore := supervisorstream.SetBeforeOpenHookForTest(func(path string) {
+		if path != fifo {
+			return
+		}
+		if err := syscall.Mkfifo(path, 0o600); err != nil {
+			t.Errorf("mkfifo: %v", err)
+			return
+		}
+		r, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+		if err != nil {
+			t.Errorf("reader open: %v", err)
+			return
+		}
+		reader = r
+	})
+	defer restore()
+	err := reportWithin(t, 5*time.Second, wc, fifo)
+	if reader == nil {
+		t.Fatal("the reader was not attached")
+	}
+	defer func() { _ = reader.Close() }()
+	if !errors.Is(err, os.ErrInvalid) {
+		t.Fatalf("err = %v, want ErrInvalid from the regular-file check", err)
+	}
+	buf := make([]byte, 4096)
+	if n, _ := reader.Read(buf); n != 0 {
+		t.Errorf("%d bytes were written to the FIFO: %q", n, buf[:n])
+	}
+}
+
+// A findings file that is also named somewhere else is not appended to: the write
+// would reach the other name's file too.
+func TestReportFeedFinding_HardLinkedFileIsRefused(t *testing.T) {
+	wc, other := t.TempDir(), t.TempDir()
+	victim := filepath.Join(other, "victim.txt")
+	if err := os.WriteFile(victim, []byte("keep\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"supervisor-findings.ndjson", ".supervisor-pending.s1"} {
+		link := filepath.Join(wc, name)
+		if err := os.Link(victim, link); err != nil {
+			t.Skipf("cannot create a hard link here: %v", err)
+		}
+		if err := reportWithin(t, 5*time.Second, wc, ""); !errors.Is(err, os.ErrInvalid) {
+			t.Errorf("%s: err = %v, want ErrInvalid", name, err)
+		}
+		if b, _ := os.ReadFile(victim); string(b) != "keep\n" {
+			t.Errorf("%s: the other name's file was written: %q", name, b)
+		}
+		if fi, _ := os.Stat(victim); fi.Mode().Perm() != 0o644 {
+			t.Errorf("%s: the other name's file was chmodded to %v", name, fi.Mode().Perm())
+		}
+		_ = os.Remove(link)
+	}
+}

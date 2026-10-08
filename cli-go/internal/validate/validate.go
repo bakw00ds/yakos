@@ -381,7 +381,7 @@ func checkLineBudgets(cfg Config, r *Result, w io.Writer, base string) {
 		if !strings.HasSuffix(de.Name(), ".md") || de.Name() == "README.md" || !readableAgentEntry(p, agentRoots) {
 			return nil
 		}
-		n := countLines(p)
+		n := countLines(p, agentRoots)
 		if n < 80 || n > 140 {
 			r.addWarn(cfg, w, fmt.Sprintf("%s: agent file is %d lines (budget 80-140)", p, n))
 		}
@@ -397,7 +397,7 @@ func checkLineBudgets(cfg Config, r *Result, w io.Writer, base string) {
 		if de.Name() != "SKILL.md" || refusedLink(p, skillRoots) {
 			return nil
 		}
-		n := countLines(p)
+		n := countLines(p, skillRoots)
 		if n < 80 || n > 350 {
 			r.addWarn(cfg, w, fmt.Sprintf("%s: skill is %d lines (budget 80-350)", p, n))
 		}
@@ -413,7 +413,7 @@ func checkLineBudgets(cfg Config, r *Result, w io.Writer, base string) {
 		if !strings.HasSuffix(name, ".md") || name == "INDEX.md" || name == "README.md" {
 			return nil
 		}
-		n := countLines(p)
+		n := countLines(p, nil)
 		if n < 60 || n > 150 {
 			r.addWarn(cfg, w, fmt.Sprintf("%s: rule is %d lines (budget 60-150)", p, n))
 		}
@@ -421,11 +421,11 @@ func checkLineBudgets(cfg Config, r *Result, w io.Writer, base string) {
 	})
 }
 
-func countLines(path string) int {
+func countLines(path string, roots []string) int {
 	if !readableAgentFile(path) {
 		return 0
 	}
-	data, err := agentscompose.ReadRegularFile(path)
+	data, err := readWithin(path, roots)
 	if err != nil {
 		return 0
 	}
@@ -530,7 +530,7 @@ func checkShebangStrictMode(cfg Config, r *Result, w io.Writer) {
 			if !strings.HasSuffix(de.Name(), ".sh") || strings.HasSuffix(de.Name(), ".framework-hash") {
 				return nil
 			}
-			data, readErr := os.ReadFile(p)
+			data, readErr := readTreeFile(cfg, p)
 			if readErr != nil {
 				return nil
 			}
@@ -559,7 +559,7 @@ func checkShebangStrictMode(cfg Config, r *Result, w io.Writer) {
 	// Also check the entry point.
 	entryPoint := filepath.Join(cfg.YakosRoot, "cli", "yakos")
 	if fileExists(entryPoint) {
-		data, err := os.ReadFile(entryPoint)
+		data, err := readTreeFile(cfg, entryPoint)
 		if err == nil {
 			top := strings.Join(strings.SplitN(string(data), "\n", 51)[:50], "\n")
 			setEPat := regexp.MustCompile(`(?m)^set -e`)
@@ -589,7 +589,7 @@ func checkHeaderPurpose(cfg Config, r *Result, w io.Writer) {
 			if strings.HasSuffix(de.Name(), ".framework-hash") {
 				return nil
 			}
-			data, readErr := os.ReadFile(p)
+			data, readErr := readTreeFile(cfg, p)
 			if readErr != nil {
 				return nil
 			}
@@ -668,7 +668,7 @@ func checkTODOOnlyFiles(cfg Config, r *Result, w io.Writer) {
 			if !strings.HasSuffix(name, ".sh") && !strings.HasSuffix(name, ".md") {
 				return nil
 			}
-			data, readErr := os.ReadFile(p)
+			data, readErr := readTreeFile(cfg, p)
 			if readErr != nil {
 				return nil
 			}
@@ -701,7 +701,7 @@ func checkDarkCode(cfg Config, r *Result, w io.Writer) {
 	var refsBuilder strings.Builder
 
 	appendFileIfExists := func(path string) {
-		d, err := os.ReadFile(path)
+		d, err := readTreeFile(cfg, path)
 		if err == nil {
 			refsBuilder.Write(d)
 		}
@@ -821,7 +821,7 @@ func checkSkillMDSections(cfg Config, r *Result, w io.Writer) {
 		if de.Name() != "SKILL.md" {
 			return nil
 		}
-		data, readErr := agentscompose.ReadRegularFile(p)
+		data, readErr := readTreeFile(cfg, p)
 		if readErr != nil {
 			return nil
 		}
@@ -1005,7 +1005,7 @@ func checkEvalDirs(cfg Config, r *Result, w io.Writer, root string) {
 		}
 
 		// Check model-policy: frontmatter field.
-		fm, _ := parseFrontmatter(agentFile)
+		fm, _ := parseFrontmatterIn(agentFile, roots)
 		var modelPolicy string
 		if fm != nil {
 			if v, ok := fm["model-policy"]; ok {
@@ -1075,7 +1075,7 @@ func checkDecisionGuards(cfg Config, r *Result, w io.Writer, base string, roots 
 	})
 	sort.Strings(agentFiles)
 	for _, p := range agentFiles {
-		fm, err := parseFrontmatter(p)
+		fm, err := parseFrontmatterIn(p, roots)
 		if err != nil {
 			continue // reported by the frontmatter check
 		}
@@ -1171,7 +1171,7 @@ func checkAgentEnums(cfg Config, r *Result, w io.Writer, base string, roots []st
 			r.addErr(w, fmt.Sprintf("%s: %s", file, msg))
 			continue
 		}
-		fm, err := parseFrontmatter(file)
+		fm, err := parseFrontmatterIn(file, roots)
 		if err != nil || fm == nil {
 			continue // reported by the frontmatter pass
 		}
@@ -1211,4 +1211,36 @@ func checkAgentEnums(cfg Config, r *Result, w io.Writer, base string, roots []st
 			}
 		}
 	}
+}
+
+// readWithin reads a markdown file through the hardened reader. With roots, a
+// symlink must resolve into one of them (the roots Compose follows for that kind
+// of file); with none, the caller has already chosen the directory and only the
+// type, size and swap checks apply.
+func readWithin(path string, roots []string) ([]byte, error) {
+	if roots == nil {
+		return agentscompose.ReadRegularFile(path)
+	}
+	return agentscompose.ReadAgentFileIn(path, roots)
+}
+
+// readTreeFile reads a file a whole-tree standards pass (shebang, header,
+// TODO-only, dark-code, SKILL.md sections) visits. A FIFO or a device is refused
+// without being opened, so the pass cannot hang, and a symlink must lead to a
+// regular file within the cap inside the roots that apply to the file: lib/agents
+// for an agent, lib/skills for a SKILL.md, the framework root for anything else. A
+// refused file is skipped quietly, as an unreadable one always was; checkAgentEnums
+// is where an agent file is reported.
+func readTreeFile(cfg Config, path string) ([]byte, error) {
+	clean := filepath.Clean(path)
+	under := func(dir string) bool {
+		return strings.HasPrefix(clean, filepath.Clean(dir)+string(filepath.Separator))
+	}
+	switch {
+	case under(filepath.Join(cfg.YakosRoot, "lib", "agents")):
+		return agentscompose.ReadAgentFileIn(path, agentscompose.AgentFileRoots(cfg.YakosRoot, ""))
+	case under(filepath.Join(cfg.YakosRoot, "lib", "skills")) && filepath.Base(clean) == "SKILL.md":
+		return agentscompose.ReadAgentFileIn(path, agentscompose.SkillFileRoots(cfg.YakosRoot, ""))
+	}
+	return agentscompose.ReadAgentFileIn(path, []string{cfg.YakosRoot})
 }

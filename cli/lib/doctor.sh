@@ -103,6 +103,66 @@ info()  { printf '  [info] %s\n' "$*"; }
 warn()  { printf '  [warn] %s\n' "$*"; warnings=$((warnings + 1)); }
 err()   { printf '  [err]  %s\n' "$*"; errors=$((errors + 1)); }
 
+# _doctor_agent_ok FILE ROOT...: true when the Go roster reader would read FILE:
+# a regular file within 4 MiB (MaxAgentFileBytes), or a symlink that ends at one
+# inside a ROOT (lib/agents, and the project's .claude/agents). Mirrors
+# agentscompose.InspectAgentFile; the doctor counts below mean "files Compose
+# would read", as the Go doctor's do. Nothing is opened, so a FIFO cannot block.
+_doctor_agent_ok() {
+    local f="$1" hops=0 target rdir root rroot size inside=0
+    shift
+    if [ -L "$f" ]; then
+        while [ -L "$f" ]; do
+            hops=$((hops + 1))
+            [ "$hops" -le 40 ] || return 1
+            target="$(readlink -- "$f")" || return 1
+            case "$target" in
+                /*) f="$target" ;;
+                *) f="$(dirname -- "$f")/$target" ;;
+            esac
+        done
+        [ -f "$f" ] || return 1
+        rdir="$(CDPATH='' cd -P -- "$(dirname -- "$f")" 2>/dev/null && pwd -P)" || return 1
+        for root in "$@"; do
+            rroot="$(CDPATH='' cd -P -- "$root" 2>/dev/null && pwd -P)" || continue
+            case "$rdir/" in "$rroot"/*) inside=1 ;; esac
+        done
+        [ "$inside" = 1 ] || return 1
+        f="$rdir/$(basename -- "$f")"
+    fi
+    [ -f "$f" ] || return 1
+    size="$(wc -c < "$f" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$size" ] && [ "$size" -le 4194304 ]
+}
+
+# _doctor_agent_dir_linked PROJECT: the project's .claude or .claude/agents is a
+# symlink, so Compose reads nothing from it (InspectProjectDir).
+_doctor_agent_dir_linked() {
+    [ -L "$1/.claude" ] || [ -L "$1/.claude/agents" ]
+}
+
+# _doctor_count_agents DIR PROJECT: how many *.md files of DIR (other than
+# README.md and, for the framework, lead-template.md) Compose would read.
+_doctor_count_agents() {
+    local dir="$1" project="$2" f n=0 name
+    if [ -n "$project" ] && _doctor_agent_dir_linked "$project"; then
+        echo 0
+        return 0
+    fi
+    for f in "$dir"/*.md; do
+        { [ -e "$f" ] || [ -L "$f" ]; } || continue
+        name="$(basename -- "$f")"
+        case "$name" in README.md) continue ;; lead-template.md) [ -z "$project" ] && continue ;; esac
+        if [ -n "$project" ]; then
+            _doctor_agent_ok "$f" "$YAKOS_ROOT/lib/agents" "$project/.claude/agents" || continue
+        else
+            _doctor_agent_ok "$f" "$YAKOS_ROOT/lib/agents" || continue
+        fi
+        n=$((n + 1))
+    done
+    echo "$n"
+}
+
 echo "yakos doctor"
 echo ""
 
@@ -488,13 +548,10 @@ EOF
             if command -v yk_agents_compose >/dev/null 2>&1; then
                 composed_json="$(yk_agents_compose "$YAKOS_ROOT" "$PROJECT_PATH" 2>/dev/null || echo '{}')"
                 n_agents="$(printf '%s' "$composed_json" | jq 'length' 2>/dev/null || echo 0)"
-                fw_count="$(find "$YAKOS_ROOT/lib/agents" -maxdepth 1 -name '*.md' \
-                    ! -name 'README.md' ! -name 'lead-template.md' 2>/dev/null \
-                    | wc -l | tr -d ' ')"
+                fw_count="$(_doctor_count_agents "$YAKOS_ROOT/lib/agents" "")"
                 proj_count=0
                 if [ -d "$PROJECT_PATH/.claude/agents" ]; then
-                    proj_count="$(find "$PROJECT_PATH/.claude/agents" -maxdepth 1 -name '*.md' \
-                        ! -name 'README.md' 2>/dev/null | wc -l | tr -d ' ')"
+                    proj_count="$(_doctor_count_agents "$PROJECT_PATH/.claude/agents" "$PROJECT_PATH")"
                 fi
                 ok "would inject $n_agents agent(s) ($fw_count framework + $proj_count project; project overrides on id collision)"
                 if [ "$n_agents" -gt 0 ]; then
@@ -714,9 +771,14 @@ if [ "$PRODUCTION" = "1" ]; then
     echo ""
     echo "Agent discipline:"
     if [ -d "$PROJECT_PATH/.claude/agents" ]; then
-        agent_count=0; missing_tools=0; empty_tools=0
+        agent_count=0; missing_tools=0; empty_tools=0; refused_agents=0
         for f in "$PROJECT_PATH/.claude/agents"/*.md; do
-            [ -f "$f" ] || continue
+            { [ -e "$f" ] || [ -L "$f" ]; } || continue
+            if _doctor_agent_dir_linked "$PROJECT_PATH" \
+                || ! _doctor_agent_ok "$f" "$YAKOS_ROOT/lib/agents" "$PROJECT_PATH/.claude/agents"; then
+                refused_agents=$((refused_agents + 1))
+                continue
+            fi
             agent_count=$((agent_count + 1))
             if ! awk '/^---$/{c++} c==1 && /^tools:/{found=1} c==2{exit} END{exit found?0:1}' "$f"; then
                 missing_tools=$((missing_tools + 1))
@@ -724,6 +786,9 @@ if [ "$PRODUCTION" = "1" ]; then
                 empty_tools=$((empty_tools + 1))
             fi
         done
+        if [ "$refused_agents" -gt 0 ]; then
+            pwarn "$refused_agents project agent file(s) or directories not read (symlink out of the agent directories, not a regular file, over 4194304 bytes, or a linked directory)"
+        fi
         if [ "$agent_count" -eq 0 ]; then
             pwarn "no project agents in .claude/agents/ (using framework only)"
         else

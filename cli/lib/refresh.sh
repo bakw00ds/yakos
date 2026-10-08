@@ -655,6 +655,17 @@ _sync_agents() {
         if ! _agent_src_ok "$src" "$agents_src"; then
             printf '    [warn] agents: %s not linked: not a regular file within the size cap, or a symlink out of lib/agents\n' "$rel"
             A_WARN=$((A_WARN + 1))
+            # A link an earlier refresh made to what is now refused would keep the
+            # global roster loading it. Remove that link, and only that link: one
+            # pointing anywhere else, or a real file, is not ours to touch.
+            if [ -L "$dst" ] && [ "$(readlink "$dst" 2>/dev/null || true)" = "$src" ]; then
+                if [ "$DRY_RUN" = "1" ]; then
+                    printf '    [dry-run] agents: would remove stale symlink %s\n' "$rel"
+                elif rm -f -- "$dst"; then
+                    printf '    [warn] agents: removed stale symlink %s: its source is refused\n' "$rel"
+                    A_WARN=$((A_WARN + 1))
+                fi
+            fi
             continue
         fi
         if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then

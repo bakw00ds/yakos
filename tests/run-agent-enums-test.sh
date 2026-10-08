@@ -473,6 +473,28 @@ else
     printf '  SKIP the FIFO fixtures: mkfifo is not available here\n'
 fi
 
+# doctor's agent counts mean "files Compose would read" (rev-363): a link out of the
+# agent directories, a non-regular file, a file over 4 MiB, and a project whose
+# .claude/agents is a link all count as zero, and none of them may hang the count.
+# The helpers are read out of cli/lib/doctor.sh, so the test cannot drift from it.
+DR="$TMP/doctor"; mkdir -p "$DR/root/lib/agents" "$DR/p/.claude/agents" "$DR/out"
+printf 'x\n' > "$DR/root/lib/agents/fw.md"; printf 'x\n' > "$DR/root/lib/agents/README.md"
+printf 'x\n' > "$DR/p/.claude/agents/good.md"; printf 'x\n' > "$DR/out/secret.md"
+ln -s "$DR/root/lib/agents/fw.md" "$DR/p/.claude/agents/inroot.md"
+ln -s "$DR/out/secret.md" "$DR/p/.claude/agents/leak.md"
+ln -s "$DR/nowhere" "$DR/p/.claude/agents/dangling.md"
+dd if=/dev/zero of="$DR/p/.claude/agents/huge.md" bs=1048576 count=5 2>/dev/null
+if [ "$fifos" = 1 ]; then mkfifo "$DR/p/.claude/agents/pipe.md"; fi
+awk '/^# _doctor_agent_ok FILE/{p=1} p{print} /^_doctor_count_agents\(\)/{c=1} c&&/^}/{exit}' "$REPO_ROOT/cli/lib/doctor.sh" > "$DR/helpers.sh"
+dcount() { ( export YAKOS_ROOT="$DR/root"; . "$DR/helpers.sh"; _doctor_count_agents "$@" ); }
+dfw="$(dcount "$DR/root/lib/agents" "")"
+dproj="x"; limited 20 "$DR/proj.out" dcount "$DR/p/.claude/agents" "$DR/p" && dproj="$(cat "$DR/proj.out")" || bad "doctor (bash): the project count did not finish (a FIFO or device blocked it)"
+[ "$dfw" = 1 ] && ok "doctor (bash): framework count skips README.md" || bad "doctor (bash): framework count is '$dfw', want 1"
+[ "$dproj" = 2 ] && ok "doctor (bash): project count is the files Compose reads (a regular file and an in-root link)" || bad "doctor (bash): project count is '$dproj', want 2"
+mkdir -p "$DR/p2/.claude"; ln -s "$DR/p/.claude/agents" "$DR/p2/.claude/agents"
+dlinked="$(dcount "$DR/p2/.claude/agents" "$DR/p2")"
+[ "$dlinked" = 0 ] && ok "doctor (bash): a linked project agents directory counts zero" || bad "doctor (bash): linked directory count is '$dlinked', want 0"
+
 # The shipped framework passes strict on both sides.
 run_strict() { (cd "$REPO_ROOT" && "run_$1" --strict); }
 for side in $sides; do

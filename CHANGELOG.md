@@ -26,14 +26,25 @@ never holds a login: ADR-0010. Detailed entries follow.
   tab and policy writers (K-153), the REPL (K-154).
 
 - **fix: agent-file readers use the roster reader, and the feed scan cannot be
-  hung by a FIFO (K-167, K-171).** `yakos doctor`, `yakos validate` and
-  `yakos refresh` no longer open an agent file with a plain read: a symlink out
-  of `lib/agents` or `.claude/agents`, a file over 4 MiB, a FIFO, and a linked
-  project agents directory are refused, as Compose refuses them. `yakos
-  refresh` links only such files into `~/.claude/agents`. The feed scan's
-  findings and pending files are opened non-blocking and the pending file is
-  read through a 1 MiB cap. Docs: interactive panes and plain-text runtimes are
-  not scanned.
+  hung by a FIFO (K-167, K-171).** `yakos doctor`, `yakos validate`, `yakos
+  refresh` and `yakos install` no longer open an agent file with a plain read: a
+  symlink out of `lib/agents` or `.claude/agents`, a file over 4 MiB, a FIFO, and
+  a linked project agents directory are refused, as Compose refuses them.
+  - Behavior change: the agent counts in `yakos doctor` (the start projection and
+    the agent discipline lines) now mean "files Compose would read". A refused
+    file is no longer counted, and `doctor` warns how many were not read. The
+    bash `YAKOS_IMPL=bash doctor` applies the same rule.
+  - `yakos refresh` and `yakos install` link only readable agents into the global
+    `~/.claude/agents`, and warn about each one they skip. `refresh` also removes
+    a link in `~/.claude/agents` that an earlier run made to a source that is
+    refused now, with a warning. A link that points anywhere else, and a real
+    file, are left alone.
+  - `yakos validate` reads every `.sh` and `.md` of its standards passes through
+    the same reader: a FIFO or a device no longer hangs it, and a link out of the
+    tree is not followed.
+  - The feed scan's findings and pending files are opened non-blocking, must be
+    a regular file with a single name, and the pending file is read through a
+    1 MiB cap. Docs: interactive panes and plain-text runtimes are not scanned.
 
 - **docs: ADR-0010, the runtime-matrix rewrite and the routing map (K-155).**
   ADR-0010 records harness-native routing, the vendor-policy facts it rests on

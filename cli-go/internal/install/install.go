@@ -41,6 +41,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/bakw00ds/yakos/internal/agentscompose"
 )
 
 // subdirs lists the four ~/.claude subdirectories that receive per-file symlinks.
@@ -399,6 +401,7 @@ func linkFilesIn(sub, yakosRootAbs, claudeDir, home string, force, dryRun bool, 
 	var rpt SymlinkReport
 	srcRoot := filepath.Join(yakosRootAbs, "lib", sub)
 	dstRoot := filepath.Join(claudeDir, sub)
+	agentRoots := agentscompose.AgentFileRoots(yakosRootAbs, "")
 
 	if _, err := os.Stat(srcRoot); os.IsNotExist(err) {
 		return rpt, nil
@@ -427,6 +430,18 @@ func linkFilesIn(sub, yakosRootAbs, claudeDir, home string, force, dryRun bool, 
 			return nil
 		}
 		dstPath := filepath.Join(dstRoot, rel)
+
+		// ~/.claude/agents is global: every project and session loads whatever is
+		// linked there. So link only what Compose would read from lib/agents (a
+		// regular file within the size cap, or a link that stays inside lib/agents),
+		// never a link to some other file, a FIFO or a device.
+		if sub == "agents" {
+			if p, ierr := agentscompose.InspectAgentFile(srcPath, agentRoots); ierr != nil || p != agentscompose.ProblemNone {
+				_, _ = fmt.Fprintf(ew, "install: skip: agents/%s not linked: not a regular file within the size cap, or a symlink out of lib/agents\n", rel)
+				rpt.Skipped++
+				return nil
+			}
+		}
 
 		if !dryRun {
 			if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil { //nolint:gosec

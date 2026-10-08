@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,12 +22,19 @@ import (
 //   - Within the next 200 lines there must be a line that is exactly "---"
 //   - The body between the fences must be valid YAML
 func parseFrontmatter(path string) (map[string]any, error) {
+	return parseFrontmatterIn(path, nil)
+}
+
+// parseFrontmatterIn is parseFrontmatter for a caller that holds the symlink
+// roots of the file's kind (agents): a link must resolve into one of them, at the
+// read and not only at the caller's earlier check. No roots: any regular file.
+func parseFrontmatterIn(path string, roots []string) (map[string]any, error) {
 	if !readableAgentFile(path) {
 		// Not read at all: a FIFO would block here for good, and a device or a huge
 		// file would never end. checkAgentEnums reports such an agent file.
 		return nil, fmt.Errorf("read error: not a regular file within the size cap")
 	}
-	data, err := agentscompose.ReadRegularFile(path)
+	data, err := readWithin(path, roots)
 	if err != nil {
 		return nil, fmt.Errorf("read error: %w", err)
 	}
