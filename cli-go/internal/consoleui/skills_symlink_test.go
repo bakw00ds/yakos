@@ -417,3 +417,65 @@ func symlinkOrSkip(t *testing.T, target, link string) {
 		t.Skipf("cannot create symlinks here: %v", err)
 	}
 }
+
+// K-167: the endpoint composes through the roster reader, so the other two refusals
+// hold here as well. A project agent over the size cap, and one whose extends: leaves
+// lib/agents, are left out of the response.
+func TestSkillsHandler_HugeAndEscapingExtendsAgentsAreNotListed(t *testing.T) {
+	root := buildFakeYakosRoot(t)
+	project := t.TempDir()
+	agents := filepath.Join(project, ".claude", "agents")
+	if err := os.MkdirAll(agents, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	huge := append([]byte("---\nid: hugeone\nmodel: haiku\n---\n\n## Purpose\n\n"), bytes.Repeat([]byte("x\n"), agentscompose.MaxAgentFileBytes/2+1)...)
+	if err := os.WriteFile(filepath.Join(agents, "hugeone.md"), huge, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(t.TempDir(), "evil.md")
+	if err := os.WriteFile(outside, []byte("---\nid: evil\n---\nOUTSIDE-TEMPLATE\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	esc := "---\nid: escaper\nextends: " + strings.TrimSuffix(outside, ".md") + "\nmodel: haiku\n---\n\n## Purpose\n\nescapes\n"
+	if err := os.WriteFile(filepath.Join(agents, "escaper.md"), []byte(esc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	dots := "---\nid: dotter\nextends: ../../../../etc/hosts\nmodel: haiku\n---\n\n## Purpose\n\ndots\n"
+	if err := os.WriteFile(filepath.Join(agents, "dotter.md"), []byte(dots), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	ts, tok := newSkillsTestServerFor(t, root, project)
+	resp := doSkillsGET(t, ts, tok)
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", resp.StatusCode, body)
+	}
+	var got struct {
+		Agents []struct {
+			Name string `json:"name"`
+		} `json:"agents"`
+	}
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, a := range got.Agents {
+		names[a.Name] = true
+	}
+	for _, bad := range []string{"hugeone", "escaper", "dotter"} {
+		if names[bad] {
+			t.Errorf("agent %q was listed", bad)
+		}
+	}
+	if !names["testworker"] {
+		t.Error("the framework agent vanished from the response")
+	}
+	if strings.Contains(string(body), "OUTSIDE-TEMPLATE") {
+		t.Error("an extends template from outside lib/agents reached the response")
+	}
+}
