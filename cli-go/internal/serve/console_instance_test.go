@@ -169,12 +169,22 @@ func TestRun_RequireConsoleExitsOnBindFailure(t *testing.T) {
 // gateway from a squatter on the port.
 func TestVersion_ReportsBoundGateway(t *testing.T) {
 	t.Setenv("YAKOS_DISPATCH_LOG", "")
-	addr := freeAddr(t)
-	info, _ := startDaemon(t, serve.Config{ConsoleAddr: freeAddr(t), Gateway: true, GatewayAddr: addr})
-	if info.GatewayAddr != addr {
-		t.Fatalf("gateway_addr %q, want the bound %q", info.GatewayAddr, addr)
+	// Port 0, so the daemon binds the port itself. A port picked with freeAddr is
+	// closed before the daemon binds it, and another process of a busy runner can
+	// take it in between: the gateway then loses the bind, reports no address, and
+	// the test failed with gateway_addr "" (K-163).
+	info, _ := startDaemon(t, serve.Config{ConsoleAddr: "127.0.0.1:0", Gateway: true, GatewayAddr: "127.0.0.1:0"})
+	host, port, err := net.SplitHostPort(info.GatewayAddr)
+	if err != nil || host != "127.0.0.1" || port == "0" || port == "" {
+		t.Fatalf("gateway_addr %q, want the bound 127.0.0.1 address with its real port", info.GatewayAddr)
 	}
-	off, _ := startDaemon(t, serve.Config{ConsoleAddr: freeAddr(t), GatewayPolicyDir: t.TempDir()})
+	// It is the address the gateway is really listening on.
+	conn, err := net.DialTimeout("tcp", info.GatewayAddr, 10*time.Second)
+	if err != nil {
+		t.Fatalf("gateway_addr %q does not accept connections: %v", info.GatewayAddr, err)
+	}
+	_ = conn.Close()
+	off, _ := startDaemon(t, serve.Config{ConsoleAddr: "127.0.0.1:0", GatewayPolicyDir: t.TempDir()})
 	if off.GatewayAddr != "" {
 		t.Fatalf("gateway off but gateway_addr %q", off.GatewayAddr)
 	}
@@ -183,7 +193,7 @@ func TestVersion_ReportsBoundGateway(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer held.Close() //nolint:errcheck
-	lost, _ := startDaemon(t, serve.Config{ConsoleAddr: freeAddr(t), Gateway: true, GatewayAddr: held.Addr().String()})
+	lost, _ := startDaemon(t, serve.Config{ConsoleAddr: "127.0.0.1:0", Gateway: true, GatewayAddr: held.Addr().String()})
 	if lost.GatewayAddr != "" {
 		t.Fatalf("bind failed but gateway_addr %q", lost.GatewayAddr)
 	}

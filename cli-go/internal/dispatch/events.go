@@ -255,6 +255,9 @@ type finishedEvent struct {
 	PolicySHA        string  `json:"policy_sha,omitempty"`
 	Surface          string  `json:"surface,omitempty"`
 	NativeSessionID  string  `json:"native_session_id,omitempty"`
+	// K-177 routing shadow fields (see cost.Event). Omitted unless the user opted in.
+	TierSuggestedByJev string `json:"tier_suggested_by_jev,omitempty"`
+	JevShadow          string `json:"jev_shadow,omitempty"`
 	// HooksUntrusted marks a codex run whose yakOS profile hooks.json was not the
 	// file yakos installs, so the hook gate was off (K-145). Additive-optional.
 	HooksUntrusted bool `json:"hooks_untrusted,omitempty"`

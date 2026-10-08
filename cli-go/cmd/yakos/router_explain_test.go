@@ -260,7 +260,7 @@ func TestRouterExplainJSONSchema(t *testing.T) {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	want := "agent chain fallback_from model overrides policy_sha provider reason route_class rule runtime skipped"
+	want := "agent chain fallback_from jev_shadow model overrides policy_sha provider reason route_class rule runtime skipped"
 	if got := strings.Join(keys, " "); got != want {
 		t.Errorf("keys %q, want %q", got, want)
 	}
@@ -396,5 +396,32 @@ func TestRouterMainPassesQueryAndMarksOverride(t *testing.T) {
 	errb.Reset()
 	if code := explainRun(&out, &errb, env, explainArgs{Agent: "backend"}, "router explain"); code != 1 || errb.String() != "router explain: no runtime can run\n" {
 		t.Errorf("exit %d, stderr %q", code, errb.String())
+	}
+}
+
+// K-177: explain says whether the Jev routing shadow is on. Only the user-level
+// policy turns it on; a project file cannot.
+func TestJevShadowStateOnlyTheUserPolicyTurnsItOn(t *testing.T) {
+	state := t.TempDir()
+	proj := t.TempDir()
+	env := explainEnv{stateDir: func() string { return state }, environ: func() []string { return nil }}
+	if got := jevShadowState(env, proj); got != "off" {
+		t.Errorf("default = %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(proj, ".yakos.yml"), []byte("decisions:\n  provider: jev\n  routing_shadow: true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := jevShadowState(env, proj); got != "off" {
+		t.Errorf("a project file turned it on: %q", got)
+	}
+	if err := os.WriteFile(filepath.Join(state, "decision-policy.yml"), []byte("routing_shadow: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := jevShadowState(env, proj); got != "on" {
+		t.Errorf("user policy = %q", got)
+	}
+	env.environ = func() []string { return []string{"YAKOS_DECISION_DISABLE=1"} }
+	if got := jevShadowState(env, proj); got != "off" {
+		t.Errorf("kill switch = %q", got)
 	}
 }

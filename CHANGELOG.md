@@ -46,6 +46,19 @@ never holds a login: ADR-0010. Detailed entries follow.
     a regular file with a single name, and the pending file is read through a
     1 MiB cap. Docs: interactive panes and plain-text runtimes are not scanned.
 
+- **feat(router): Jev routing shadow, opt-in (K-177).** After a dispatch is routed,
+  Jev can suggest a tier; it is recorded as `tier_suggested_by_jev` (and
+  `jev_shadow`: `ok`, `skipped_sensitive`, `unavailable`) on the finished ledger
+  row and never changes a route. Off by default and enabled only by
+  `routing_shadow: true` in the user-level `decision-policy.yml`; a project file
+  cannot enable it. It sends the agent name, the route class and the first 2 KiB of
+  the task to `*.typesafe.ai`, never a sensitive task, with a 3 second bound, no
+  retry and at most 150 ms of wait at ledger-write time. The opt-in is read only
+  from the home state directory. A path written in the task text leaves with the
+  text unless it matches `never_paths`. `yakos doctor` and `yakos router explain`
+  show whether it is on. New question set `lib/decisions/routing-tier.yaml`. See
+  `docs/routing.md` and the ADR-0009 addendum.
+
 - **flows: triggers follow-ups (K-172).** `yakos flows schedule enable|disable
   <workflow>` writes the 0600 schedules file atomically (it was hand-edited); the
   webhook secret may live in `~/.yakos-state/webhook-secrets/<secret_env>`
@@ -141,6 +154,13 @@ never holds a login: ADR-0010. Detailed entries follow.
   `gateway_request` ledger event (ids, status, token counts and `duration_s`;
   no body, header or credential). `yakos.version` gained an additive
   `gateway_addr` field.
+
+### Fixed
+
+- **Windows: `statepath` edit locks no longer fail on a delete-pending lock
+  (K-163).** Creating the lock while the previous holder's file was still
+  delete-pending failed with "cannot take the edit lock"; `lockEdit` now waits
+  it out, bounded by the 2 s edit-lock wait.
 
 ### Changed
 

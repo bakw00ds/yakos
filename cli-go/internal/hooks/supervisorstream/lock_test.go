@@ -50,7 +50,10 @@ func TestAcquireLockBacksOffAndStopsAtBudget(t *testing.T) {
 	if _, ok := acquireLockAs(lock, "probe", 400*time.Millisecond); ok {
 		t.Fatal("took a held lock")
 	}
-	if d := time.Since(start); d < 400*time.Millisecond || d > 900*time.Millisecond {
+	// The wait ends at the budget (never earlier). The upper bound is only a hang
+	// guard: how long a sleep really takes is the runner's business, and the
+	// back-off itself is asserted below in tries.
+	if d := time.Since(start); d < 400*time.Millisecond || d > 20*time.Second {
 		t.Errorf("waited %v, want ~400ms", d)
 	}
 	b, err := os.ReadFile(stats)

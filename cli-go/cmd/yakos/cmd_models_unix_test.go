@@ -109,11 +109,23 @@ func checkSignalEndsAgyAndItsHelpers(t *testing.T, sig os.Signal) {
 		t.Fatal(err)
 	}
 	waited := make(chan error, 1)
-	go func() { waited <- cmd.Wait() }()
+	exited := make(chan struct{}) // closed when the command ends
+	go func() { waited <- cmd.Wait(); close(exited) }()
 
+	// The fake agy writes the third pid last, so three pids are the start signal.
+	// The ceiling is a hang guard, as in startHangingProbe: a race-instrumented
+	// helper on a loaded runner needs tens of seconds to reach agy, and a probe that
+	// ended early fails at once with its output instead of waiting the ceiling out.
 	var pids []int
-	for deadline := time.Now().Add(20 * time.Second); len(pids) < 3 && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+	for deadline := time.Now().Add(120 * time.Second); len(pids) < 3 && time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
 		pids = readPIDs()
+		select {
+		case <-exited:
+			if pids = readPIDs(); len(pids) < 3 {
+				t.Fatalf("the command ended before the fake agy started its helpers (%d pids):\n%s", len(pids), out.String())
+			}
+		default:
+		}
 	}
 	if len(pids) < 3 {
 		_ = cmd.Process.Kill()
