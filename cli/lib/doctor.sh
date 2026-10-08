@@ -723,7 +723,7 @@ if [ "$PRODUCTION" = "1" ]; then
         sec_grep=$(rg -l -E '(sk-ant-[A-Za-z0-9_-]{30,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|BEGIN[[:space:]]+(RSA|EC)[[:space:]]+PRIVATE[[:space:]]+KEY)' \
             "$PROJECT_PATH" --glob '!**/.git/**' --glob '!tests/fixtures/**' 2>/dev/null | head -5)
     else
-        sec_grep=$(grep -rlE '(sk-ant-[A-Za-z0-9_-]{30,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|BEGIN[[:space:]]+(RSA|EC)[[:space:]]+PRIVATE[[:space:]]+KEY)' \
+        sec_grep=$(grep -rlE -D skip '(sk-ant-[A-Za-z0-9_-]{30,}|AKIA[0-9A-Z]{16}|ghp_[A-Za-z0-9]{30,}|BEGIN[[:space:]]+(RSA|EC)[[:space:]]+PRIVATE[[:space:]]+KEY)' \
             "$PROJECT_PATH" --exclude-dir=.git --exclude-dir=node_modules 2>/dev/null | head -5)
     fi
     if [ -z "$sec_grep" ]; then pok "no obvious-secret patterns in tree"; else pwarn "potential secrets in: $(echo "$sec_grep" | tr '\n' ' ')"; fi

@@ -502,6 +502,20 @@ mkdir -p "$DR/p2/.claude"; ln -s "$DR/p/.claude/agents" "$DR/p2/.claude/agents"
 dlinked="$(dcount "$DR/p2/.claude/agents" "$DR/p2")"
 [ "$dlinked" = 0 ] && ok "doctor (bash): a linked project agents directory counts zero" || bad "doctor (bash): linked directory count is '$dlinked', want 0"
 
+# `doctor --production` scans the project tree for secrets; a plain FIFO in the
+# project used to block grep for good (rev/sec-363b). The run is under a watchdog.
+if [ "$fifos" = 1 ]; then
+    FP="$TMP/fifoscan"; mkdir -p "$FP/proj/.claude" "$FP/home"
+    mkfifo "$FP/proj/pipe"
+    fp_run() { HOME="$FP/home" YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$REPO_ROOT/cli/lib" bash "$REPO_ROOT/cli/lib/doctor.sh" "$FP/proj" --production; }
+    if limited 60 "$FP/out.txt" fp_run || [ "$?" != 124 ]; then
+        grep -q 'no obvious-secret patterns in tree' "$FP/out.txt" && ok "doctor --production (bash) finishes with a FIFO in the project" || bad "doctor --production (bash): secret scan did not report on a FIFO project"
+    else
+        bad "doctor --production (bash) blocked on a FIFO in the project"
+    fi
+    rm -rf "$FP"
+fi
+
 # The shipped framework passes strict on both sides.
 run_strict() { (cd "$REPO_ROOT" && "run_$1" --strict); }
 for side in $sides; do
