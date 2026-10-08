@@ -25,6 +25,19 @@ never holds a login: ADR-0010. Detailed entries follow.
   the Anthropic gateway (K-151), Flows triggers (K-152), the Models & Providers
   tab and policy writers (K-153), the REPL (K-154).
 
+- **feat(router): Jev routing shadow, opt-in (K-177).** After a dispatch is routed,
+  Jev can suggest a tier; it is recorded as `tier_suggested_by_jev` (and
+  `jev_shadow`: `ok`, `skipped_sensitive`, `unavailable`) on the finished ledger
+  row and never changes a route. Off by default and enabled only by
+  `routing_shadow: true` in the user-level `decision-policy.yml`; a project file
+  cannot enable it. It sends the agent name, the route class and the first 2 KiB of
+  the task to `*.typesafe.ai`, never a sensitive task, with a 3 second bound, no
+  retry and at most 150 ms of wait at ledger-write time. The opt-in is read only
+  from the home state directory. A path written in the task text leaves with the
+  text unless it matches `never_paths`. `yakos doctor` and `yakos router explain`
+  show whether it is on. New question set `lib/decisions/routing-tier.yaml`. See
+  `docs/routing.md` and the ADR-0009 addendum.
+
 - **flows: triggers follow-ups (K-172).** `yakos flows schedule enable|disable
   <workflow>` writes the 0600 schedules file atomically (it was hand-edited); the
   webhook secret may live in `~/.yakos-state/webhook-secrets/<secret_env>`
@@ -135,6 +148,13 @@ never holds a login: ADR-0010. Detailed entries follow.
   the caller's environment, not an authenticated identity. A command that only
   quotes a writer phrase (echo, grep, a commit message) is blocked too; use the
   Write tool for such text. Reference: `docs/routing.md`, `docs/budgets.md`.
+
+### Fixed
+
+- **Windows: `statepath` edit locks no longer fail on a delete-pending lock
+  (K-163).** Creating the lock while the previous holder's file was still
+  delete-pending failed with "cannot take the edit lock"; `lockEdit` now waits
+  it out, bounded by the 2 s edit-lock wait.
 
 ### Changed
 

@@ -19,7 +19,7 @@ spawning each vendor's own binary, is [ADR-0010](adr/ADR-0010.md).
 | What does each harness support (sandbox, hooks, resume, parsers, scans, accounting)? | [runtime-matrix.md](runtime-matrix.md) |
 | How does the terminal REPL route? | [ADR-0012](adr/ADR-0012.md), [repl.md](repl.md) |
 | Can a local model server be a provider? | [Local providers: a documented slot](#local-providers-a-documented-slot) |
-| Does Jev (TypeSafe) pick models? | [Jev and routing](#jev-and-routing-shadow-only-not-built) |
+| Does Jev (TypeSafe) pick models? | [Jev and routing](#jev-and-routing-shadow-only-opt-in) |
 
 ## One decision, in order
 
@@ -855,18 +855,63 @@ Rules for whoever builds it:
 - Accounting is `billing: local`: tokens only.
 - Nothing about the provider (address, model id, route) goes into a system prompt.
 
-## Jev and routing (shadow-only, not built)
+## Jev and routing (shadow-only, opt-in)
 
-The `routing` surface of the Jev decision provider
-([decision-providers.md](decision-providers.md), [ADR-0009](adr/ADR-0009.md)) is
-decided as **shadow-only**: a question over `{agent, task_preview, touches_code}`
-would suggest a tier, the suggestion would be written to the ledger as
-`tier_suggested_by_jev`, and it would never change the route, the model ceiling or
-the sensitive class. Reason: a live per-task downgrade picks the model that writes
-the code and would bypass the offline Wilson-interval promotion gate
-(`internal/routing`). The shadow field exists to compare Jev's suggestion against
-that eval later. It is not implemented yet: the ledger has no such field, no
-decision file for it exists in `lib/decisions/`, and `yakos decide` has no routing
-subcommand. When it lands it will follow ADR-0009: off by default, enabled only
-from a trusted file, task text redacted before it leaves the host, a 1.5-second
-deadline, and failure leaves routing exactly as it is.
+K-177 built the `routing-tier` surface of the Jev decision provider
+([decision-providers.md](decision-providers.md), [ADR-0009](adr/ADR-0009.md)). It
+is **shadow-only**: after a dispatch is routed, Jev is asked which tier
+(`haiku`, `sonnet` or `opus`) it would pick for the task, and the answer is written
+to the finished ledger row as `tier_suggested_by_jev`. It never changes the route,
+the model, the model ceiling or the sensitive class. Reason: a live per-task
+downgrade picks the model that writes the code and would bypass the offline
+Wilson-interval promotion gate (`internal/routing`). The field exists to compare
+Jev's suggestion against that eval later.
+
+**It sends task text off the host, so it is off by default.** It runs only when
+the user-level `~/.yakos-state/decision-policy.yml` sets `routing_shadow: true`
+(a regular file you own, not group or world writable). A project `.yakos.yml`
+cannot turn it on; it can only opt out with `decisions.provider: none` or
+`decisions.surfaces.routing-tier.mode: off`. `YAKOS_DECISION_DISABLE=1` and a
+missing `TYPESAFE_API_KEY` also stop it. `yakos doctor` and `yakos router explain`
+print whether it is on.
+
+What leaves the machine, in one request per dispatch to `https://*.typesafe.ai`
+(or a loopback gateway you configured; any other host is refused):
+
+| Field | Content |
+|---|---|
+| `agent` | the agent name |
+| `route_class` | `default`, `chat`, and so on |
+| `task_preview` | the first 2 KiB of the task text, whitespace-normalised and secret-redacted |
+
+Never sent: the knowledge block, the agent's system prompt, the environment,
+the project root or any credential. File paths are not added to the payload, but a
+path you write in the task text is part of the task and leaves the host like any
+other word, unless it matches `never_paths` (then it is withheld and the task is
+skipped). The question set is
+`lib/decisions/routing-tier.yaml`; its `state_fields` allowlist names exactly the
+three fields above.
+
+Rules the code enforces (`internal/dispatch/jev_shadow.go`):
+
+- **A sensitive task is never sent.** A request whose route class is `sensitive`
+  is skipped without a scan. Otherwise the exact sanitized payload and the whole
+  task go through the K-140 scanner; a redaction, a withheld path or a scan that
+  cannot finish counts as sensitive. The ledger records `jev_shadow:
+  skipped_sensitive` and no tier.
+- **One attempt, 3 seconds, no retry.** Any failure (timeout, HTTP error, bad
+  answer, no key, open breaker, daily budget spent) is recorded as `jev_shadow:
+  unavailable`. The dispatch is not delayed and does not fail.
+- **Off the critical path.** The call starts in `Account.Start`, after the route
+  is final, in its own goroutine. The only wait is when the finished row is
+  written, at most 150 ms and only if the call is still in flight. A late answer
+  is dropped and the row says `unavailable`; it is not carried to a later row.
+  Turns that never call `Start` (the console's remembered interactive turns) do
+  not start the shadow.
+- **Bounded cost.** The Jev client's circuit breaker and the daily budget of
+  `decision-policy.yml` apply, and every call is appended to the decision log
+  (counts only, never the text) so `yakos decide compare routing-tier` can read it.
+
+Ledger fields (additive, omitted unless you opted in): `tier_suggested_by_jev`
+(only when the status is `ok`) and `jev_shadow` (`ok`, `skipped_sensitive` or
+`unavailable`).

@@ -131,6 +131,12 @@ type Event struct {
 	FallbackFrom string `json:"fallback_from,omitempty"`
 	RouteClass   string `json:"route_class,omitempty"`
 	PolicySHA    string `json:"policy_sha,omitempty"`
+	// K-177 routing shadow, on dispatch_finished only and only when the user
+	// opted in. TierSuggestedByJev is the tier Jev suggested (haiku, sonnet or
+	// opus); JevShadow is ok, skipped_sensitive or unavailable. Neither field
+	// ever steered the route. Compare them with the tier that actually ran.
+	TierSuggestedByJev string `json:"tier_suggested_by_jev,omitempty"`
+	JevShadow          string `json:"jev_shadow,omitempty"`
 	// Surface is the entry point that made the dispatch: cli, console-chat,
 	// mcp, jsonrpc, rest, grpc, flows.
 	Surface string `json:"surface,omitempty"`

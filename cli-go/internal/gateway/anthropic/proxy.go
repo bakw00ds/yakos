@@ -116,6 +116,9 @@ func (s *Server) badTokenSlot() (int64, bool) {
 	s.badMu.Lock()
 	defer s.badMu.Unlock()
 	now := time.Now()
+	if s.cfg.badTokenNow != nil {
+		now = s.cfg.badTokenNow()
+	}
 	if s.cfg.badTokenGap > 0 && !s.badLast.IsZero() && now.Sub(s.badLast) < s.cfg.badTokenGap {
 		s.badSkipped++
 		return 0, false

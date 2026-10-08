@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -154,6 +155,13 @@ func newLedgerServerOpts(t *testing.T, sdk *interactive.SDKEngineFactory, claude
 	}
 	ts := httptest.NewServer(consoleui.RequireTokenForNonStatic(tok, consoleui.RequireJSONForMutations(srv.HandlerForTest())))
 	t.Cleanup(ts.Close)
+	// Registered last, so it runs first of the fixture's cleanups and after the
+	// test's own (mgr.Close of its conversations): the dispatch goroutine, the
+	// engine's reader and the sidecar still write a transcript line or a ledger
+	// row after the last event a test waits for, and TempDir's RemoveAll then
+	// fails with "directory not empty" (K-130 class; K-163 on
+	// TestInteractiveChat_NewSDKSessionAtAHardStopIsRefused).
+	t.Cleanup(func() { settleDirs(logDir, workDir, workspace, yakosRoot) })
 	return ledgerServer{ts: ts, tok: tok, logDir: logDir, workDir: workDir, mgr: mgr, bus: bus, launches: launches, yakosRoot: yakosRoot}
 }
 
@@ -488,5 +496,31 @@ func TestInteractiveChat_OneShotTurnsAreNotCountedByTheTurnLedger(t *testing.T) 
 	}
 	if u, _ := ev[1]["usage"].(map[string]any); u["cache_read"] != float64(100) {
 		t.Errorf("the streamed one-shot turn reports its cache tokens: %v", u)
+	}
+}
+
+// settleDirs waits until nothing under dirs changes for a quarter of a second, so
+// the writes still in flight when a test ends land before its TempDirs are removed.
+// A bounded wait: a directory that never goes quiet is left to TempDir's own report.
+func settleDirs(dirs ...string) {
+	last, stable := "", 0
+	for i := 0; i < 100 && stable < 5; i++ {
+		var sig strings.Builder
+		for _, dir := range dirs {
+			_ = filepath.WalkDir(dir, func(p string, d os.DirEntry, err error) error {
+				if err == nil && !d.IsDir() {
+					if info, ierr := d.Info(); ierr == nil {
+						fmt.Fprintf(&sig, "%s:%d:%d;", p, info.Size(), info.ModTime().UnixNano())
+					}
+				}
+				return nil
+			})
+		}
+		if sig.String() == last {
+			stable++
+		} else {
+			last, stable = sig.String(), 0
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
