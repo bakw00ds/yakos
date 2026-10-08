@@ -75,6 +75,7 @@ func runServe(yakosRoot string, args []string) {
 	consoleBootstrapCertName := ""
 	noBootstrapCert := false
 	consoleAllowBash := false
+	consoleModelWrites := false
 	requireConsole := false
 	consoleStructuredQuestions := false
 	shareTerminal := false
@@ -113,6 +114,7 @@ func runServe(yakosRoot string, args []string) {
 		{Name: "--console-bootstrap-cert", Kind: cliflag.String, Str: &consoleBootstrapCertName, ValueDesc: "a name"},
 		{Name: "--no-bootstrap-cert", Kind: cliflag.Bool, Bool: &noBootstrapCert},
 		{Name: "--console-allow-bash", Kind: cliflag.Bool, Bool: &consoleAllowBash},
+		{Name: "--console-model-writes", Kind: cliflag.Bool, Bool: &consoleModelWrites},
 		{Name: "--require-console", Kind: cliflag.Bool, Bool: &requireConsole},
 		{Name: "--console-structured-questions", Kind: cliflag.Bool, Bool: &consoleStructuredQuestions},
 		{Name: "--share-terminal", Kind: cliflag.Bool, Bool: &shareTerminal},
@@ -217,6 +219,7 @@ func runServe(yakosRoot string, args []string) {
 		ConsoleBootstrapCertName:       consoleBootstrapCertName,
 		NoBootstrapCert:                noBootstrapCert,
 		ConsoleAllowBash:               consoleAllowBash,
+		ConsoleModelWrites:             consoleModelWrites,
 		RequireConsole:                 requireConsole,
 		ConsoleStructuredQuestions:     consoleStructuredQuestions,
 		ShareTerminal:                  shareTerminal,
@@ -634,6 +637,9 @@ Flags:
   --no-console              Disable the unified console server.
   --require-console         Exit with an error when the console cannot bind its port
                             (default: log it and run without a console).
+  --console-model-writes    Let the console's Models tab edit the model registry and
+                            router policy (admin role, CSRF token, 5-minute step-up
+                            re-auth). Off by default; see docs/routing.md.
   --openai-endpoint         Serve the OpenAI-compatible endpoint (/v1/models,
                             /v1/chat/completions) on 127.0.0.1:7898, loopback only,
                             bearer = the REST write token. Same as openai_endpoint: true

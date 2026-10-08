@@ -36,6 +36,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/dispatch"
 	"github.com/bakw00ds/yakos/internal/modelreg"
+	"github.com/bakw00ds/yakos/internal/netid"
 	"github.com/bakw00ds/yakos/internal/router"
 	"github.com/bakw00ds/yakos/internal/statepath"
 )
@@ -63,6 +64,9 @@ type modelsPage struct {
 	cooling                  func(project, runtime string) (bool, time.Duration)
 	now                      func() time.Time
 
+	// w is the browser-write side (K-175); disabled unless Config.ModelWrites.
+	w *modelsWriter
+
 	mu     sync.Mutex
 	probes map[string]probeEntry
 }
@@ -78,6 +82,7 @@ func newModelsPage(workspaceRoot, yakosRoot string) *modelsPage {
 		stateDir: modelreg.DefaultStateDir, logPath: statepath.DispatchLog,
 		probe: auth.ProbeRuntime, cooling: dispatch.RuntimeCooling, now: time.Now,
 		probes: map[string]probeEntry{},
+		w:      &modelsWriter{},
 	}
 }
 
@@ -142,16 +147,22 @@ type aliasView struct {
 }
 
 type overviewResponse struct {
-	// WritesEnabled is false: the browser cannot edit policy in this build.
-	WritesEnabled bool                 `json:"writes_enabled"`
-	Providers     []providerView       `json:"providers"`
-	Models        []modelreg.Entry     `json:"models"`
-	Aliases       []aliasView          `json:"aliases"`
-	Warnings      int                  `json:"registry_warnings"`
-	Budgets       []budgetView         `json:"budgets"`
-	Evals         []evalView           `json:"evals"`
-	Router        router.PolicyView    `json:"router"`
-	Sensitive     router.SensitiveView `json:"sensitive"`
+	// WritesEnabled says the operator turned browser writes on (--console-model-writes);
+	// CanWrite is that and the caller being an admin. The tab draws write controls
+	// only for CanWrite.
+	WritesEnabled bool `json:"writes_enabled"`
+	CanWrite      bool `json:"can_write"`
+	// PrivilegedHidden says router.allow_unsandboxed_runtimes was left out because
+	// the caller is below admin.
+	PrivilegedHidden bool                 `json:"privileged_hidden"`
+	Providers        []providerView       `json:"providers"`
+	Models           []modelreg.Entry     `json:"models"`
+	Aliases          []aliasView          `json:"aliases"`
+	Warnings         int                  `json:"registry_warnings"`
+	Budgets          []budgetView         `json:"budgets"`
+	Evals            []evalView           `json:"evals"`
+	Router           router.PolicyView    `json:"router"`
+	Sensitive        router.SensitiveView `json:"sensitive"`
 }
 
 func (m *modelsPage) probeOf(ctx context.Context, harness string) auth.ProbeResult {
@@ -185,8 +196,11 @@ func (m *modelsPage) handleOverview(w http.ResponseWriter, r *http.Request) {
 		modelsError(w, http.StatusServiceUnavailable, "model registry unavailable")
 		return
 	}
+	id := netid.IdentityFrom(r.Context())
 	out := overviewResponse{
-		Providers: []providerView{}, Models: []modelreg.Entry{}, Aliases: []aliasView{}, Budgets: []budgetView{},
+		WritesEnabled: m.w.enabled, CanWrite: m.w.enabled && id.Role.Allows(netid.RoleAdmin),
+		PrivilegedHidden: !id.Role.Allows(netid.RoleAdmin),
+		Providers:        []providerView{}, Models: []modelreg.Entry{}, Aliases: []aliasView{}, Budgets: []budgetView{},
 		Warnings: len(reg.Warnings()), Router: router.ViewOf(state), Sensitive: router.Sensitive(),
 	}
 	for _, h := range modelreg.Harnesses {
@@ -217,6 +231,7 @@ func (m *modelsPage) handleOverview(w http.ResponseWriter, r *http.Request) {
 		}
 		out.Aliases = append(out.Aliases, av)
 	}
+	out.Router = redactPolicy(out.Router, id)
 	out.Budgets = m.budgets()
 	out.Evals = m.evals()
 	writeModelsJSON(w, http.StatusOK, out)
@@ -326,7 +341,17 @@ func (m *modelsPage) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	if !getOnly(w, r) {
 		return
 	}
-	writeModelsJSON(w, http.StatusOK, router.ViewOf(m.stateDir()))
+	writeModelsJSON(w, http.StatusOK, redactPolicy(router.ViewOf(m.stateDir()), netid.IdentityFrom(r.Context())))
+}
+
+// redactPolicy hides the runtimes the operator allowed to run unsandboxed from
+// everyone below admin: which harnesses may run without a sandbox is a map for an
+// attacker and not something a read-only role needs (K-175).
+func redactPolicy(v router.PolicyView, id netid.Identity) router.PolicyView {
+	if !id.Role.Allows(netid.RoleAdmin) {
+		v.AllowUnsandboxedRuntimes = []string{}
+	}
+	return v
 }
 
 // handleExplain is the playground: GET /api/models/explain?agent=A[&class=C]

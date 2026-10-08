@@ -449,6 +449,12 @@ type ConfigChange struct {
 	SHABefore, SHAAfter string
 	// Surface is "cli" or "console".
 	Surface string
+	// Actor and AuthMethod say who a console write acted as: Actor is
+	// "operator-browser" and AuthMethod is how the server authenticated the
+	// browser ("session", "cert" or "none" for the loopback bearer token). Both
+	// are set by the server from the resolved identity, never from the request.
+	// Empty for a CLI write.
+	Actor, AuthMethod string
 }
 
 // auditFiles are the files a ConfigChange may name: the router policy, the model
@@ -465,6 +471,8 @@ type configChangedEvent struct {
 	SHABefore  string `json:"policy_sha_before"`
 	SHAAfter   string `json:"policy_sha_after"`
 	Surface    string `json:"surface"`
+	Actor      string `json:"actor,omitempty"`
+	AuthMethod string `json:"auth_method,omitempty"`
 }
 
 // ConfigChanged appends a config_changed event: who (the request's OperatorID),
@@ -491,7 +499,7 @@ func (a *Account) configChangedLine(c ConfigChange) ([]byte, error) {
 	ev := configChangedEvent{
 		Type: "config_changed", Ts: a.started.UTC().Format(time.RFC3339), OperatorID: op,
 		File: c.File, Action: logIdent(c.Action, 64), SHABefore: logHex(c.SHABefore, 64), SHAAfter: logHex(c.SHAAfter, 64),
-		Surface: logSurface(c.Surface),
+		Surface: logSurface(c.Surface), Actor: logIdent(c.Actor, 32), AuthMethod: logSurface(c.AuthMethod),
 	}
 	return json.Marshal(ev)
 }

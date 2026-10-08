@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +16,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/budget"
 	"github.com/bakw00ds/yakos/internal/cliflag"
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
 // Exit-code contract of `yakos budget` (docs/budgets.md):
@@ -165,24 +168,51 @@ func runBudget(args []string) {
 				os.Exit(1)
 			}
 		}
-		if len(pos) == 2 {
-			if err := budget.SetLimit(opts.StateDirOrDefault(), pos[0], usd, budget.Window(window)); err != nil {
-				fmt.Fprintln(os.Stderr, err)
+		// Open the audit log BEFORE the first write so a change that cannot be
+		// recorded is refused (as for the model and router writers, K-153), then
+		// record one config_changed line whatever the writes did to the file.
+		//
+		// The policy lives where the budget code looks for it (YAKOS_DISPATCH_LOG
+		// can relocate it), but the audit line always goes to the home log: a
+		// project can set that variable, and a change must not be recordable
+		// somewhere the operator does not read (sec-356 M2).
+		state := opts.StateDirOrDefault()
+		au := openAudit(os.Stderr, statepath.TrustedDir())
+		if au == nil {
+			os.Exit(1)
+		}
+		shaBefore := budgetPolicySHA(state)
+		werr := func() error {
+			if len(pos) == 2 {
+				if err := budget.SetLimit(state, pos[0], usd, budget.Window(window)); err != nil {
+					return err
+				}
+			}
+			if tokensArg != "" {
+				if err := budget.SetTokenLimit(state, pos[0], tokens, budget.Window(window)); err != nil {
+					return err
+				}
+			}
+			if maxModel != "" {
+				if err := budget.SetMaxModel(state, pos[0], maxModel); err != nil {
+					return err
+				}
+				fmt.Printf("model ceiling for %s set to %s\n", pos[0], maxModel)
+			}
+			return nil
+		}()
+		if shaAfter := budgetPolicySHA(state); shaAfter != shaBefore {
+			if err := au.Record(dispatch.ConfigChange{File: budget.PolicyFileName, Action: "budget.set",
+				SHABefore: shaBefore, SHAAfter: shaAfter, Surface: dispatch.SurfaceCLI}); err != nil {
+				fmt.Fprintln(os.Stderr, "yakos: the change was written but could not be recorded in the dispatch log")
+				au.Close()
 				os.Exit(1)
 			}
 		}
-		if tokensArg != "" {
-			if err := budget.SetTokenLimit(opts.StateDirOrDefault(), pos[0], tokens, budget.Window(window)); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
-		}
-		if maxModel != "" {
-			if err := budget.SetMaxModel(opts.StateDirOrDefault(), pos[0], maxModel); err != nil {
-				fmt.Fprintln(os.Stderr, err)
-				os.Exit(1)
-			}
-			fmt.Printf("model ceiling for %s set to %s\n", pos[0], maxModel)
+		au.Close()
+		if werr != nil {
+			fmt.Fprintln(os.Stderr, werr)
+			os.Exit(1)
 		}
 		// Say which window the limit now counts in: the one just given, or the
 		// agent's current one that a set without --window kept.
@@ -535,4 +565,19 @@ func clampDispatchModel(args []string, agent, project string) ([]string, error) 
 		}
 	}
 	return out, nil
+}
+
+// budgetPolicySHA is the hex SHA-256 of the budget policy file ("" when it is
+// absent or unreadable), for the config_changed audit line. The read is bounded.
+func budgetPolicySHA(stateDir string) string {
+	f, err := os.Open(budget.PolicyPath(stateDir))
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = f.Close() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, io.LimitReader(f, 1<<20)); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }

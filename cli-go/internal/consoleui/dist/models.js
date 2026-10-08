@@ -6,9 +6,10 @@
 // sensitive policy), the 30-day token use per model from the performance
 // dashboard (axis=model), and an explain playground over GET /api/models/explain.
 //
-// This build is READ-ONLY: the policy files are edited with `yakos models ...` and
-// `yakos router policy set`, which go through the one trusted, audited writer. The
-// tab says so and shows the commands; it has no form that writes.
+// This file is READ-ONLY: it only GETs. The policy files are edited with `yakos
+// models ...` and `yakos router policy set`, or, when the operator started the daemon
+// with --console-model-writes and the caller is an admin, from the controls in
+// models_write.js (window.YakModelsWrite), which this file only hands the overview to.
 //
 // XSS discipline: every server string reaches the DOM through textContent. The
 // file has no markup sink at all (a Go test greps for them and a node smoke test
@@ -80,10 +81,14 @@
     var body = el('div', 'models-body');
     var d = data || {};
 
-    var ro = el('p', 'models-banner', 'Read-only view. Change policy from a terminal: ' +
-      'yakos models enable|disable <id>, alias <alias> <codex|agy> <id>, pin <agent> <id>, ' +
-      'pricing <id> --input N --output N; yakos router policy get|set. Each change is written ' +
-      'atomically, owner-only, and recorded in the dispatch log.');
+    var ro = el('p', 'models-banner', d.can_write
+      ? 'Browser writes are on. The controls are at the bottom of this page; the CLI works too: ' +
+        'yakos models enable|disable|alias|pin|pricing, yakos router policy get|set.'
+      : 'Read-only view. Change policy from a terminal: ' +
+        'yakos models enable|disable <id>, alias <alias> <codex|agy> <id>, pin <agent> <id>, ' +
+        'pricing <id> --input N --output N; yakos router policy get|set. Each change is written ' +
+        'atomically, owner-only, and recorded in the dispatch log. To edit from this page, an operator ' +
+        'starts the daemon with yakos serve --console-model-writes (admin role).');
     body.appendChild(ro);
 
     var prov = section('Providers');
@@ -113,7 +118,8 @@
     body.appendChild(al);
 
     var r = d.router || {};
-    var pins = section('Per-agent pins');
+    var pins = section('Per-agent pins', 'Router-policy pins only (the ones yakos models pin writes). ' +
+      'A runtime or model pinned in an agent\'s own file is not listed here.');
     pins.appendChild(table(['Agent', 'Runtime', 'Model'], (r.pins || []).map(function (p) {
       return [p.agent, p.runtime, p.model];
     }), 'No pins.'));
@@ -124,7 +130,7 @@
       return [x.id, ruleText(x.match), ruleText(x.action), yesNo(x.override_pins)];
     }), 'No rules: the default chain decides.'));
     rules.appendChild(el('p', 'models-note', 'Unsandboxed runtimes allowed: ' +
-      ((r.allow_unsandboxed_runtimes || []).join(', ') || 'none') + '. Hooks endpoint: ' + yesNo(r.hooks_endpoint) +
+      (d.privileged_hidden ? 'hidden (admin only)' : ((r.allow_unsandboxed_runtimes || []).join(', ') || 'none')) + '. Hooks endpoint: ' + yesNo(r.hooks_endpoint) +
       '. OpenAI endpoint: ' + yesNo(r.openai_endpoint) + '. Edit these in the policy file by hand.'));
     (r.warnings || []).forEach(function (w) { rules.appendChild(el('p', 'models-warn', w)); });
     body.appendChild(rules);
@@ -237,16 +243,29 @@
   // Response (the console's apiFetch).
   function open(holder, fetchFn) {
     holder.textContent = 'Loading...';
-    var overview = fetchFn('GET', '/api/models/overview').then(function (resp) {
-      if (!resp.ok) throw new Error('status ' + resp.status);
-      return resp.json();
-    });
-    var tokens = fetchFn('GET', '/perf/api/perf/by_axis?axis=model&window=30d').then(function (resp) {
-      return resp.ok ? resp.json() : null;
-    }).then(tokenMap).catch(function () { return null; });
-    return Promise.all([overview, tokens]).then(function (r) {
+    var box = el('div', 'models-read-box');
+    // load fetches the overview and the token use and (re)fills box. The write
+    // panel calls it again after a saved change.
+    function load() {
+      var overview = fetchFn('GET', '/api/models/overview').then(function (resp) {
+        if (!resp.ok) throw new Error('status ' + resp.status);
+        return resp.json();
+      });
+      var tokens = fetchFn('GET', '/perf/api/perf/by_axis?axis=model&window=30d').then(function (resp) {
+        return resp.ok ? resp.json() : null;
+      }).then(tokenMap).catch(function () { return null; });
+      return Promise.all([overview, tokens]).then(function (r) {
+        box.textContent = '';
+        box.appendChild(render(r[0], r[1]));
+        return r[0];
+      });
+    }
+    return load().then(function (ov) {
       holder.textContent = '';
-      holder.appendChild(render(r[0], r[1]));
+      holder.appendChild(box);
+      if (ov && ov.can_write && root.YakModelsWrite) {
+        holder.appendChild(root.YakModelsWrite.panel(ov, fetchFn, function () { load().catch(function () {}); }));
+      }
       holder.appendChild(playground(fetchFn));
     }).catch(function () {
       holder.textContent = 'Could not load the models overview.';

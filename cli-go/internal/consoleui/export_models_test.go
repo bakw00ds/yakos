@@ -48,3 +48,7 @@ const (
 	ModelsEvalTailBytes = evalTailBytes
 	ModelsMaxEvals      = maxEvals
 )
+
+// SetModelsWriterNowForTest replaces the clock the write stack's step-up window
+// and failure window read (K-175).
+func SetModelsWriterNowForTest(s *Server, now func() time.Time) { s.models.w.now = now }

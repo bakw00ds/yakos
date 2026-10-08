@@ -363,7 +363,10 @@
   // time-bomb on the CSRF path.  That duplicate has been removed; all callers
   // now bind to this definition.
 
-  function apiFetch(method, path, body) {
+  function apiFetch(method, path, body, extra) {
+    // extra (K-175, the Models tab's writes): extra.headers are added to the request
+    // (the per-credential X-CSRF-Token), extra.keep401 hands a 401 back to the caller
+    // (a "step_up_required" refusal is not an expired login).
     const opts = { method };
     const isBodyMethod = method !== 'GET' && method !== 'HEAD';
     if (AUTH_MODE === 'bearer') {
@@ -376,13 +379,14 @@
         opts.headers['X-CSRF-Token'] = CSRF_TOKEN;
       }
     }
+    if (extra && extra.headers) Object.assign(opts.headers, extra.headers);
     if (body !== undefined) {
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);
     }
     return fetch(path, opts).then(function(resp) {
       buildWatch.observe(resp);
-      if (resp.status === 401 && AUTH_MODE === 'session') {
+      if (resp.status === 401 && AUTH_MODE === 'session' && !(extra && extra.keep401)) {
         // Session expired — redirect to login.
         window.top.location.href = '/login';
         // Return a never-resolving promise so callers don't handle stale data.
