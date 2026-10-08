@@ -45,6 +45,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/bakw00ds/yakos/internal/projfile"
 )
 
 // knownEnvs is the ordered set of standard environment names.
@@ -220,7 +222,7 @@ func runValidate(cfg Config, res *Result, w, ew io.Writer) (*Result, error) {
 	}
 
 	// Check environments section exists.
-	raw, err := os.ReadFile(ymlPath) //nolint:gosec
+	raw, err := projfile.ReadFile(ymlPath)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", ymlPath, err)
 	}
@@ -391,7 +393,7 @@ type envEntry struct {
 // loadEnvironments reads .yakos.yml and returns a map of env name → branch.
 func loadEnvironments(projectDir string) (map[string]string, error) {
 	ymlPath := filepath.Join(projectDir, ".yakos.yml")
-	raw, err := os.ReadFile(ymlPath) //nolint:gosec
+	raw, err := projfile.ReadFile(ymlPath)
 	if os.IsNotExist(err) {
 		return map[string]string{}, nil
 	}

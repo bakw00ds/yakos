@@ -149,3 +149,39 @@ func TestStart_PrintEnvShowsNamesAndValuesWithoutLaunching(t *testing.T) {
 		t.Errorf("got %q", out)
 	}
 }
+
+// K-165: with HOME empty the launcher fills HomeDir with a shared temp path. The
+// policy there must not be read; the feature is off, as in dispatch. A scratch
+// directory stands in for /tmp and holds a valid policy that would set aliases.
+func TestGatewayStateDirEmptyHomeIsOff(t *testing.T) {
+	fake := t.TempDir()
+	writeStartPolicy(t, fake, "gateway_classes: {subagent: haiku}\n")
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	cfg := Config{HomeDir: fake}
+	if got := gatewayStateDir(cfg, nil); got != "" {
+		t.Fatalf("gatewayStateDir with HOME empty = %q, want \"\"", got)
+	}
+	var out bytes.Buffer
+	printGatewayEnv(&out, "claude", gatewayStateDir(cfg, nil), map[string]string{})
+	if strings.Contains(out.String(), "=") || !strings.Contains(out.String(), "no gateway_classes aliases are active") {
+		t.Fatalf("aliases applied from an untrusted home:\n%s", out.String())
+	}
+}
+
+func TestGatewayStateDirInjectedEmptyHomeIsOff(t *testing.T) {
+	if got := gatewayStateDir(Config{Env: map[string]string{}}, map[string]string{}); got != "" {
+		t.Fatalf("got %q, want \"\"", got)
+	}
+}
+
+func TestGatewayStateDirProductionUsesTrustedDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	other := t.TempDir()
+	want := filepath.Join(home, ".yakos-state")
+	if got := gatewayStateDir(Config{HomeDir: other}, nil); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}

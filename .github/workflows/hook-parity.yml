@@ -54,6 +54,7 @@ on:
       - 'tests/run-validator-fixtures.sh'
       - 'tests/run-supervisor-shadow-test.sh'
       - 'tests/run-supervisor-budget-test.sh'
+      - 'tests/run-supervisor-refused-project-test.sh'
       - 'tests/run-ledger-compat-test.sh'
       - 'tests/fixtures/ledger-compat/**'
       - 'tests/fixtures/hooks/**'
@@ -72,6 +73,7 @@ on:
       - 'tests/run-validator-fixtures.sh'
       - 'tests/run-supervisor-shadow-test.sh'
       - 'tests/run-supervisor-budget-test.sh'
+      - 'tests/run-supervisor-refused-project-test.sh'
       - 'tests/run-ledger-compat-test.sh'
       - 'tests/fixtures/ledger-compat/**'
       - 'tests/fixtures/hooks/**'
@@ -171,6 +173,13 @@ jobs:
         shell: bash
         timeout-minutes: 10
         run: bash tests/run-supervisor-budget-test.sh
+
+      # K-164: a .yakos.yml the budget refuses (symlink, over 1 MiB) is absent to the
+      # supervisor-stream hook too: it cannot rename the supervisor out of its budget.
+      - name: Supervisor refused project file (bash vs Go)
+        shell: bash
+        timeout-minutes: 10
+        run: bash tests/run-supervisor-refused-project-test.sh
 
       # K-136: every offline bash reader of the dispatch log on the Go dispatcher's
       # ledger rows (new keys, a zero usage cost for a subscription run). The ubuntu
@@ -779,6 +788,11 @@ jobs:
         shell: bash
         timeout-minutes: 10
         run: /bin/bash tests/run-supervisor-budget-test.sh
+
+      - name: Supervisor refused project file under /bin/bash (3.2 hook, Go twin)
+        shell: bash
+        timeout-minutes: 10
+        run: /bin/bash tests/run-supervisor-refused-project-test.sh
 
   # K-145: the codex/agy envelope decoders and deny shapes against the fixture
   # corpus under .github/fixtures/hooks-shape, plus the installer's byte

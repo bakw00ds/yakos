@@ -312,6 +312,12 @@ func hasObviousSecrets(projectPath string) bool {
 			}
 			return nil
 		}
+		// Only scan regular files. Walk does not follow links, so a symlink or FIFO
+		// reaches here with a small size: opening a FIFO blocks for good, and a link
+		// to /dev/zero reads without end (K-164).
+		if !info.Mode().IsRegular() {
+			return nil
+		}
 		// Only scan text-likely files (skip large files).
 		if info.Size() > 1024*1024 {
 			return nil
