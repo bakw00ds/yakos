@@ -42,6 +42,9 @@ Runtime selection:
                           Falls back to YAKOS_RUNTIME env or
                           ~/.yakos-state/default-runtime.
 
+    --native <id>         Same as --runtime. The yakOS REPL (the Go default
+                          for 'yakos start') is Go-only: YAKOS_IMPL=go.
+
 Permission mode:
     --safe                Prompts on (claude: --permission-mode default;
                           codex: default sandbox; gemini: default).
@@ -114,6 +117,15 @@ while [ "$#" -gt 0 ]; do
             RUNTIME="$1"
             ;;
         --runtime=*) RUNTIME="${1#--runtime=}" ;;
+        --native)
+            shift
+            [ "$#" -gt 0 ] || ct_die "start: --native requires a runtime id"
+            RUNTIME="$1"
+            ;;
+        --native=*) RUNTIME="${1#--native=}" ;;
+        --repl)
+            ct_die "start: the yakOS REPL is Go-only; run with YAKOS_IMPL=go. This launcher always starts the native TUI (--native <runtime>)."
+            ;;
         --safe) SAFE=1 ;;
         --allow-root) ALLOW_ROOT=1 ;;
         --no-agents) NO_AGENTS=1 ;;

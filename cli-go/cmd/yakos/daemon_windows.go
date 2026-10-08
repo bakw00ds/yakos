@@ -55,3 +55,9 @@ func killDaemonProcess(pid int) error {
 	}
 	return nil
 }
+
+// daemonAliveOwned is daemonAlive on Windows: there is no per-uid signal check,
+// so the pid file proves little; the REPL's real proof there is the build id
+// plus the per-boot instance nonce (and the Windows transport cannot reach a
+// daemon yet).
+func daemonAliveOwned(pidPath string) bool { return daemonAlive(pidPath) }

@@ -6,6 +6,30 @@ current release, what survives, and how to fully uninstall when needed.
 This doc is the **upgrade authority** — `yakos --help`, README, and
 CHANGELOG point here. Last updated for v0.39.
 
+## Unreleased: `yakos start` opens the yakOS REPL (K-154)
+
+With `YAKOS_IMPL=go`, `yakos start` on a terminal now opens the yakOS REPL
+instead of exec-ing the vendor TUI. It talks to the console daemon (started for
+you when absent, and left running when you exit) and shares its conversation
+with the browser Chat pane. Nothing needs doing to adopt it.
+
+To keep the old behavior:
+
+- `yakos start --native <runtime>` runs the vendor TUI exactly as
+  `--runtime <runtime>` did (the argv is unchanged). Scripts and aliases that
+  rely on the TUI should add `--native`.
+- `--no-repl`, `--dry-run`, `--print-agents`, `--print-env`,
+  `--share-terminal`, `--direct`, the session flags (`--continue`, `--resume`,
+  `--fork`, ...) and any non-terminal stdin keep the exec path without changes.
+- The bash launcher (`YAKOS_IMPL=bash`) always starts the native TUI.
+
+If `yakos start` refuses with "the process on the console address is not this
+project's yakOS daemon" or "from another build", a daemon from another project
+or an older install holds the console port: run `yakos serve stop` in the
+project that started it, then retry. This is deliberate: the console token is
+never sent to a daemon that cannot prove, over its owner-only socket, that it
+serves this workspace and this build.
+
 ## Unreleased: `yakos dispatch` is Go by default
 
 `yakos dispatch` now runs the Go dispatcher when `YAKOS_IMPL` is unset. Before,
