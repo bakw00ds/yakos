@@ -117,7 +117,10 @@ type Config struct {
 	maxBody   int64
 	// bodyTimeout and bodyBudget default to BodyTimeout and BodyBudget.
 	bodyTimeout time.Duration
-	bodyBudget  int64
+	// bodyArmed, when set (tests), is called with each request's response
+	// controller right after its body read deadline is armed.
+	bodyArmed  func(*http.ResponseController)
+	bodyBudget int64
 	// badTokenGap is the minimum time between bad_token audit lines; 0 means
 	// one second, negative turns the limit off (tests).
 	badTokenGap time.Duration

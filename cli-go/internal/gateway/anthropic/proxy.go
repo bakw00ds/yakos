@@ -285,6 +285,9 @@ func (q *request) readBody() ([]byte, bool) {
 	q.reserved = reserve
 	rc := http.NewResponseController(q.w)
 	_ = rc.SetReadDeadline(time.Now().Add(s.cfg.bodyTimeout))
+	if s.cfg.bodyArmed != nil {
+		s.cfg.bodyArmed(rc)
+	}
 	var buf bytes.Buffer
 	buf.Grow(int(min(reserve, 1<<20)))
 	_, err := buf.ReadFrom(http.MaxBytesReader(q.w, q.r.Body, s.cfg.maxBody))

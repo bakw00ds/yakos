@@ -546,40 +546,89 @@ func TestOperatorKeyUnlessClientSendsXAPIKey(t *testing.T) {
 	}
 }
 
-// Stalled bodies must not hold the in-flight slots past the body deadline.
+// armedRecorder collects the response controller of every request whose body
+// read deadline has been armed, so a test observes slot acquisition directly
+// instead of polling against a wall-clock timeout.
+type armedRecorder struct {
+	mu  sync.Mutex
+	rcs []*http.ResponseController
+}
+
+func (a *armedRecorder) add(rc *http.ResponseController) {
+	a.mu.Lock()
+	a.rcs = append(a.rcs, rc)
+	a.mu.Unlock()
+}
+
+func (a *armedRecorder) count() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.rcs)
+}
+
+func (a *armedRecorder) snapshot() []*http.ResponseController {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]*http.ResponseController(nil), a.rcs...)
+}
+
+func stallBody(t *testing.T, addr string) net.Conn {
+	t.Helper()
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	fmt.Fprintf(c, "POST /v1/messages HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Length: 1000000\r\n\r\nx", addr, testToken)
+	return c
+}
+
+// Stalled bodies hold the in-flight slots until their body deadline, and the
+// slots then free. The deadline is long while the slots fill (a loaded runner
+// must not expire early bodies before the last one acquires) and is then
+// brought forward on every armed request, which is what the deadline does when
+// it elapses.
 func TestStalledBodiesDoNotExhaustSlots(t *testing.T) {
 	up := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) { _, _ = io.WriteString(w, "{}") })
-	base, _, addr := startGW(t, up, func(c *Config) { c.bodyTimeout = 400 * time.Millisecond; c.APIKey = "sk-ant-api03-OP" })
-	var conns []net.Conn
+	rec := &armedRecorder{}
+	base, _, addr := startGW(t, up, func(c *Config) {
+		c.bodyTimeout = time.Hour
+		c.bodyArmed = rec.add
+		c.APIKey = "sk-ant-api03-OP"
+	})
 	for i := 0; i < maxInflight; i++ {
-		c, err := net.Dial("tcp", addr)
-		if err != nil {
-			t.Fatal(err)
-		}
-		conns = append(conns, c)
-		fmt.Fprintf(c, "POST /v1/messages HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Length: 1000000\r\n\r\nx", addr, testToken)
+		stallBody(t, addr)
 	}
-	defer func() {
-		for _, c := range conns {
-			_ = c.Close()
-		}
-	}()
 	srv := serverAt(t, addr)
-	waitFor(t, "all 64 stalled bodies to hold a slot", func() bool { return len(srv.sem) == maxInflight })
+	waitFor(t, "all 64 stalled bodies to be armed", func() bool { return rec.count() == maxInflight })
+	if n := len(srv.sem); n != maxInflight {
+		t.Fatalf("armed %d bodies but %d slots held", maxInflight, n)
+	}
 	if st, _, _ := do(t, "POST", base+"/v1/messages", []byte(msgBody), apiKeyHdr); st != 429 {
 		t.Fatalf("with 64 stalled bodies the 65th got %d, want 429", st)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		st, _, _ := do(t, "POST", base+"/v1/messages", []byte(msgBody), apiKeyHdr)
-		if st == 200 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("slots never freed after the body deadline (last status %d)", st)
-		}
-		time.Sleep(100 * time.Millisecond)
+	for _, rc := range rec.snapshot() {
+		_ = rc.SetReadDeadline(time.Now())
 	}
+	waitFor(t, "the slots to free after the body deadline", func() bool { return len(srv.sem) == 0 })
+	if st, _, _ := do(t, "POST", base+"/v1/messages", []byte(msgBody), apiKeyHdr); st != 200 {
+		t.Fatalf("after the deadline the next request got %d, want 200", st)
+	}
+}
+
+// The configured bodyTimeout itself releases a stalled body's slot and budget.
+func TestBodyTimeoutReleasesSlot(t *testing.T) {
+	up := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) { _, _ = io.WriteString(w, "{}") })
+	rec := &armedRecorder{}
+	_, _, addr := startGW(t, up, func(c *Config) {
+		c.bodyTimeout = 300 * time.Millisecond
+		c.bodyArmed = rec.add
+		c.APIKey = "sk-ant-api03-OP"
+	})
+	stallBody(t, addr)
+	srv := serverAt(t, addr)
+	waitFor(t, "the body to be armed", func() bool { return rec.count() == 1 })
+	waitFor(t, "the body deadline to free the slot and budget", func() bool { return len(srv.sem) == 0 && srv.budget.Load() == 0 })
 }
 
 // The total of reserved body bytes is bounded across requests.
@@ -588,7 +637,7 @@ func TestBodyBudgetBoundsTotal(t *testing.T) {
 	base, led, addr := startGW(t, up, func(c *Config) {
 		c.bodyBudget = 1000
 		c.maxBody = 800
-		c.bodyTimeout = 3 * time.Second
+		c.bodyTimeout = time.Hour
 		c.APIKey = "sk-ant-api03-OP"
 	})
 	c, err := net.Dial("tcp", addr)
