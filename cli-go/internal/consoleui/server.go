@@ -92,6 +92,9 @@ var ideEditorHTML []byte
 //go:embed dist/ide-editor.js
 var ideEditorJS []byte
 
+//go:embed dist/flows-gallery.js
+var flowsGalleryJS []byte
+
 //go:embed dist/login.html
 var loginHTML []byte
 
@@ -464,10 +467,12 @@ func New(cfg Config) (*Server, error) {
 	// Always allocated; the store is a no-op map until an ask_user_question fires.
 	chatH.pendingQuestions = newPendingQuestionStore()
 	flowsH := &flowsHandlers{
-		engine:     cfg.WorkflowEngine,
-		workDir:    cfg.WorkDir,
-		serverCtx:  serverCtx,
-		activeRuns: make(map[string]activeRunEntry),
+		engine:        cfg.WorkflowEngine,
+		workDir:       cfg.WorkDir,
+		serverCtx:     serverCtx,
+		activeRuns:    make(map[string]activeRunEntry),
+		workspaceRoot: cfg.WorkspaceRoot,
+		yakosRoot:     cfg.YakosRoot,
 	}
 	// IDE file pane and diff handler use cfg.ideRoot() — either IDERoot (when
 	// set, e.g. the project repo) or WorkspaceRoot as fallback.
@@ -898,6 +903,10 @@ func (s *Server) registerRoutes() {
 	// only the DOM skeleton and a <script src="/ide-editor.js">.
 	s.mux.HandleFunc("/ide-editor.js", s.handleIDEEditorJS)
 
+	// Flows template gallery module (K-152) — static, no secrets, loaded lazily
+	// by app.js on first use of the Templates button.
+	s.mux.HandleFunc("/flows-gallery.js", s.handleFlowsGalleryJS)
+
 	// ---- Auth pages (login) — token-gated on loopback; auth-or-redirect on networked.
 	// GET /login.js — login form JS (script-src 'self'; no inline scripts).
 	// GET /login.css — login form CSS (style-src 'self'; no unsafe-inline).
@@ -1102,6 +1111,10 @@ func (s *Server) registerRoutes() {
 	// level (unlike /flows/api/run which uses RoleRead-at-edge + per-method check
 	// because GET is also routed there).
 	s.mux.HandleFunc("/flows/api/cancel", requireRoleFunc(netid.RoleFlowsRun, s.flows.handleCancel))
+	// POST /flows/api/trigger/{name} — webhook trigger (RoleDispatch; K-152).
+	// GET  /flows/api/templates[?name=] — template gallery (RoleRead).
+	s.mux.HandleFunc(triggerPathPrefix, requireRoleFunc(netid.RoleDispatch, s.flows.handleTrigger))
+	s.mux.HandleFunc("/flows/api/templates", requireRoleFunc(netid.RoleRead, s.flows.handleTemplates))
 
 	// ---- Phase 5 (ADR-0005 §D6): Users management API -------------------------
 	// All /api/users/* require RoleAdmin; /api/account/* require RoleRead.
@@ -1394,6 +1407,16 @@ func (s *Server) handleIDEEditorJS(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(ideEditorJS)
 }
 
+// handleFlowsGalleryJS serves the template gallery module (/flows-gallery.js).
+// script-src 'self' covers it; it carries no secrets, so it is token-exempt
+// like the other static assets (isStaticAsset).
+func (s *Server) handleFlowsGalleryJS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	_, _ = w.Write(flowsGalleryJS)
+}
+
 // ideEditorCSP returns the Content-Security-Policy value for the /ide/editor
 // route ONLY.  This is a deliberately scoped relaxation to allow Monaco editor
 // to run: the AMD loader requires wasm-unsafe-eval (for its regex-engine
@@ -1539,7 +1562,7 @@ func isStaticAsset(r *http.Request) bool {
 		return false
 	}
 	switch r.URL.Path {
-	case "/", "/app.js", "/context-drawer.js", "/styles.css", "/sw.js", "/ide-editor.js", "/ide/editor":
+	case "/", "/app.js", "/context-drawer.js", "/styles.css", "/sw.js", "/ide-editor.js", "/flows-gallery.js", "/ide/editor":
 		return true
 	}
 	// Vendored pinned blobs are same-origin static assets; no token required.
