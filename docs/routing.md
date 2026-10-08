@@ -645,7 +645,11 @@ transcript and user-turn text; none of it enters a system prompt,
   `turns`, `digest_bytes`, `redactions`) right after its `route` turn. Stored card
   text is scanned for secret-shaped values and cut at 16 KiB. The handoff digest
   reads user and assistant turns only, so cards never travel to another vendor.
-  The page rebuilds them as cards from data, with text nodes only.
+  A card cut at the cap ends with the text marker `[… truncated at 16 KiB …]`
+  (and `truncated: true`). Authorization and Cookie header values are among the
+  redacted shapes. The page rebuilds the cards from data; every stored string
+  reaches the DOM through the page's existing escaping renderers (`esc()` /
+  `escLines()`) or `textContent`, never through markup built from the stored text.
 - **Left out on purpose.** A live pane's runtime cannot be switched (a dispatch
   naming another runtime, codex to agy included, is refused with 409, and the
   browser keeps its notice, so the chip never names a runtime the engine is not

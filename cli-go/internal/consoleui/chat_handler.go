@@ -528,9 +528,11 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		sdkPane := req.StructuredQuestions && runtimeName == "claude"
 		// The knowledge pack a non-claude pane sends with every turn is request
 		// text too: scan it as the one-shot path does (K-140, K-173). Composed
-		// read-only here; the turn stores and sends its own copy later.
+		// read-only here; the turn stores and sends its own copy later. Passed
+		// whatever the pane's pre-route runtime is: a routing rule can move a
+		// claude pane to codex, and the pack must have been scanned by then.
 		var precheckExtra []string
-		if runtimeName != "claude" && ch.yakosRoot != "" {
+		if ch.yakosRoot != "" {
 			if blk := ch.knowledgeForPrecheck(req.Agent); blk != "" {
 				precheckExtra = []string{blk}
 			}
@@ -943,6 +945,8 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		flushThinking := func() {
 			if thinkingBuf.Len() > 0 || thinkingRedacted {
 				text, _ := scanSecrets(thinkingBuf.String())
+				text, cut := capCardText(text)
+				thinkingTruncated = thinkingTruncated || cut
 				_ = ch.transcripts.Append(TranscriptEntry{
 					SessionID:      dispReq.SessionID,
 					ConversationID: conversationID,
@@ -962,10 +966,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			flushThinking()
 			flushAssistant()
 			text, _ = scanSecrets(text)
-			trunc := len(text) > maxCardBytes
-			if trunc {
-				text = truncateUTF8(text, maxCardBytes)
-			}
+			text, trunc := capCardText(text)
 			_ = ch.transcripts.Append(TranscriptEntry{
 				SessionID:      dispReq.SessionID,
 				ConversationID: conversationID,
@@ -1096,9 +1097,14 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 				// the session is not shared. Coalesced and persisted as one thinking
 				// turn (K-173), cut at maxCardBytes.
 				flushAssistant()
-				if thinkingBuf.Len() < maxCardBytes {
+				// Held up to twice the cap so the scan sees a secret that
+				// straddles the cut; flushThinking scans, then cuts to the cap.
+				if room := 2*maxCardBytes - thinkingBuf.Len(); len(chunk.Thinking) <= room {
 					thinkingBuf.WriteString(chunk.Thinking)
 				} else {
+					if room > 0 {
+						thinkingBuf.WriteString(truncateUTF8(chunk.Thinking, room))
+					}
 					thinkingTruncated = true
 				}
 				thinkingTruncated = thinkingTruncated || chunk.ThinkingTruncated

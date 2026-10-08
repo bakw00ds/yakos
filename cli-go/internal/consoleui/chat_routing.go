@@ -267,7 +267,9 @@ var secretPatterns = []*regexp.Regexp{
 	// An Authorization header of any scheme (Basic, Digest, Token, Negotiate, a
 	// bare value), as curl -H or a raw request prints it. Bearer is also caught on
 	// its own above; this is the one that holds a Basic user:password blob (K-173).
-	regexp.MustCompile(`(?i)\b(?:proxy-)?authorization["']?\s*[:=]\s*["']?(?:digest\s+[^\r\n]+|(?:(?:basic|negotiate|ntlm|token|bearer|hoba|mutual|aws4-hmac-sha256)\s+)?[^\s"',;\[][^\s"',;]{5,})`),
+	regexp.MustCompile(`(?i)(?:\b|_)(?:proxy-)?authorization["']?\s*[:=]\s*(?:\[["']?(?:basic|bearer|digest|negotiate|ntlm|token)\s+[^\s"',;\]]{6,}|["']?(?:digest\s+[^\r\n]+|(?:(?:basic|negotiate|ntlm|token|bearer|hoba|mutual|aws4-hmac-sha256)\s+)?[^\s"',;\[][^\s"',;]{5,}))`),
+	// A Cookie / Set-Cookie header: the whole value (to the end of the line).
+	regexp.MustCompile(`(?i)\b(?:set-)?cookie["']?\s*:\s*[^\r\n]{6,}`),
 	// A credential-looking name (it may sit inside a longer one: AWS_SECRET_ACCESS_KEY,
 	// GITHUB_TOKEN, "client_secret") followed by : or = and a value.
 	regexp.MustCompile(`(?i)[A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|secret|token|passwd|password|credential)s?[A-Za-z0-9_.-]*["']?\s*[:=]\s*["']?[^\s"',;\[][^\s"',;]{5,}`),
@@ -341,3 +343,16 @@ func (s *paneRouteStore) get(conversationID, owner string) (paneRoute, bool) {
 
 // maxCardBytes bounds the text a stored tool or thinking card keeps.
 const maxCardBytes = 16 << 10
+
+// cardTruncatedMarker ends a stored card that was cut, so a replay shows the cut
+// even where the truncated flag is not rendered.
+const cardTruncatedMarker = "\n[… truncated at 16 KiB …]"
+
+// capCardText cuts text to maxCardBytes (on a rune boundary) and appends the
+// marker; the bool says whether it cut. Callers scan for secrets first.
+func capCardText(text string) (string, bool) {
+	if len(text) <= maxCardBytes {
+		return text, false
+	}
+	return truncateUTF8(text, maxCardBytes) + cardTruncatedMarker, true
+}

@@ -16,3 +16,4 @@ func ApplyRouteOverrideForTest(req DispatchRequest) (rt, model, pinned string, e
 	pinned, err = applyRouteOverride(&req)
 	return req.Runtime, req.Model, pinned, err
 }
+func CapCardTextForTest(s string) (string, bool) { return capCardText(s) }

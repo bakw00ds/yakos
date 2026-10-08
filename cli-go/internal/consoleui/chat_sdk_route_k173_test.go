@@ -387,7 +387,9 @@ func TestK173_FollowUpRouteIsOwnerOnly(t *testing.T) {
 	waitUntil(t, "the follow-up route turn", func() bool { return count() == 2 })
 }
 
-// The routing module replays server text; it builds data and text nodes only.
+// The routing module replays server text; it builds data and writes DOM text only
+// through textContent / setAttribute (the escaping esc()/escLines() renderers do
+// the rest, outside this module).
 func TestK173_ChatRoutingJSHasNoMarkupSink(t *testing.T) {
 	src, err := os.ReadFile("dist/chat-routing.js")
 	if err != nil {
