@@ -210,9 +210,8 @@ What the gate does not cover (all unverified or by design):
   codex `apply_patch` input layout and the agy file-tool argument names are
   mapped best effort (`hookio/shape.go`); an unmapped tool name reaches the hooks
   under its own name and is not gated by `path-allowlist` or `secret-scan`.
-- A shell command that writes a file (`echo K=... > .env`) is not inspected by
-  `secret-scan` or `path-allowlist`, which gate file-write tools. A follow-up
-  (K-170, shell-write decoding) closes the common forms.
+- Shell writes are decoded heuristically, not sandboxed; see "Shell writes"
+  below for what is and is not caught.
 - Agy's behaviour when a hook command cannot start was never observed (agy cannot
   be driven to a hook without a signed-in model call). The launcher removes the
   question: it always starts, and it prints agy's deny itself.
@@ -233,19 +232,52 @@ directory and refuses one containing "..". A harness started in a subdirectory o
 the project is judged by that subdirectory's `.claude/`, which usually holds no
 policy: start it at the project root.
 
+Shell writes (K-170): for a codex or agy shell tool (`Bash`, `run_command`, and the
+argv-array form), `path-allowlist` and `secret-scan` also receive one synthesized
+`Write` per file the command is decoded as writing, with the command text as its
+content. The decoder (`hookio/shellwrites.go`, `shellinterp.go`) reads structure,
+never free text in an error message. It is a hardening net, not a security
+boundary: before K-170 the shell was not gated at all, and a shell can always
+be driven in ways a lexer does not model. The test corpus
+(`.github/fixtures/hooks-shape/shellwrites.json`, run by
+`hookio/shellwrites_test.go`) lists every form it is known to catch or refuse.
+
+| Caught | Not caught |
+|---|---|
+| `>` `>>` `>\|` `&>` `<>` `N>` `>&file`; `cat <<EOF > f`; here-strings and here-documents fed to a shell or interpreter | a script or program that does the write: `python3 build.py`, `make`, `npm run x`, `sh script.sh`, `source f`, a binary |
+| `$(...)`, backticks, `<(...)`, anywhere in a word, recursively (depth 6, 64 KiB) | a command word built at run time (`$EDITOR f`) |
+| `tee`, `cp`, `mv` (source too), `install` (`-t`, `-d`), `ln`, `sed -i`, `perl -i`, `dd of=`, `sort -o`, `uniq IN OUT`, `xxd IN OUT`, `ditto`, `sponge`, `yq -i`, `gofmt -w`, `goimports -w`, `prettier --write`, `rm`, `unlink`, `shred`, `truncate`, `touch`, `curl -o`, `wget -O`, `find -exec <writer> {}`, `find -fprint`; `awk` programs that redirect to a quoted file name or call `system("...")` | `chmod`, `mkdir`; `tar -x`, `unzip`, `git checkout/apply/restore`, `patch`, `rsync`, `scp`, `curl -O`, `awk -i inplace` |
+| `sh/bash/zsh/fish -c`, `eval`, wrappers (`sudo`, `env`, `nohup`, `time`, `timeout`, `nice`, `command`, `exec`, `xargs`) and `VAR=x` prefixes | output files chosen by the tool, and anything where this lexer and the real shell disagree |
+| a non-empty `NAME=literal` that is the only assignment to that name anywhere in the command (a pre-scan counts `+=`, `NAME[i]=`, `${NAME:=...}`, `for`, `read`, `printf -v`, `unset`) and the first command of its statement; `export NAME=literal`; a plain `cd DIR` in a chain of `&&` (used within that statement only, `( ... )` scoped); literal brace lists, `$'\x2e'`-style quoting (octal, `\x`, `\u`, `\U` and the usual escapes) | any other assignment form (`+=`, `NAME[i]=`, a reassignment, one inside `if`/`then`/`do`/`{`/`eval`, after `||` or `|`, `read`, `printf -v`, `mapfile`, `getopts`, `unset`, `let`, `(( ))`, `declare -n`, a loop variable), an unset variable, any `cd` that is not that plain form (`;`, `||`, `&`, a pipe, `pushd`/`popd`, `eval`, inside `then`/`{`), `env -C` and `sudo -D`, a function definition, `alias`, `trap`, `source`/`.` or `CDPATH` anywhere in the command (afterwards every relative target is dynamic and no variable is trusted; `source /dev/stdin <<< '...'` bodies are still decoded), zsh `>!`-style forms are lexed but zsh glob qualifiers `.en(v\|x)` and `$"..."` locale strings are dynamic, an unquoted glob (`> .en?`, `tee .en*`: the shell picks the file), an unknown ANSI-C escape, `$(( ))` arithmetic (all reported dynamic, below) |
+| literal-path write calls in `python -c`, `node -e`, `perl -e`, `ruby -e`, `php -r` and their here-documents, and literal shell strings passed to `os.system`, `subprocess`, `exec`, `system` | a path computed at run time inside the program (reported dynamic when the call is recognisable) |
+
+`[[ a > b ]]` and `$(( a > b ))` are comparisons, not redirections, but a `$( )` or backtick substitution inside either (or inside `${F:-...}`) still runs and is decoded. `awk` redirections to anything but a quoted literal (`awk '{print > $1}'`) look like comparisons and are not caught. An absolute `workdir`/`cwd` in the tool call is only the starting directory: it never overrides the rules above. Misses that remain: `vim -c 'w f'` and `ex`, `busybox` applets other than a shell, writers reached through an `alias` (the `alias` itself is reported dynamic), and commands run by `xargs` whose names come from stdin (`echo f | xargs touch` is reported dynamic). Legitimate glob targets (`rm build/*`, `sed -i ... src/*.go`, `cp *.txt dir/`) are refused for an agent that has a policy entry: the decoder cannot know which files the shell will pick, so a deny pattern could be dodged with `> .en?`; use a literal path or a bypass entry. A command longer than 64 KiB, more than 20,000 tokens, nesting deeper than 6, more than 32 targets, a decoder fault, or a command field that is not a string (an object, a number, an argv array with a non-string element) is reported as dynamic, never as "no writes".
+
+Policy and hooks files: `.claude/path-allowlist.json` and `.agents/hooks.json` are ordinary project paths, and nothing protects them specially (a built-in protection is follow-up K-178). An allow-list that covers them (`**`) lets a shell redirect rewrite them, exactly as a Write tool call could. A `deny` entry (`.claude/**`, `.agents/**`) stops a direct write, `rm` or `truncate` of those paths, and a `mv`/`cp` whose source or target is one. It does NOT stop: `ln -s .claude/path-allowlist.json l` followed by a write through `l` (the link is judged as `l`); moving the directory away and back (`mv .claude c && ... && mv c .claude`, where the writes happen under `c/`); `rm -rf .claude` and `mv .claude x` judged as the directory `.claude`, which `.claude/**` does not match (add `.claude` itself); or any write the decoder cannot see. The codex profile `hooks.json` is outside the project and is refused as an absolute path.
+
+A target that is recognised as a write but cannot be resolved (`> $OUT`,
+`> $(mktemp)`, `> ~/x`, `echo ... \| sh`, `bash -c "$CMD"`) is dynamic:
+`path-allowlist` refuses it whenever the dispatched agent has an entry in the
+policy file, because a policy cannot be applied to a path nobody knows. Targets are
+judged exactly as a Write tool call: an absolute path outside the project, a path
+that leaves it, or a symlink out is refused. `/dev/null`, `/dev/stdout`,
+`/dev/stderr`, `/dev/stdin`, `/dev/tty` and `/dev/fd/N` are ignored. A matching
+exact `hook-bypass.md` entry applies as for any path-allowlist block.
+
 Live smoke (K-170, 2026-10-08, codex 0.154.0): `yakos hooks install --harness codex`
 into a scratch HOME, then `codex exec --dangerously-bypass-hook-trust` against a
 local stub of the Responses API (a scripted tool call, no vendor model), with
-`CODEX_HOME`, `HOME` and the XDG variables in a scratch tree. Observed: the
-installed PreToolUse hooks ran for a shell tool call (hook log lines, agent
-`reviewer`), a benign `echo hi` ran and `supervisor-stream` logged the
-PostToolUse, and with the installed binary made non-executable, or deleted, the
-call was refused by the launcher ("Command blocked by PreToolUse hook") and never
-ran. Not verified live: agy. `agy -p` with a scratch HOME honours the home
-override but, with no sign-in and no network, never reached a hook; agy has no
-model-endpoint override to stub, and the operator's sign-in was not used. For agy
-the evidence is the recorded K-156 envelopes and the fake-harness end-to-end
-tests.
+`CODEX_HOME`, `HOME` and the XDG variables in a scratch tree. Observed: an
+`echo K=1 > .env` call by agent `reviewer` was blocked by `path-allowlist` (codex
+printed "Command blocked by PreToolUse hook", the stub saw it as the tool result,
+the file was not created, the hook log recorded `block`/`deny pattern matched`);
+`echo hi` ran and `supervisor-stream` logged the PostToolUse; `echo x > $OUT` was
+refused as undecidable; with the installed binary made non-executable, or deleted,
+the call was refused by the launcher. Not verified live: agy. `agy -p` with a
+scratch HOME honours the home override but, with no sign-in and no network, never
+reached a hook; agy has no model-endpoint override to stub, and the operator's
+sign-in was not used. For agy the evidence is the recorded K-156 envelopes and the
+fake-harness end-to-end tests.
 
 Optional endpoint: with `hooks_endpoint: true` in `~/.yakos-state/router-policy.yml`
 (owner-only, like the other keys), `yakos serve` mounts `POST

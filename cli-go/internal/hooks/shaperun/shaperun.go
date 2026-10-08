@@ -85,6 +85,11 @@ func Run(ctx context.Context, shape, name string, data []byte, d Deps) hookio.Re
 	if event != "PreToolUse" && event != "PostToolUse" {
 		return hookio.Respond(shape, "PreToolUse", false, "")
 	}
+	// A shell command that writes a file is gated as a Write to that file by
+	// the two hooks that judge file writes (K-170 b).
+	if event == "PreToolUse" && (name == "path-allowlist" || name == "secret-scan") {
+		ins = append(ins, hookio.ShellWriteInputs(ins)...)
+	}
 
 	// A relative file path means "relative to the envelope's cwd", which may be
 	// a subdirectory of the project. The hooks judge paths against the project

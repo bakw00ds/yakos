@@ -125,20 +125,25 @@ never holds a login: ADR-0010. Detailed entries follow.
   command path is absolute and the trust flag is added only for a file whose bytes
   equal what this binary renders. Optional loopback endpoint `hooks_endpoint:
   true`. Details and limits: `docs/runtime-matrix.md`.
-- **Hooks for codex and agy, hardened (K-170).** Four gaps from the K-145 reviews
-  are closed; shell-write decoding follows in a second change. A chat pane whose
-  agent is a bare runtime name (`codex`, `agy`) is judged by the `lead` entry of
-  `path-allowlist.json` when it has none of its own, as a claude chat is, never by
-  "no policy". Every installed PreToolUse command is now a small `/bin/sh`
-  launcher that refuses the tool call when the absolute `yakos` path is missing,
-  not executable or crashes (codex fails open on a hook that cannot start); re-run
-  `hooks install` once, because the command text changed. With
-  `CLAUDE_PROJECT_DIR` unset the project is the envelope's absolute cwd or
-  workspace, never the hook process's cwd; with none the fail-closed hooks refuse.
-  The hooks endpoint binds the project directory to its nonce when the nonce is
-  issued and answers 403 (audited, no path) to an envelope that names another
-  directory. The live smoke covered codex only: agy cannot reach a hook without a
-  signed-in model call. Details: `docs/runtime-matrix.md`.
+- **Hooks for codex and agy, hardened (K-170).** Six gaps from the K-145 reviews
+  are closed. A chat pane whose agent is a bare runtime name (`codex`, `agy`) is
+  judged by the `lead` entry of `path-allowlist.json` when it has none of its
+  own, as a claude chat is, never by "no policy". A shell command that writes a
+  file (`echo > .env`, `>>`, `tee`, `cp`/`mv`/`install`, `sed -i`, `dd of=`,
+  here-documents, command substitution, and write calls in `python -c`,
+  `node -e`, `perl -e`, `ruby -e` and `php -r`) is gated as a write to that file
+  by `path-allowlist` and `secret-scan`; a target that cannot be known before the
+  command runs is refused under a policy. Every installed PreToolUse command is
+  now a small `/bin/sh` launcher that refuses the tool call when the absolute
+  `yakos` path is missing, not executable or crashes (codex and agy both fail
+  open on a hook that cannot start); re-run `hooks install` once, because the
+  command text changed. With `CLAUDE_PROJECT_DIR` unset the project is the
+  envelope's absolute cwd or workspace, never the hook process's cwd; with none
+  the fail-closed hooks refuse. The hooks endpoint binds the project directory to
+  its nonce when the nonce is issued and answers 403 (audited, no path) to an
+  envelope that names another directory. The decoder's reach and limits are in
+  `docs/runtime-matrix.md`. The live smoke covered codex only: agy cannot reach a
+  hook without a signed-in model call.
 - **Scans over codex and agy events (K-146).** Every normalized tool result and
   text event is scanned for injection and risk patterns; findings are written as
   detect-and-report records (they never gate the lead), with optional
