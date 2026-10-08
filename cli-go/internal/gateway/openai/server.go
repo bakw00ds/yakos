@@ -6,9 +6,14 @@
 //   - Off unless the trusted user policy says `openai_endpoint: true` or
 //     `yakos serve --openai-endpoint` is given. serve.Run owns that decision.
 //   - Loopback only. New refuses any other bind address.
-//   - Bearer = the REST write token (~/.yakos-state/rest-write-token), compared
-//     in constant time. Host and Origin are checked as the console checks them
-//     (DNS-rebinding defence) before the token is looked at.
+//   - Bearer = the endpoint's own token (<state dir>/openai-endpoint-token, K-174),
+//     minted and rotated independently of the REST write token, which this
+//     endpoint does not accept. It is read per request, so a rotation takes
+//     effect at once, and compared in constant time (gwtoken). Host and Origin are
+//     checked as the console checks them (DNS-rebinding defence) before the token
+//     is looked at.
+//   - Streaming writes carry a per-write deadline; a client that stops reading
+//     loses its turn instead of holding a dispatch slot.
 //   - Every completion goes through dispatch.Service.RunStream: the router,
 //     sensitive-class scan, budget, supervision and the ledger all apply, with
 //     surface=openai-compat on the ledger rows. There is no second path.
@@ -18,7 +23,7 @@
 //     never enters a system prompt, --append-system-prompt or the --agents JSON,
 //     so the prompt-cache prefix is unchanged (rule:cache-stability).
 //
-// Auth: bearer write token on every route. Idempotency: a completion is not
+// Auth: the endpoint bearer token on every route. Idempotency: a completion is not
 // idempotent (it runs a model); a retry is a new turn unless the client resumes
 // with X-Yakos-Conversation, which does not dedupe either. Rate limit: the
 // dispatch Service's concurrency governor and the agent budget; no extra class.
@@ -26,7 +31,6 @@ package openai
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,7 +43,9 @@ import (
 	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/dashauth"
 	"github.com/bakw00ds/yakos/internal/dispatch"
+	"github.com/bakw00ds/yakos/internal/gateway/gwtoken"
 	"github.com/bakw00ds/yakos/internal/modelreg"
+	"github.com/bakw00ds/yakos/internal/netid"
 )
 
 // DefaultAddr is where the endpoint listens.
@@ -51,8 +57,13 @@ const MaxBodyBytes = 1 << 20
 // OperatorID is the owner every conversation made through this endpoint carries.
 // It is a fixed label, not a credential: the one bearer token is the whole
 // identity, so a conversation made here cannot be resumed by the console's
-// operator or any other, and the reverse.
-const OperatorID = "openai-compat"
+// operator or any other, and the reverse. The label is reserved in netid: no
+// user or certificate name may take it.
+const OperatorID = netid.OpenAICompatOwner
+
+// DefaultStreamWriteTimeout bounds one SSE write (and its flush). A client that
+// does not drain within it is treated as gone.
+const DefaultStreamWriteTimeout = 30 * time.Second
 
 // DefaultAgent answers a request that names no agent (yakos/auto and
 // <runtime>/<model>).
@@ -62,8 +73,11 @@ const DefaultAgent = "lead"
 type Config struct {
 	// Addr is the listen address; empty means DefaultAddr. It must be loopback.
 	Addr string
-	// WriteToken is the bearer token (the REST write token). Required.
-	WriteToken string
+	// Token returns the current bearer token, read per request so that rotating
+	// the token file revokes the old one at once. It must return at least
+	// gwtoken.MinLen characters; anything shorter (or empty) admits nobody.
+	// Required.
+	Token func() string
 	// Service is the shared dispatch Service. Required.
 	Service *dispatch.Service
 	// Transcripts is the conversation store, the console's own (same work dir).
@@ -72,6 +86,9 @@ type Config struct {
 	YakosRoot, Workspace string
 	// Agent answers requests that name none; empty means DefaultAgent.
 	Agent string
+	// StreamWriteTimeout bounds each SSE write; zero means
+	// DefaultStreamWriteTimeout.
+	StreamWriteTimeout time.Duration
 
 	// Registry builds the model registry. Nil means modelreg.Load on the default
 	// state dir. Tests replace it.
@@ -96,8 +113,8 @@ type Server struct {
 
 // New validates cfg and builds the Server. It does not listen.
 func New(cfg Config) (*Server, error) {
-	if len(cfg.WriteToken) < 32 {
-		return nil, errors.New("openai gateway: refusing to start: no write token configured")
+	if cfg.Token == nil || !gwtoken.Usable(cfg.Token()) {
+		return nil, errors.New("openai gateway: refusing to start: no endpoint token configured")
 	}
 	if cfg.Service == nil {
 		return nil, errors.New("openai gateway: refusing to start: no dispatch service")
@@ -208,12 +225,12 @@ func rejectNonLoopbackOrigin(port string, next http.Handler) http.Handler {
 	})
 }
 
-// requireBearer admits a request carrying the write token.
+// requireBearer admits a request carrying the endpoint token. The token is read
+// on every request and the comparison fails closed when it is unset or short.
 func (s *Server) requireBearer(next http.Handler) http.Handler {
-	want := []byte(s.cfg.WriteToken)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := []byte(dashauth.BearerToken(r))
-		if len(got) == 0 || subtle.ConstantTimeCompare(got, want) != 1 {
+		got := dashauth.BearerToken(r)
+		if got == "" || !gwtoken.Match(s.cfg.Token(), got) {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			writeError(w, http.StatusUnauthorized, "invalid_api_key", "missing or invalid bearer token")
 			return
