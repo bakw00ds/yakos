@@ -126,6 +126,50 @@ func SetPricing(stateDir, id string, p *Pricing) (statepath.EditResult, error) {
 	})
 }
 
+// SetBillingAndPricing applies a billing mode (b != "") and a price change
+// (touchPrice; p nil removes the price) in ONE atomic write, so a failure can
+// never leave the billing mode changed and the price not.
+func SetBillingAndPricing(stateDir, id string, b Billing, touchPrice bool, p *Pricing) (statepath.EditResult, error) {
+	if !ValidID(id) || (b != "" && !b.Valid()) {
+		return statepath.EditResult{}, errors.New("model registry: want a valid model id and subscription, api or local")
+	}
+	if touchPrice && p != nil {
+		if err := p.Validate(); err != nil {
+			return statepath.EditResult{}, errors.New("model registry: the price is out of range")
+		}
+	}
+	return editOverlay(stateDir, func(top *yaml.Node) error {
+		m, err := modelNode(top, id)
+		if err != nil {
+			return err
+		}
+		if b != "" {
+			statepath.YAMLSet(m, "billing", scalar("!!str", string(b)))
+		}
+		if !touchPrice {
+			return nil
+		}
+		if p == nil {
+			statepath.YAMLDelete(m, "pricing")
+			pruneModel(top, id)
+			return nil
+		}
+		price := map[string]float64{"input": p.Input, "output": p.Output}
+		if p.CacheRead != 0 {
+			price["cache_read"] = p.CacheRead
+		}
+		if p.CacheWrite != 0 {
+			price["cache_write"] = p.CacheWrite
+		}
+		var n yaml.Node
+		if err := n.Encode(price); err != nil {
+			return err
+		}
+		statepath.YAMLSet(m, "pricing", &n)
+		return nil
+	})
+}
+
 // SetAlias maps a tier alias to a model id on codex or agy; "" is the harness
 // default.
 func SetAlias(stateDir, alias, harness, id string) (statepath.EditResult, error) {

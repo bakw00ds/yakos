@@ -758,28 +758,115 @@ budget rows drop the per-project spend. Provider probes are cached for 15 second
 and bounded to 3 seconds each. Discovery state is read from the on-disk cache only; the page never runs a harness CLI to list models. A test plants secret values in the environment and the state
 files and fuzzes every one of these responses for them.
 
-**This build has no browser write path.** The tab says so and shows the commands
-(see "Policy writers"); `writes_enabled` is `false`, and a PUT, POST, PATCH or
-DELETE to these paths is a 405.
+Browser writes are **off by default**: `writes_enabled` is `false` and a PUT,
+POST, PATCH or DELETE to the write paths is a 405. The next section turns them on.
 
-### K-153b: browser writes (not in this build)
+`allow_unsandboxed_runtimes` (which harnesses the operator allowed to run without
+a sandbox) is shown to admins only. A read or dispatch caller gets an empty list in
+`GET /api/router/policy` and in the overview, and the tab says "hidden (admin
+only)". The other privileged flags (`hooks_endpoint`, `openai_endpoint`) are
+booleans and stay visible to RoleRead.
 
-The operator chose a browser-editable page. It is held back for a security-gated
-follow-up with this stack, none of which ships here: `PUT /api/models/*` and `PUT
-/api/router/policy` for RoleAdmin only, through the same writers and audit line,
-plus (1) a per-session CSRF token, double-submitted and bound to the credential
-(session cookie, loopback bearer token or client-certificate fingerprint),
-(2) a `Sec-Fetch-Site` and `Origin` allowlist, (3) the Host check, (4) step-up
-re-authentication within 5 minutes (password on a session, the bearer token typed
-again on loopback, the certificate CN on mTLS), (5) `Content-Type: application/json`.
-Test plan for that review: each of the five absent or wrong in turn (missing token,
-a token of another session, `Origin: https://evil`, `Sec-Fetch-Site: cross-site`
-and `same-site`, a stale or missing step-up, `text/plain` and a form content type,
-`Host: evil.example` and a wrong port, with and without the token) must change
-nothing on disk and write no audit line; a request with all five and a lower role
-must be 403; every accepted write must produce exactly one audit line whose
-`policy_sha_after` equals the file's sha; and the sentinel fuzz above must cover the
-write responses. Until then a write from the browser is a 405.
+The tab lists **router-policy pins only**: the rules `yakos models pin` writes. A
+`runtime:` or `model:` pinned in an agent's own frontmatter is not shown (the tab
+says so). `yakos router explain <agent>` shows the route that results from both.
+
+### Browser writes (K-175)
+
+An operator who wants to edit from the console starts the daemon with
+
+```
+yakos serve --console-model-writes
+```
+
+That flag is the only switch. A project file (`.yakos.yml`, `.claude/settings.json`),
+a request header and a request body cannot turn writes on. With the flag off, every
+path below is a 405 whatever the caller sends, and the tab draws no controls. With
+it on, the tab draws them for an admin. (`yakos start` does not forward the flag;
+start the daemon with `yakos serve`.)
+
+| Request | Role | What |
+|---|---|---|
+| `PUT /api/models/enable` `{"id"}` | admin | `models enable` |
+| `PUT /api/models/disable` `{"id"}` | admin | `models disable` |
+| `PUT /api/models/alias` `{"alias","harness","id"}` | admin | `models alias`; `id` `""` or `"default"` is the harness default |
+| `PUT /api/models/pin` `{"agent","id","runtime","clear"}` | admin | `models pin` / `--clear` |
+| `PUT /api/models/pricing` `{"id","input","output","cache_read","cache_write","billing","clear"}` | admin | `models pricing` |
+| `PUT /api/router/policy` `{"rules_yaml","base_sha"}` | admin | `router policy set`: **replaces the whole rules list, pins included**; `base_sha` (required) is the policy sha the editor loaded, checked under the edit lock: a mismatch is 409 with the current sha and nothing is written |
+| `GET /api/models/write-session` | admin | mints the CSRF token, sets the `yakos_wcsrf` cookie; also returns `policy_sha` and `rules_yaml` (the current rules list) for the rules editor |
+| `POST /api/models/step-up` | admin | re-authenticate (below) |
+
+The writes call `internal/policywrite`, the same code the CLI calls, so the same
+checks run and the same trusted writers replace the files (`statepath.EditYAML`:
+trust-checked read, 0600 atomic rename, only the `rules` key of the router policy
+changes, no YAML anchors, aliases or merge keys). A request body is bound through a
+DTO with no privileged field (no `allow_unsandboxed_runtimes`, `hooks_endpoint`,
+`openai_endpoint`, role or operator); an unknown field is a 400. PUT is idempotent:
+repeating a write changes nothing and records nothing.
+
+Every write runs this stack. Each layer refuses on its own, leaves both files
+byte-identical, and writes no audit line:
+
+1. **Role.** Admin only (403 below that).
+2. **Host.** The DNS-rebinding check: loopback `127.0.0.1`, `localhost`, `[::1]`
+   with the daemon's port; on the networked bind, a configured external host.
+3. **Fetch metadata and Origin.** `Sec-Fetch-Site` must be absent, `same-origin`
+   or `none` (`cross-site` and `same-site` are 403). `Origin`, when sent, must be
+   this server's own origin; `null` and every other origin are 403.
+4. **Content type.** `application/json` exactly, else 415.
+5. **CSRF, double-submitted.** The `X-CSRF-Token` header and the `yakos_wcsrf`
+   cookie must both equal the token for the caller's credential. The token is
+   bound to that credential: the session (its own CSRF token), the loopback bearer
+   token, or the client-certificate fingerprint (an HMAC under a per-process key,
+   so a restart invalidates them). A token minted for another credential is 403.
+6. **Step-up re-authentication, within 5 minutes.** A write without one is 401
+   `{"error":"step_up_required","method":"password|token|certificate"}`. `POST
+   /api/models/step-up` re-authenticates: the **password** on a session
+   (`{"password"}`, checked by the user store with the same constant-work path as
+   login), the **console token** typed again on loopback (`{"token"}`, compared as
+   fixed-length digests), the **certificate** on mTLS (the request must carry the
+   verified certificate the credential is bound to; a browser presents it on its
+   own, so this proves possession of the certificate on this connection, not a
+   fresh typed secret). Every failure is the same 401 `{"error":"step_up_failed"}`;
+   five failures in a minute lock that credential's step-up out (429). A step-up
+   belongs to the credential that made it.
+7. **Body.** At most 64 KiB (413), one JSON value (400 for trailing data).
+
+Responses carry `Cache-Control: no-store`, `X-Content-Type-Options: nosniff` and
+`application/json`, and fixed error text: no request value, path, secret or
+terminal escape is echoed. A refusal from the writer that is not one of the
+classified ones is one sentence ("the policy writer refused the change; use the yakos
+CLI to see why"), because the CLI's text can echo input. The daemon's own edge
+guards (the Host check, the 415 gate) answer in plain text; they carry the same
+no-store and nosniff headers.
+
+**The audit line.** An accepted write appends one `config_changed` line per file
+replaced (a price with a billing mode is one write and one line), to the home state directory's
+dispatch log, whatever `YAKOS_DISPATCH_LOG` says. Besides the CLI's fields it has
+`surface: "console"`, `actor: "operator-browser"`, `auth_method` (`session`, `cert`
+or `none` for the loopback token) and `operator_id`, which is the server-resolved
+identity: the session's username, the certificate CN, or the loopback owner id.
+Never a header or body value. The log is opened before the file is written; if it
+cannot be, the answer is 503 and nothing is written. `yakos budget set` writes the
+same line now (`file: budget-policy.yml`, `action: budget.set`).
+
+**What the tab does.** It draws the controls only when the overview says
+`can_write` (the flag is on and the caller is admin). It fetches the token once,
+sends it on each write, shows the step-up form when asked, clears the typed secret
+the moment it is sent, and stores nothing. The rules box warns that saving replaces
+every rule and asks for a tick. The rules box starts with the current rules, and a
+save cites the sha it loaded: if a CLI `models pin` (or another admin) changed the
+policy in between, the save is a 409, the user's text is kept, and "Reload current
+rules" fetches the new state. After a saved change the page re-reads the overview
+and rebuilds its selects.
+
+**Limits to know.** One session is one credential; a logged-out session loses its
+token and step-up with it. A step-up on mTLS is weaker than a typed secret, as
+described above. The rules write replaces the list wholesale, guarded by the
+`base_sha` compare-and-swap above (a lost update becomes a 409). The overview shows
+`writes_enabled` and `can_write` as true to admins only. `yakos budget set` refuses
+before writing anything when the home dispatch log cannot be opened, as the model
+and router writers do.
 
 ## Claude Code request-class aliases (K-141)
 

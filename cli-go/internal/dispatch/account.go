@@ -463,11 +463,17 @@ type ConfigChange struct {
 	SHABefore, SHAAfter string
 	// Surface is "cli" or "console".
 	Surface string
-	// Actor is "operator" or "agent" (K-176): whether the caller looked like an
-	// agent context (a Claude Code or dispatched-agent marker in its
-	// environment). It is a label for the audit reader, not a boundary: the
-	// gate is the budget-guard hook. "" omits it.
+	// Actor is who was calling (K-176): "operator" or "agent" (whether the caller
+	// looked like an agent context: a Claude Code or dispatched-agent marker in its
+	// environment). It is a label for the audit reader, not a boundary: the gate is
+	// the budget-guard hook. A console write (K-175) sets "operator-browser", an
+	// operator acting through the Models tab, from the resolved identity and never
+	// from the request. "" omits it.
 	Actor string
+	// AuthMethod is how the server authenticated a console write's browser
+	// ("session", "cert" or "none" for the loopback bearer token); set by the
+	// server from the resolved identity. Empty for a CLI write.
+	AuthMethod string
 }
 
 // auditFiles are the files a ConfigChange may name: the router policy, the model
@@ -485,11 +491,13 @@ type configChangedEvent struct {
 	SHABefore  string `json:"policy_sha_before"`
 	SHAAfter   string `json:"policy_sha_after"`
 	Surface    string `json:"surface"`
-	// K-176: who was calling. Actor is "operator" or "agent"; Agent and
-	// SessionID come from the request when the caller carried them.
-	Actor     string `json:"actor,omitempty"`
-	Agent     string `json:"agent,omitempty"`
-	SessionID string `json:"session_id,omitempty"`
+	// K-176: who was calling. Actor is "operator" or "agent" ("operator-browser"
+	// for a console write, K-175); Agent and SessionID come from the request when
+	// the caller carried them.
+	Actor      string `json:"actor,omitempty"`
+	AuthMethod string `json:"auth_method,omitempty"`
+	Agent      string `json:"agent,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
 }
 
 // ConfigChanged appends a config_changed event: who (the request's OperatorID),
@@ -516,8 +524,8 @@ func (a *Account) configChangedLine(c ConfigChange) ([]byte, error) {
 	ev := configChangedEvent{
 		Type: "config_changed", Ts: a.started.UTC().Format(time.RFC3339), OperatorID: op,
 		File: c.File, Action: logIdent(c.Action, 64), SHABefore: logHex(c.SHABefore, 64), SHAAfter: logHex(c.SHAAfter, 64),
-		Surface: logSurface(c.Surface),
-		Actor:   logSurface(c.Actor), Agent: logIdent(a.req.AgentName, 128), SessionID: logIdent(a.req.SessionID, 128),
+		Surface: logSurface(c.Surface), AuthMethod: logSurface(c.AuthMethod),
+		Actor: logSurface(c.Actor), Agent: logIdent(a.req.AgentName, 128), SessionID: logIdent(a.req.SessionID, 128),
 	}
 	return json.Marshal(ev)
 }

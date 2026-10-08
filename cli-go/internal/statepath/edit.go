@@ -46,6 +46,19 @@ var (
 // A missing file is an empty mapping. check may be nil. When check refuses, or
 // edit fails, the file is untouched. The returned errors name no path.
 func EditYAML(path string, max int64, edit func(top *yaml.Node) error, check func(data []byte) error) (EditResult, error) {
+	return EditYAMLIf(path, max, nil, edit, check)
+}
+
+// StaleError is returned by EditYAMLIf when the file's sha is not the one the
+// caller based its edit on. SHA is the file's current sha ("" for no file).
+type StaleError struct{ SHA string }
+
+func (e *StaleError) Error() string { return "statepath: the file changed since it was read" }
+
+// EditYAMLIf is EditYAML with a compare-and-swap: when base is non-nil, the file's
+// sha (read under the edit lock; "" for a missing file) must equal *base, else
+// nothing is written and a *StaleError names the current sha.
+func EditYAMLIf(path string, max int64, base *string, edit func(top *yaml.Node) error, check func(data []byte) error) (EditResult, error) {
 	var res EditResult
 	dir := filepath.Dir(path)
 	if err := SecureDir(dir); err != nil {
@@ -71,6 +84,10 @@ func EditYAML(path string, max int64, edit func(top *yaml.Node) error, check fun
 		return res, errors.New("statepath: the file is not trusted (a symlink, another user's, or group or world writable); refusing to write it")
 	default:
 		return res, errors.New("statepath: the file could not be read")
+	}
+
+	if base != nil && res.SHABefore != *base {
+		return res, &StaleError{SHA: res.SHABefore}
 	}
 
 	var doc yaml.Node

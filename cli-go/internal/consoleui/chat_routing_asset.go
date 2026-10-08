@@ -28,6 +28,19 @@ func (s *Server) handleChatRoutingJS(w http.ResponseWriter, r *http.Request) {
 //go:embed dist/models.js
 var modelsJS []byte
 
+// modelsWriteJS is the tab's write controls (K-175), served at /models_write.js.
+// It draws nothing unless the overview says can_write.
+//
+//go:embed dist/models_write.js
+var modelsWriteJS []byte
+
+func (s *Server) handleModelsWriteJS(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	_, _ = w.Write(modelsWriteJS)
+}
+
 func (s *Server) handleModelsJS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")

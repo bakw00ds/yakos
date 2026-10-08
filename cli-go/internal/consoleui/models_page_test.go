@@ -223,7 +223,7 @@ func TestModelsPage_HasNoWritePath(t *testing.T) {
 		t.Error("a refused write changed a policy file")
 	}
 	if ov := f.overview(t); ov["writes_enabled"] != false {
-		t.Errorf("writes_enabled = %v; this build has no browser writes", ov["writes_enabled"])
+		t.Errorf("writes_enabled = %v; the flag is off unless the operator starts the daemon with --console-model-writes", ov["writes_enabled"])
 	}
 }
 
@@ -576,6 +576,15 @@ func TestModelsPage_StaticAssetAndWiring(t *testing.T) {
 	}
 	index, _ := os.ReadFile("dist/index.html")
 	app, _ := os.ReadFile("dist/app.js")
+	if !strings.Contains(string(index), `src="/models_write.js"`) {
+		t.Error("models_write.js is not loaded by index.html")
+	}
+	wreq := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:7890/models_write.js", nil)
+	wrr := httptest.NewRecorder()
+	f.handler.ServeHTTP(wrr, wreq) // no token: a static asset
+	if wrr.Code != 200 || !strings.Contains(wrr.Body.String(), "YakModelsWrite") || wrr.Header().Get("Cross-Origin-Resource-Policy") != "same-origin" {
+		t.Errorf("/models_write.js = %d", wrr.Code)
+	}
 	if !strings.Contains(string(index), `src="/models.js"`) || !strings.Contains(string(app), "id: 'models'") || !strings.Contains(string(app), `id="panel-models"`) {
 		t.Error("the tab is not wired into index.html and app.js")
 	}

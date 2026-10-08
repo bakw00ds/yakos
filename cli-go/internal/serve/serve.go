@@ -195,6 +195,11 @@ type Config struct {
 	// printed when this flag is set and the console is in networked mode.
 	ConsoleAllowBash bool
 
+	// ConsoleModelWrites turns on the console's browser writes for the model
+	// registry and router policy (K-175). Off by default; set only by
+	// --console-model-writes in runServe, never by a project file.
+	ConsoleModelWrites bool
+
 	// HooksRun runs one registered hook on a codex/agy envelope (K-145). With
 	// hooks_endpoint: true in the trusted router policy, it backs
 	// POST /api/hooks/run/{name}; nil leaves the endpoint off.
@@ -747,6 +752,7 @@ func Run(ctx context.Context, cfg Config) error {
 			AuthSessionStore:   authStore,
 			UserStore:          uStore,
 			AllowNetworkedBash: cfg.ConsoleAllowBash,
+			ModelWrites:        cfg.ConsoleModelWrites,
 			WorktreeManager:    wtMgr,
 		}
 

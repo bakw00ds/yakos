@@ -161,6 +161,7 @@ type Request struct {
 const (
 	SurfaceCLI         = "cli"
 	SurfaceConsoleChat = "console-chat"
+	SurfaceConsole     = "console" // a policy write from the console's Models tab (K-175)
 	SurfaceMCP         = "mcp"
 	SurfaceJSONRPC     = "jsonrpc"
 	SurfaceREST        = "rest"

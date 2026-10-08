@@ -290,6 +290,12 @@ type Config struct {
 	// banner when this flag is set and the console is in networked mode.
 	AllowNetworkedBash bool
 
+	// ModelWrites enables the Models tab's browser writes (PUT /api/models/{enable|
+	// disable|alias|pin|pricing}, PUT /api/router/policy; K-175). Off by default:
+	// every write path answers 405. Only the operator's `yakos serve
+	// --console-model-writes` sets it; no project file or request can.
+	ModelWrites bool
+
 	// HooksEndpoint, when non-nil, mounts POST /api/hooks/run/{name} (K-145).
 	// serve.go sets it only when hooks_endpoint: true is in the trusted router
 	// policy; nil (the default) leaves the route unregistered (404).
@@ -722,6 +728,9 @@ func New(cfg Config) (*Server, error) {
 	// header only: the front-end's own polling/reload-banner logic is out of
 	// scope for this package (dist/ assets are frontend-owned).
 	protected = withBuildIDHeader(protected)
+	// Every response on the Models paths, a refusal from an edge middleware
+	// included, is uncacheable and not sniffable (K-175).
+	protected = modelsPathHeaders(protected)
 
 	s.httpSrv = &http.Server{
 		Addr:    cfg.addr(),
@@ -1085,11 +1094,28 @@ func (s *Server) registerRoutes() {
 	// The Models & Providers tab (K-153): read-only views, RoleRead. Policy files
 	// are written by `yakos models ...` / `yakos router policy set`, not here.
 	mp := newModelsPage(s.cfg.WorkspaceRoot, s.cfg.YakosRoot)
+	mp.w = newModelsWriter(&s.cfg, s.cfg.WorkspaceRoot, mp.stateDir)
 	s.models = mp
 	s.mux.HandleFunc("/api/models/overview", requireRoleFunc(netid.RoleRead, mp.handleOverview))
 	s.mux.HandleFunc("/api/models/explain", requireRoleFunc(netid.RoleRead, mp.handleExplain))
-	s.mux.HandleFunc("/api/router/policy", requireRoleFunc(netid.RoleRead, mp.handlePolicy))
+	// Browser writes (K-175): admin only, every path 405 until the operator starts
+	// the daemon with --console-model-writes. See models_write.go for the stack.
+	for _, op := range []string{"enable", "disable", "alias", "pin", "pricing"} {
+		s.mux.HandleFunc("/api/models/"+op, requireRoleFunc(netid.RoleAdmin, mp.handleWrite(op)))
+	}
+	s.mux.HandleFunc("/api/models/write-session", requireRoleFunc(netid.RoleAdmin, mp.handleWriteSession))
+	s.mux.HandleFunc("/api/models/step-up", requireRoleFunc(netid.RoleAdmin, mp.handleStepUp))
+	policyRead := requireRoleFunc(netid.RoleRead, mp.handlePolicy)
+	policyWrite := requireRoleFunc(netid.RoleAdmin, mp.handleWrite("policy"))
+	s.mux.HandleFunc("/api/router/policy", func(rw http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut {
+			policyWrite(rw, r)
+			return
+		}
+		policyRead(rw, r)
+	})
 	s.mux.HandleFunc("/models.js", s.handleModelsJS)
+	s.mux.HandleFunc("/models_write.js", s.handleModelsWriteJS)
 	s.mux.HandleFunc("/api/chat/context", requireRoleFunc(netid.RoleRead, s.chat.handleChatContext))
 	// POST /api/chat/share — flip shared flag; owner-gated.
 	s.mux.HandleFunc("/api/chat/share", requireRoleFunc(netid.RoleDispatch, s.chat.handleChatShare))
@@ -1601,7 +1627,7 @@ func isStaticAsset(r *http.Request) bool {
 		return false
 	}
 	switch r.URL.Path {
-	case "/", "/app.js", "/chat-routing.js", "/models.js", "/context-drawer.js", "/styles.css", "/sw.js", "/ide-editor.js", "/flows-gallery.js", "/ide/editor":
+	case "/", "/app.js", "/chat-routing.js", "/models.js", "/models_write.js", "/context-drawer.js", "/styles.css", "/sw.js", "/ide-editor.js", "/flows-gallery.js", "/ide/editor":
 		return true
 	}
 	// Vendored pinned blobs are same-origin static assets; no token required.

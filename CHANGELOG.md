@@ -25,6 +25,24 @@ never holds a login: ADR-0010. Detailed entries follow.
   the Anthropic gateway (K-151), Flows triggers (K-152), the Models & Providers
   tab and policy writers (K-153), the REPL (K-154).
 
+- **Models tab browser writes behind `--console-model-writes` (K-175).** `PUT
+  /api/models/{enable|disable|alias|pin|pricing}` and `PUT /api/router/policy` for
+  admins, off by default (405) and turned on only by `yakos serve
+  --console-model-writes`. They share `internal/policywrite` with the CLI, so the
+  checks, the trusted atomic writers and the `config_changed` audit line are the
+  same; the line adds `surface: console`, `actor: operator-browser`, `auth_method`
+  and the server-resolved operator. Each write needs the Host check, a
+  same-origin `Sec-Fetch-Site` and `Origin`, `application/json`, a per-credential
+  double-submitted CSRF token (session, loopback token or client certificate), a
+  step-up re-authentication within 5 minutes and a body of at most 64 KiB with no
+  privileged field. The tab draws controls only for an admin when writes are on.
+  `allow_unsandboxed_runtimes` is hidden from read and dispatch callers in
+  `GET /api/router/policy` and the overview; the tab says it lists router-policy
+  pins only; the rules replace is a compare-and-swap on the policy sha (409 on a
+  stale save); `yakos budget set` now writes a `config_changed` line
+  (`budget.set`). `yakos models pricing --billing` now prints one `ok:` line and
+  writes one audit line (it was two of each).
+  Reference: `docs/routing.md`, "Browser writes".
 - **fix(dispatch): bash dispatch deadline, model ceiling and `promote` (K-168, K-169).**
   `dispatch.sh` runs its adapter function under a shell-native deadline instead of
   GNU `timeout` (which failed with exit 127 on Linux and on macOS with coreutils),
@@ -301,7 +319,7 @@ never holds a login: ADR-0010. Detailed entries follow.
   signed in, cooldown, next step), the catalog with 30-day tokens per model, tier
   aliases, pins and router rules, budgets, eval results, the sensitive class and
   an explain playground, over `GET /api/models/overview`, `/api/models/explain`
-  and `/api/router/policy`. Browser writes are held for K-153b; see
+  and `/api/router/policy`. Browser writes arrive with K-175, off by default; see
   `docs/routing.md`.
 
 ### Fixed

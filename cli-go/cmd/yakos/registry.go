@@ -393,7 +393,7 @@ var commandRegistry = []commandEntry{
 		Specs: specSet("serve", "--socket", "--pidfile", "--ws-addr", "--perf-addr", "--console-addr",
 			"--console-bind", "--console-external-host", "--rotate-ws-token", "--rotate-perf-token",
 			"--rotate-console-token", "--rotate-openai-token", "--no-perf", "--no-console", "--console-bootstrap-cert",
-			"--no-bootstrap-cert", "--console-allow-bash", "--console-structured-questions",
+			"--no-bootstrap-cert", "--console-allow-bash", "--console-model-writes", "--console-structured-questions",
 			"--share-terminal", "--openai-endpoint", "--gateway", "--gateway-passthrough-subscription",
 			"--ide-root", "--detach", "--require-console"),
 		HelpFn: printServeHelp,
