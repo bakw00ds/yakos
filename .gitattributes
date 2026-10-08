@@ -77,6 +77,7 @@ cli-go/internal/dispatch/testdata/route_p0a_golden.txt text eol=lf
 # byte; force LF so a Windows autocrlf checkout cannot make the compare fail.
 cli-go/cmd/yakos/testdata/router-explain/*.golden text eol=lf
 cli-go/internal/doctor/testdata/*.golden text eol=lf
+cli-go/cmd/yakos/testdata/router-policy/*.golden text eol=lf
 # REPL stream golden is compared byte for byte; keep LF on Windows checkouts.
 cli-go/internal/repl/testdata/*.golden text eol=lf
 cli-go/cmd/yakos/testdata/start_native_*.argv.golden text eol=lf

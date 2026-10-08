@@ -48,6 +48,7 @@ func newModelsRig(t *testing.T) *modelsRig {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	lastStateDir = dir
 	r := &modelsRig{t: t, stateDir: dir, project: t.TempDir(), ready: true}
 	r.run = func(ctx context.Context, spec modelreg.RunSpec) (modelreg.RunResult, error) {
 		r.runs++

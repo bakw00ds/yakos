@@ -24,7 +24,7 @@ import (
 //
 // It never exits 2: exit 2 is the Claude Code hook "block" code.
 func printModelsHelp(w io.Writer) {
-	_, _ = fmt.Fprint(w, `yakos models <list|show|probe> — the provider-aware model registry (K-138)
+	_, _ = fmt.Fprint(w, `yakos models <list|show|probe> — the provider-aware model registry (K-138); enable, disable, alias, pin and pricing edit it (K-153)
 
 Subcommands:
     list [--harness <name>] [--project <path>] [--json]
@@ -43,10 +43,33 @@ Subcommands:
                           answer in ~/.yakos-state and say what changed. Bounded by
                           --timeout (default 15s); a harness that is not installed or
                           not signed in is skipped, not an error.
+    enable <id> | disable <id>
+                          Switch a model on or off in the overlay (every harness that
+                          lists the id). A project's .yakos.yml can still switch it off.
+    alias <alias> <codex|agy> <id|default>
+                          Map a tier alias (cheap, balanced, best, reasoning, frontier) to
+                          a model on codex or agy; "default" is the harness default.
+    pin <agent> <id> [--runtime <name>] | pin <agent> --clear
+                          Pin an agent to one runtime and model with a router-policy rule
+                          placed ahead of the others. --runtime is needed when more than
+                          one runtime offers the id.
+    pricing <id> --input <usd> --output <usd> [--cache-read <usd>] [--cache-write <usd>]
+            [--billing api|subscription|local] | pricing <id> --clear
+                          Set the price in dollars per million tokens, or remove it. A price
+                          counts only while billing is api, so it is refused for a model
+                          billed otherwise unless --billing api is given.
+    Every write is atomic, owner-only (0600) and recorded in the dispatch log (who, which
+    file, its sha before and after). The privileged keys of the router policy (running a
+    harness without its sandbox, the hooks and OpenAI endpoints) are never set by these.
 
 Flags:
     --json                Machine-readable output.
     --harness <name>      Only this harness: claude, codex or agy.
+    --runtime <name>      pin: the runtime when more than one offers the id.
+    --input, --output, --cache-read, --cache-write <usd>
+                          pricing: dollars per million tokens.
+    --billing <mode>      pricing: how the model is billed (subscription, api, local).
+    --clear               pin, pricing: remove the pin or the price.
     --project <path>      Project whose .yakos.yml models: may disable models
                           (default: the working directory).
     --timeout <duration>  probe: how long one harness may take (default 15s, max 2m).
@@ -176,6 +199,7 @@ func modelsMain(args []string, stdout, stderr io.Writer, env modelsEnv) int {
 		harness string
 		project string
 		timeout string
+		wa      modelsWriteArgs
 	)
 	specs := []cliflag.Spec{{Name: "--help", Aliases: []string{"-h"}, Kind: cliflag.Bool, Bool: &help}}
 	switch sub {
@@ -189,8 +213,22 @@ func modelsMain(args []string, stdout, stderr io.Writer, env modelsEnv) int {
 			cliflag.Spec{Name: "--json", Kind: cliflag.Bool, Bool: &asJSON},
 			cliflag.Spec{Name: "--harness", Kind: cliflag.String, Str: &harness, ValueDesc: "a harness name"},
 			cliflag.Spec{Name: "--timeout", Kind: cliflag.String, Str: &timeout, ValueDesc: "a duration"})
+	case "enable", "disable", "alias":
+		specs = append(specs, cliflag.Spec{Name: "--project", Kind: cliflag.String, Str: &project, ValueDesc: "a path"})
+	case "pin":
+		specs = append(specs,
+			cliflag.Spec{Name: "--runtime", Kind: cliflag.String, Str: &wa.runtime, ValueDesc: "a runtime name"},
+			cliflag.Spec{Name: "--clear", Kind: cliflag.Bool, Bool: &wa.clear})
+	case "pricing":
+		specs = append(specs,
+			cliflag.Spec{Name: "--input", Kind: cliflag.String, Str: &wa.input, ValueDesc: "dollars per million tokens"},
+			cliflag.Spec{Name: "--output", Kind: cliflag.String, Str: &wa.output, ValueDesc: "dollars per million tokens"},
+			cliflag.Spec{Name: "--cache-read", Kind: cliflag.String, Str: &wa.cacheRead, ValueDesc: "dollars per million tokens"},
+			cliflag.Spec{Name: "--cache-write", Kind: cliflag.String, Str: &wa.cacheWrite, ValueDesc: "dollars per million tokens"},
+			cliflag.Spec{Name: "--billing", Kind: cliflag.String, Str: &wa.billing, ValueDesc: "subscription, api or local"},
+			cliflag.Spec{Name: "--clear", Kind: cliflag.Bool, Bool: &wa.clear})
 	default:
-		_, _ = fmt.Fprintf(stderr, "models: unknown subcommand %q (list | show | probe)\n", sub)
+		_, _ = fmt.Fprintf(stderr, "models: unknown subcommand %q (list | show | probe | enable | disable | alias | pin | pricing)\n", sub)
 		return 1
 	}
 	fs := &cliflag.Set{Cmd: "models " + sub, Specs: specs}
@@ -214,6 +252,8 @@ func modelsMain(args []string, stdout, stderr io.Writer, env modelsEnv) int {
 		return 1
 	}
 	switch sub {
+	case "enable", "disable", "alias", "pin", "pricing":
+		return modelsWrite(stdout, stderr, env, sub, pos, wa, project)
 	case "list":
 		if len(pos) != 0 {
 			_, _ = fmt.Fprintln(stderr, "models list: unexpected argument")

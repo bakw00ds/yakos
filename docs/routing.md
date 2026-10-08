@@ -226,7 +226,13 @@ entries stay `unknown`.
 yakos models list  [--harness <name>] [--project <path>] [--json]
 yakos models show  <id> [--harness <name>] [--project <path>] [--json]
 yakos models probe [--harness <name>] [--timeout <duration>] [--json]
+yakos models enable|disable <id>
+yakos models alias <alias> <codex|agy> <id|default>
+yakos models pin <agent> <id> [--runtime <name>] | pin <agent> --clear
+yakos models pricing <id> --input <usd> --output <usd> [--cache-read <usd>] [--cache-write <usd>] [--billing <mode>] | pricing <id> --clear
 ```
+
+The last five write (see "Policy writers").
 
 `list` and `show` never run a harness CLI; availability comes from the cache.
 `--project` (default: the working directory) names the project whose `.yakos.yml`
@@ -569,6 +575,39 @@ transcript and user-turn text; none of it enters a system prompt,
   the handoff banner is shown live but not persisted; and a follow-up sent to a
   live interactive pane (`/api/chat/send`) emits no route event: the pane routes
   once, at its first turn.
+
+## Policy writers: `yakos models` and `yakos router policy` (K-153)
+
+Policy is written from a terminal:
+
+- `yakos models enable|disable <id>`, `alias`, `pricing` edit
+  `~/.yakos-state/model-registry.yml`. `pin` adds a rule to `router-policy.yml`
+  that sends one agent to one runtime and model ahead of the others
+  (`override_pins: true`, placed first; `--clear` removes it). `yakos router policy
+  set --rules-file <file|->` replaces the `rules:` list, `get [--json]` shows it.
+  A price is refused for a model that is not billed `api` (the registry would
+  ignore it); give `--billing api` with it.
+- Every writer is `statepath.EditYAML`: the file is read with the same trust check
+  the readers use (a symlink, another user's file or a group- or world-writable
+  file or directory is refused, never overwritten), keys the edit did not touch and
+  their comments are kept, the result is checked as the reader will read it (a
+  router rule the router would drop, an overlay entry it would ignore, is refused),
+  and the file is replaced with a 0600 temporary file and a rename, under a lock
+  file so two writers cannot lose each other's change.
+- The privileged router keys (`allow_unsandboxed_runtimes`, `hooks_endpoint`,
+  `openai_endpoint`) are shown and never set by these commands. Two checks hold
+  that: `router policy set` refuses YAML anchors, aliases and `<<` merge keys in the
+  rules input, and the writer re-parses the composed file and refuses the write
+  unless every top-level key other than `rules:` has the same value (aliases
+  resolved) as before.
+- Every write appends one `config_changed` line to the dispatch log through
+  `dispatch.Account`: the operator (the OS user for the CLI), the file's base name,
+  a fixed action word, and the file's sha before and after. The line always goes
+  to the log in the home state directory (`~/.yakos-state`), whatever
+  `YAKOS_DISPATCH_LOG` says, because a project can set that variable. The log is
+  opened and locked before the file is written; if it cannot be opened the command
+  exits 1 and writes nothing. The audit records the OS user, not an authenticated
+  identity.
 
 ## Claude Code request-class aliases (K-141)
 
