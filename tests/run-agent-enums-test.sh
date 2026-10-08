@@ -473,6 +473,49 @@ else
     printf '  SKIP the FIFO fixtures: mkfifo is not available here\n'
 fi
 
+# doctor's agent counts mean "files Compose would read" (rev-363): a link out of the
+# agent directories, a non-regular file, a file over 4 MiB, and a project whose
+# .claude/agents is a link all count as zero, and none of them may hang the count.
+# The helpers are read out of cli/lib/doctor.sh, so the test cannot drift from it.
+DR="$TMP/doctor"; mkdir -p "$DR/root/lib/agents" "$DR/p/.claude/agents" "$DR/out"
+printf 'x\n' > "$DR/root/lib/agents/fw.md"; printf 'x\n' > "$DR/root/lib/agents/README.md"
+printf 'x\n' > "$DR/p/.claude/agents/good.md"; printf 'x\n' > "$DR/out/secret.md"
+ln -s "$DR/root/lib/agents/fw.md" "$DR/p/.claude/agents/inroot.md"
+ln -s "$DR/out/secret.md" "$DR/p/.claude/agents/leak.md"
+ln -s "$DR/nowhere" "$DR/p/.claude/agents/dangling.md"
+dd if=/dev/zero of="$DR/p/.claude/agents/huge.md" bs=1048576 count=5 2>/dev/null
+if [ "$fifos" = 1 ]; then mkfifo "$DR/p/.claude/agents/pipe.md"; fi
+# A link whose target name ends in a newline: $(readlink) drops it, so the link was
+# judged by a small decoy. The target is 5 MiB and must not be counted (perl builds
+# the fixture, so the script text carries no literal newline).
+mkdir -p "$DR/pn/.claude/agents"; printf 'x\n' > "$DR/pn/.claude/agents/good.md"; printf 'x\n' > "$DR/pn/.claude/agents/big"
+(cd "$DR/pn/.claude/agents" && perl -e 'open(F, ">", "big\n") or die; print F "x" x (5*1048576); close F; symlink("big\n", "nl.md") or die;')
+awk '/^# _doctor_agent_ok FILE/{p=1} p{print} /^_doctor_count_agents\(\)/{c=1} c&&/^}/{exit}' "$REPO_ROOT/cli/lib/doctor.sh" > "$DR/helpers.sh"
+dcount() { ( export YAKOS_ROOT="$DR/root"; . "$DR/helpers.sh"; _doctor_count_agents "$@" ); }
+dfw="$(dcount "$DR/root/lib/agents" "")"
+dproj="x"; limited 20 "$DR/proj.out" dcount "$DR/p/.claude/agents" "$DR/p" && dproj="$(cat "$DR/proj.out")" || bad "doctor (bash): the project count did not finish (a FIFO or device blocked it)"
+[ "$dfw" = 1 ] && ok "doctor (bash): framework count skips README.md" || bad "doctor (bash): framework count is '$dfw', want 1"
+[ "$dproj" = 2 ] && ok "doctor (bash): project count is the files Compose reads (a regular file and an in-root link)" || bad "doctor (bash): project count is '$dproj', want 2"
+dnl="$(dcount "$DR/pn/.claude/agents" "$DR/pn")"
+[ "$dnl" = 1 ] && ok "doctor (bash): a link to a name ending in a newline is judged by the real target" || bad "doctor (bash): newline-target count is '$dnl', want 1 (good.md only)"
+mkdir -p "$DR/p2/.claude"; ln -s "$DR/p/.claude/agents" "$DR/p2/.claude/agents"
+dlinked="$(dcount "$DR/p2/.claude/agents" "$DR/p2")"
+[ "$dlinked" = 0 ] && ok "doctor (bash): a linked project agents directory counts zero" || bad "doctor (bash): linked directory count is '$dlinked', want 0"
+
+# `doctor --production` scans the project tree for secrets; a plain FIFO in the
+# project used to block grep for good (rev/sec-363b). The run is under a watchdog.
+if [ "$fifos" = 1 ]; then
+    FP="$TMP/fifoscan"; mkdir -p "$FP/proj/.claude" "$FP/home"
+    mkfifo "$FP/proj/pipe"
+    fp_run() { HOME="$FP/home" YAKOS_ROOT="$REPO_ROOT" YAKOS_LIB="$REPO_ROOT/cli/lib" bash "$REPO_ROOT/cli/lib/doctor.sh" "$FP/proj" --production; }
+    if limited 60 "$FP/out.txt" fp_run || [ "$?" != 124 ]; then
+        grep -q 'no obvious-secret patterns in tree' "$FP/out.txt" && ok "doctor --production (bash) finishes with a FIFO in the project" || bad "doctor --production (bash): secret scan did not report on a FIFO project"
+    else
+        bad "doctor --production (bash) blocked on a FIFO in the project"
+    fi
+    rm -rf "$FP"
+fi
+
 # The shipped framework passes strict on both sides.
 run_strict() { (cd "$REPO_ROOT" && "run_$1" --strict); }
 for side in $sides; do
