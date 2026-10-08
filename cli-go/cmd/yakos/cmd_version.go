@@ -96,7 +96,7 @@ var helpGroups = []helpGroup{
 	{
 		Title: "Dispatch & Orchestration",
 		Commands: []string{
-			"dispatch", "team", "archive", "peer", "workflow",
+			"dispatch", "team", "archive", "peer", "workflow", "flows",
 		},
 	},
 	{
@@ -137,6 +137,7 @@ var builtinDescs = map[string]string{
 	"--version": "Print version string",
 	"--help":    "Print this help",
 	"workflow":  "Run a named multi-step workflow",
+	"flows":     "Enable or disable a workflow's cron and webhook triggers (schedule enable | disable)",
 	"budget":    "Per-agent dollar budgets with a hard stop (status | set | reset | check)",
 	"models":    "Provider-aware model registry (list | show | probe)",
 	"decide":    "Ask a typed decision provider (Jev/mock) a reviewed question set",
