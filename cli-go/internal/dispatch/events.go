@@ -173,6 +173,15 @@ type Result struct {
 	// (runtime.MaxStreamLineBytes). A dropped line contributes nothing to Text.
 	LinesDropped int
 
+	// ScanFindings counts the detect-and-report findings the event scan recorded
+	// (K-146); CancelReason is why the scan cancelled the run ("" when it did not).
+	// Both go to the ledger, omitted when empty. Neither carries content.
+	// ScanOffReason is why the scan switched itself off ("budget" or "deadline";
+	// fixed strings, "" while it stayed on).
+	ScanFindings  int
+	CancelReason  string
+	ScanOffReason string
+
 	// Error is the failure message the harness itself reported, "" for a run
 	// that did not report one. Diagnostic only; never part of Text.
 	Error string
@@ -230,6 +239,12 @@ type finishedEvent struct {
 	PolicySHA        string  `json:"policy_sha,omitempty"`
 	Surface          string  `json:"surface,omitempty"`
 	NativeSessionID  string  `json:"native_session_id,omitempty"`
+	// K-146 event-scan fields: finding count and the reason the scan cancelled
+	// the run (a fixed "kill_on_critical:<label>" string). Omitted when empty.
+	ScanFindings int    `json:"scan_findings,omitempty"`
+	CancelReason string `json:"cancel_reason,omitempty"`
+	// ScanOffReason: why the scan switched itself off, "budget" or "deadline".
+	ScanOffReason string `json:"scan_off_reason,omitempty"`
 }
 
 // WriteBudgetViolation writes a budget_violation event when a dispatch exceeded
