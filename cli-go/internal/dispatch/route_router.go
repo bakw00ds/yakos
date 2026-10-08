@@ -362,6 +362,10 @@ type ExplainQuery struct {
 	// would: the task, then upstream outputs, a knowledge block, digests.
 	Task  string
 	Extra []string
+	// ExtraSecretOnly is framework-authored text scanned for secret shapes only,
+	// not for credential-path mentions (the console's knowledge pack, K-173): a
+	// rules file may name ~/.ssh in prose, a credential in it still counts.
+	ExtraSecretOnly []string
 	// SkipProbe skips the availability probe (see routeInput.SkipProbe).
 	SkipProbe bool
 }
@@ -374,7 +378,7 @@ func Explain(ctx context.Context, q ExplainQuery) (router.RouteDecision, error) 
 		RuntimeOverride: q.Runtime, ModelOverride: q.Model,
 		RuntimeEnvDefault: q.RuntimeEnvDefault, RuntimeFallbackOptIn: q.RuntimeFallbackOptIn, EvalRunID: q.EvalRunID,
 		Class: q.Class, TaskBytes: q.TaskBytes, ConversationID: q.ConversationID,
-		Task: q.Task, Extra: q.Extra, SkipProbe: q.SkipProbe,
+		Task: q.Task, Extra: q.Extra, ExtraSecretOnly: q.ExtraSecretOnly, SkipProbe: q.SkipProbe,
 	}, true)
 	if err != nil {
 		return router.RouteDecision{}, err

@@ -256,6 +256,12 @@ func buildHandoffDigest(entries []TranscriptEntry, from string) (text string, tu
 
 // secretPatterns are the shapes scanSecrets redacts. Each is linear-time (RE2).
 var secretPatterns = []*regexp.Regexp{
+	// An Authorization header of any scheme or none (Basic, Bearer, ApiKey, SSWS,
+	// OAuth ..., AWS4 Signature= after a comma): the whole value is redacted, to
+	// the end of the line or the closing bracket of a JSON / Go-map form
+	// (K-173). First in the list: the value it leaves is
+	// "[redacted]", which a later scheme pattern (bearer) must not count again.
+	regexp.MustCompile(`(?i)(?:\b|_)(?:proxy-)?authorization["']?\s*[:=]\s*\[?["']?[^\r\n\]]{6,}`),
 	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)`),
 	regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`),
 	regexp.MustCompile(`\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}`),
@@ -264,12 +270,12 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}`),
 	regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}`),
 	regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{16,}`),
-	// An Authorization header of any scheme (Basic, Digest, Token, Negotiate, a
-	// bare value), as curl -H or a raw request prints it. Bearer is also caught on
-	// its own above; this is the one that holds a Basic user:password blob (K-173).
-	regexp.MustCompile(`(?i)(?:\b|_)(?:proxy-)?authorization["']?\s*[:=]\s*(?:\[["']?(?:basic|bearer|digest|negotiate|ntlm|token)\s+[^\s"',;\]]{6,}|["']?(?:digest\s+[^\r\n]+|(?:(?:basic|negotiate|ntlm|token|bearer|hoba|mutual|aws4-hmac-sha256)\s+)?[^\s"',;\[][^\s"',;]{5,}))`),
-	// A Cookie / Set-Cookie header: the whole value (to the end of the line).
-	regexp.MustCompile(`(?i)\b(?:set-)?cookie["']?\s*:\s*[^\r\n]{6,}`),
+	// A Cookie / Set-Cookie header, or the CGI form: the whole value.
+	regexp.MustCompile(`(?i)(?:\b|_)(?:set-)?cookie["']?\s*[:=]\s*[^\r\n]{6,}`),
+	// curl -b / --cookie 'name=value'.
+	regexp.MustCompile(`(?i)\bcurl\b[^\r\n]*?(?:\s-b|\s--cookie)[ =]+["']?[^\s"']{6,}`),
+	// An Azure SAS / signed-URL signature and similar query signatures.
+	regexp.MustCompile(`(?i)[?&](?:sig|signature|x-amz-signature)=[A-Za-z0-9%+/=_-]{8,}`),
 	// A credential-looking name (it may sit inside a longer one: AWS_SECRET_ACCESS_KEY,
 	// GITHUB_TOKEN, "client_secret") followed by : or = and a value.
 	regexp.MustCompile(`(?i)[A-Za-z0-9_.-]*(?:api[_-]?key|access[_-]?key|private[_-]?key|secret|token|passwd|password|credential)s?[A-Za-z0-9_.-]*["']?\s*[:=]\s*["']?[^\s"',;\[][^\s"',;]{5,}`),

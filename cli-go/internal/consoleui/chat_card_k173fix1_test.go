@@ -18,16 +18,18 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/consoleui"
 	"github.com/bakw00ds/yakos/internal/routerpolicy"
-	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
-// An auto pane whose pre-route runtime is claude, with a router rule that would
-// move the turn to codex (task_bytes_gt), and a rule file naming a guarded path
-// only in the knowledge pack: the pack is scanned by the pre-check, so the turn
-// is sensitive, stays on claude, and codex is never called.
-func TestK173Fix1_PackIsScannedWhenARuleMovesAClaudePaneToCodex(t *testing.T) {
+// k173PackRun starts an auto interactive pane whose router rule moves any task
+// over 5 bytes to codex, with ruleBody as the only rules file in the pack, and
+// returns the route frame and the codex argv calls.
+func k173PackRun(t *testing.T, ruleBody, task, forcePack string) (map[string]any, [][]string) {
+	t.Helper()
 	k := newK148(t)
-	dir := statepath.Dir()
+	if forcePack != "" {
+		t.Cleanup(consoleui.SetPrecheckPackForTest(forcePack))
+	}
+	dir := routerpolicy.StateDir()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -39,23 +41,46 @@ func TestK173Fix1_PackIsScannedWhenARuleMovesAClaudePaneToCodex(t *testing.T) {
 	if err := os.MkdirAll(rules, 0o755); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
-	rule := "# deploy\n\nThe release job reads the file ~/.ssh/" + "id_rsa and ." + "env.production.\n"
-	if err := os.WriteFile(filepath.Join(rules, "deploy.md"), []byte(rule), 0o644); err != nil { //nolint:gosec
+	if err := os.WriteFile(filepath.Join(rules, "deploy.md"), []byte(ruleBody), 0o644); err != nil { //nolint:gosec
 		t.Fatal(err)
 	}
-	if st := k.interactiveFirstTurn("s-kb-auto", "conv-kb-auto", "", "say hello"); st != http.StatusAccepted {
+	if st := k.interactiveFirstTurn("s-kb-auto", "conv-kb-auto", "", task); st != http.StatusAccepted {
 		t.Fatalf("status %d", st)
 	}
 	ev := k.firstOf("s-kb-auto")
 	if ev["type"] != "route" {
 		t.Fatalf("first frame = %v, want a route", ev)
 	}
-	if r := routeOf(t, ev); r["runtime"] != "claude" || r["class"] != "sensitive" {
-		t.Errorf("route = %v, want claude/sensitive", r)
+	return routeOf(t, ev), argvCalls(t, k.codexLog)
+}
+
+// An auto pane whose pre-route runtime is claude, with a router rule that would
+// move the turn to codex (task_bytes_gt). The rule file lives where the router
+// reads it (routerpolicy.StateDir, under HOME), so the benign case pins the
+// precondition: the rule fires and the turn goes to codex. A pack holding a
+// credential then makes the turn sensitive, stays on claude, and codex is never
+// called (the sec-366 M1 gate, `runtimeName != "claude"`, would let codex run).
+func TestK173Fix1_PackIsScannedWhenARuleMovesAClaudePaneToCodex(t *testing.T) {
+	run := func(t *testing.T, ruleBody string) (map[string]any, [][]string) {
+		return k173PackRun(t, ruleBody, "say hello", "")
 	}
-	if got := argvCalls(t, k.codexLog); len(got) != 0 {
-		t.Errorf("codex was started with an unscanned pack: %v", got)
-	}
+	t.Run("benign pack: the rule moves the pane to codex", func(t *testing.T) {
+		r, _ := run(t, "# deploy\n\nRun the release job after the tests pass.\n")
+		if r["runtime"] != "codex" || r["class"] == "sensitive" {
+			t.Errorf("route = %v, want codex (rule fired)", r)
+		}
+	})
+	t.Run("pack with a credential: claude, sensitive, codex never called", func(t *testing.T) {
+		// Compose refuses a rules file holding a secret shape, so the pack is
+		// forced here: the pre-check's own scan is what is under test.
+		r, calls := k173PackRun(t, "# deploy\n\nRun the release job.\n", "say hello", "# deploy\n\nkey: "+"AKIA"+"IOSFODNN7EXAMPLE\n")
+		if r["runtime"] != "claude" || r["class"] != "sensitive" {
+			t.Errorf("route = %v, want claude/sensitive", r)
+		}
+		if len(calls) != 0 {
+			t.Errorf("codex was started with an unscanned pack: %v", calls)
+		}
+	})
 }
 
 // The four Authorization shapes the first pattern missed, plus Cookie values,

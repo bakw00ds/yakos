@@ -250,34 +250,49 @@ func TestK173_CLIPaneRunsTheCeilingLoweredModel(t *testing.T) {
 	}
 }
 
-// A sensitive-class string that sits only in the knowledge block (a rule the
-// pane would send with every turn) makes the interactive first turn sensitive:
-// it is placed on claude, never started on codex. The user text is clean.
+// The knowledge block a codex pane would send is scanned for secret shapes (K-140,
+// K-173) but not for credential-path names: a rules file that only names
+// ~/.ssh in prose leaves the pane on codex, a credential in the block makes the
+// first turn sensitive and it is placed on claude, never started on codex. The
+// user text is clean in both.
 func TestK173_InteractiveFirstTurnScansTheKnowledgeBlock(t *testing.T) {
-	k := newK148(t)
-	rules := filepath.Join(k.yakosRoot, "lib", "rules")
-	if err := os.MkdirAll(rules, 0o755); err != nil { //nolint:gosec
-		t.Fatal(err)
+	run := func(t *testing.T, forcePack string) (map[string]any, [][]string) {
+		k := newK148(t)
+		rules := filepath.Join(k.yakosRoot, "lib", "rules")
+		if err := os.MkdirAll(rules, 0o755); err != nil { //nolint:gosec
+			t.Fatal(err)
+		}
+		rule := "# deploy\n\nThe release job reads the file ~/.ssh/" + "id_rsa and ." + "env.production.\n"
+		if err := os.WriteFile(filepath.Join(rules, "deploy.md"), []byte(rule), 0o644); err != nil { //nolint:gosec
+			t.Fatal(err)
+		}
+		if forcePack != "" {
+			// Compose refuses a file holding a secret shape, so the pack is forced.
+			t.Cleanup(consoleui.SetPrecheckPackForTest(forcePack))
+		}
+		if st := k.interactiveFirstTurn("s-kb", "conv-kb", "codex", "say hello"); st != http.StatusAccepted {
+			t.Fatalf("status %d", st)
+		}
+		ev := k.firstOf("s-kb")
+		if ev["type"] != "route" {
+			t.Fatalf("first frame = %v, want a route", ev)
+		}
+		return routeOf(t, ev), argvCalls(t, k.codexLog)
 	}
-	// A path the sensitive class guards, not a secret shape (the pack drops
-	// those itself), so only the router's scan can see it.
-	rule := "# deploy\n\nThe release job reads the file ~/.ssh/" + "id_rsa and ." + "env.production.\n"
-	if err := os.WriteFile(filepath.Join(rules, "deploy.md"), []byte(rule), 0o644); err != nil { //nolint:gosec
-		t.Fatal(err)
-	}
-	if st := k.interactiveFirstTurn("s-kb", "conv-kb", "codex", "say hello"); st != http.StatusAccepted {
-		t.Fatalf("status %d", st)
-	}
-	ev := k.firstOf("s-kb")
-	if ev["type"] != "route" {
-		t.Fatalf("first frame = %v, want a route", ev)
-	}
-	if r := routeOf(t, ev); r["runtime"] != "claude" || r["class"] != "sensitive" {
-		t.Errorf("route = %v, want claude/sensitive", r)
-	}
-	if got := argvCalls(t, k.codexLog); len(got) != 0 {
-		t.Errorf("codex was started: %v", got)
-	}
+	t.Run("path named in prose", func(t *testing.T) {
+		if r, _ := run(t, ""); r["runtime"] != "codex" || r["class"] == "sensitive" {
+			t.Errorf("route = %v, want codex and not sensitive", r)
+		}
+	})
+	t.Run("credential in the pack", func(t *testing.T) {
+		r, calls := run(t, "# deploy\n\nkey: "+"AKIA"+"IOSFODNN7EXAMPLE\n")
+		if r["runtime"] != "claude" || r["class"] != "sensitive" {
+			t.Errorf("route = %v, want claude/sensitive", r)
+		}
+		if len(calls) != 0 {
+			t.Errorf("codex was started: %v", calls)
+		}
+	})
 }
 
 // fakeCodexCardsScript answers a turn with a reasoning item, a command whose

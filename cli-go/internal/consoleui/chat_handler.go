@@ -541,8 +541,10 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 			YakosRoot: ch.yakosRoot, Project: ch.workspaceRoot, Agent: req.Agent,
 			Runtime: requestedRuntime, Model: requestedModel,
 			TaskBytes: int64(len(req.Task)), ConversationID: req.ConversationID,
-			Task:  req.Task, // the sensitive class (K-140) reads it, as RunStream will
-			Extra: precheckExtra,
+			Task: req.Task, // the sensitive class (K-140) reads it, as RunStream will
+			// The pack is framework prose that names guarded paths on purpose: scan
+			// it for secret shapes only; the task text keeps the path matcher.
+			ExtraSecretOnly: precheckExtra,
 			// An SDK pane's engine is a sidecar on ANTHROPIC_API_KEY and never runs
 			// the claude CLI, so the CLI/sign-in probe says nothing about it. The
 			// probe is skipped, not its error tolerated: the model checks

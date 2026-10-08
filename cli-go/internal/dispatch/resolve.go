@@ -941,6 +941,8 @@ type routeInput struct {
 	// Task and Extra are the text the sensitive classifier scans (K-140).
 	Task  string
 	Extra []string
+	// ExtraSecretOnly: see ExplainQuery.ExtraSecretOnly.
+	ExtraSecretOnly []string
 	// SkipProbe treats every candidate the project has not disabled as
 	// available: the availability probe (CLI on PATH, sign-in, adapter) does not
 	// run. The model checks (max_model ceiling, disable_models) and the
@@ -997,7 +999,7 @@ func routeDispatchAt(ctx context.Context, in routeInput, explain bool) (*routed,
 	if explain {
 		warnTo = io.Discard
 	}
-	class, why := classifyRequest(in.Class, ci, agent, in.Task, in.Extra, warnTo)
+	class, why := classifyRequestSO(in.Class, ci, agent, in.Task, in.Extra, in.ExtraSecretOnly, warnTo)
 	ci.sensitiveWhy = why
 	st := applyRouter(&ci, agent, in.Agent, class, in.TaskBytes, in.Project, in.ConversationID, warnTo)
 

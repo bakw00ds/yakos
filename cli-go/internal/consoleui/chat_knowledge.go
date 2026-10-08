@@ -82,7 +82,16 @@ func nonClaudeTurn(tr *Transcripts, yakosRoot, workspaceRoot, rt, conversationID
 
 // knowledgeForPrecheck composes the knowledge block a non-claude pane would send,
 // without storing it, for the router's first-turn pre-check to scan (K-173).
+// precheckPackHook replaces the composed pack in the pre-check. Nil in
+// production; a test sets it to put text in the pack that Compose would have
+// refused (it drops every secret shape the router scans for), so the pre-check's
+// own scan is observable.
+var precheckPackHook func(agent string) string
+
 func (ch *chatHandlers) knowledgeForPrecheck(agent string) string {
+	if h := precheckPackHook; h != nil {
+		return h(agent)
+	}
 	return knowledge.Compose(knowledge.Options{
 		YakosRoot: ch.yakosRoot,
 		Project:   ch.workspaceRoot,

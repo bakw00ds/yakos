@@ -636,8 +636,15 @@ transcript and user-turn text; none of it enters a system prompt,
   ceiling is lowered. The SDK engine is started with the routed model (an
   explicit one, a rule's, or the agent's pin), never the sidecar's unchecked
   default. A runtime the project disabled, and a sensitive request, are still
-  refused. The first-turn pre-check of a codex or agy pane also scans the
-  knowledge pack the pane will send, not only the user text.
+  refused. The first-turn pre-check of every interactive pane also scans the
+  knowledge pack the pane may send, not only the user text. **What the pack scan
+  catches and does not:** it looks for secret shapes only (private keys, API
+  keys, tokens, Authorization and Cookie values, `user:pass@` URLs), so a
+  credential in a rules file refuses or routes the turn sensitive. It does not
+  match credential-file names (`~/.ssh`, `.env`): the framework's rules name
+  those in prose on purpose, and treating that as sensitive would make every
+  first turn claude/sensitive and switch routing rules off for panes. A guarded
+  path in the task text itself still makes the turn sensitive.
 - **Replay after a reload (K-173).** Tool calls, tool results and thinking
   blocks are stored as transcript turns (`tool_use`, `tool_result`, `thinking`;
   `tool_name`, `is_error`, `truncated`, `redacted`) in the order they happened,

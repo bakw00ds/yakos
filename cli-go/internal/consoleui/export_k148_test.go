@@ -17,3 +17,10 @@ func ApplyRouteOverrideForTest(req DispatchRequest) (rt, model, pinned string, e
 	return req.Runtime, req.Model, pinned, err
 }
 func CapCardTextForTest(s string) (string, bool) { return capCardText(s) }
+
+// SetPrecheckPackForTest makes the first-turn pre-check scan pack instead of the
+// composed knowledge pack; the returned func restores it.
+func SetPrecheckPackForTest(pack string) func() {
+	precheckPackHook = func(string) string { return pack }
+	return func() { precheckPackHook = nil }
+}
