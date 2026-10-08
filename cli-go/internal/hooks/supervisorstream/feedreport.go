@@ -105,22 +105,35 @@ func ReportFeedFinding(workCurrent string, f FeedFinding, now time.Time) error {
 	return appendPendingLines(filepath.Join(workCurrent, ".supervisor-pending."+sessionKey(f.Session)), []string{string(pend)})
 }
 
+// beforeOpenHook, when a test sets it, runs between the Lstat and the open of
+// openRegularNoFollow, where a model with write access to the directory can swap
+// the entry. It is nil otherwise.
+var beforeOpenHook func(path string)
+
 // openRegularNoFollow opens path for writing without ever following a link or
 // touching a non-regular file: Lstat refuses an existing non-regular entry, the
-// open carries O_NOFOLLOW where the platform has it, and the opened descriptor
-// must be a regular file that is the same file Lstat saw (a swap between the two
-// is refused). Permissions are set by the caller on the descriptor, never the path.
+// open carries O_NOFOLLOW and O_NONBLOCK where the platform has them, and the opened descriptor
+// must be a regular file with a single name that is the same file Lstat saw (a swap
+// between the two, or a hard link to some other file, is refused). Permissions are set by the caller on the descriptor, never the path.
 func openRegularNoFollow(path string, flag int, perm os.FileMode) (*os.File, error) {
 	pre, lerr := os.Lstat(path)
 	if lerr == nil && !pre.Mode().IsRegular() {
 		return nil, os.ErrInvalid
 	}
-	f, err := os.OpenFile(path, flag|openNoFollow, perm) //nolint:gosec
+	if beforeOpenHook != nil {
+		beforeOpenHook(path)
+	}
+	// O_NONBLOCK: the Lstat above and this open are two steps, so an entry a model
+	// swaps for a FIFO in between would otherwise block an O_WRONLY or O_RDWR open
+	// for good (no reader on the other end) and hang the stream goroutine. With it
+	// the open of a FIFO fails or returns at once, and the fstat below refuses it.
+	// It changes nothing for the regular file this function exists to open.
+	f, err := os.OpenFile(path, flag|openNoFollow|openNonblock, perm) //nolint:gosec
 	if err != nil {
 		return nil, err
 	}
 	fi, err := f.Stat()
-	if err != nil || !fi.Mode().IsRegular() || (lerr == nil && !os.SameFile(pre, fi)) {
+	if err != nil || !fi.Mode().IsRegular() || hardLinked(fi) || (lerr == nil && !os.SameFile(pre, fi)) {
 		_ = f.Close()
 		return nil, os.ErrInvalid
 	}

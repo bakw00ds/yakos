@@ -773,6 +773,90 @@ else
 fi
 
 # ===========================================================================
+# Test 19 (K-167): ~/.claude/agents is global, so only what the roster reader
+# reads from lib/agents is linked: not a link out of lib/agents, not a file over
+# 4 MiB, not a FIFO, not a dangling link. Mirrors TestSyncAgents_DoesNotLinkWhatComposeRefuses.
+# ===========================================================================
+echo ""
+echo "Test 19: refresh links only agents the roster reader would read"
+T19="$WORKDIR/t19"
+mkdir -p "$T19/root/lib/hooks" "$T19/root/lib/settings" "$T19/root/lib/agents" "$T19/project/.claude" "$T19/home"
+echo '{"hooks": {}}' > "$T19/root/lib/settings/settings.template.json"
+echo "# good" > "$T19/root/lib/agents/good.md"
+ln -s good.md "$T19/root/lib/agents/alias.md"
+echo "secret" > "$T19/outside.md"
+ln -s "$T19/outside.md" "$T19/root/lib/agents/leak.md"
+ln -s "$T19/nowhere" "$T19/root/lib/agents/dangling.md"
+dd if=/dev/zero of="$T19/root/lib/agents/huge.md" bs=1048576 count=5 2>/dev/null
+mkfifo "$T19/root/lib/agents/pipe.md" 2>/dev/null || true
+out19="$(HOME="$T19/home" YAKOS_ROOT="$T19/root" YAKOS_LIB="$YAKOS_LIB" \
+    bash "$REFRESH_SH" --project "$T19/project" 2>&1 </dev/null || true)"
+ok19=1
+for n in good alias; do
+    [ -L "$T19/home/.claude/agents/$n.md" ] || { ok19=0; fail "$n.md was not linked"; }
+done
+for n in leak dangling huge pipe; do
+    if [ -e "$T19/home/.claude/agents/$n.md" ] || [ -L "$T19/home/.claude/agents/$n.md" ]; then
+        ok19=0; fail "$n.md was linked into the global agents directory"
+    fi
+    case "$out19" in *"$n.md not linked"*) : ;; *) ok19=0; fail "no warning for $n.md" ;; esac
+done
+[ "$ok19" = 1 ] && ok "only readable agents linked; refused ones warned"
+
+# ===========================================================================
+# Test 20 (K-167 fix round 1): a link an earlier refresh made to a source that is
+# refused now is removed (with a warning); a link pointing elsewhere and a real
+# file are left alone. Mirrors TestSyncAgents_RemovesAStaleLinkToARefusedSourceOnly.
+# ===========================================================================
+echo ""
+echo "Test 20: refresh removes a stale link to a refused agent, and only that"
+T20="$WORKDIR/t20"
+mkdir -p "$T20/root/lib/hooks" "$T20/root/lib/settings" "$T20/root/lib/agents" "$T20/project/.claude" "$T20/home/.claude/agents"
+echo '{"hooks": {}}' > "$T20/root/lib/settings/settings.template.json"
+echo "secret" > "$T20/outside.md"
+ln -s "$T20/outside.md" "$T20/root/lib/agents/leak.md"
+dd if=/dev/zero of="$T20/root/lib/agents/huge.md" bs=1048576 count=5 2>/dev/null
+dd if=/dev/zero of="$T20/root/lib/agents/real.md" bs=1048576 count=5 2>/dev/null
+echo "mine" > "$T20/mine.md"
+ln -s "$T20/root/lib/agents/leak.md" "$T20/home/.claude/agents/leak.md"
+ln -s "$T20/mine.md" "$T20/home/.claude/agents/huge.md"
+echo "operator" > "$T20/home/.claude/agents/real.md"
+out20="$(HOME="$T20/home" YAKOS_ROOT="$T20/root" YAKOS_LIB="$YAKOS_LIB" \
+    bash "$REFRESH_SH" --project "$T20/project" 2>&1 </dev/null || true)"
+ok20=1
+if [ -e "$T20/home/.claude/agents/leak.md" ] || [ -L "$T20/home/.claude/agents/leak.md" ]; then
+    ok20=0; fail "the stale link to a refused source was kept"
+fi
+case "$out20" in *"removed stale symlink leak.md"*) : ;; *) ok20=0; fail "no warning for the removed link" ;; esac
+[ "$(readlink "$T20/home/.claude/agents/huge.md")" = "$T20/mine.md" ] || { ok20=0; fail "a link pointing elsewhere was touched"; }
+[ "$(cat "$T20/home/.claude/agents/real.md")" = "operator" ] || { ok20=0; fail "a real file was touched"; }
+[ "$ok20" = 1 ] && ok "stale link to a refused agent removed; others untouched"
+
+# ===========================================================================
+# Test 21: a link whose target ends in a newline. $(readlink) drops the newline, so
+# the target was judged by a decoy file with the name minus it. nl.md -> "big<NL>"
+# (5 MiB) must be refused; the decoy "big" is small. Fixture built by perl, not by
+# a literal newline in the script text.
+# ===========================================================================
+echo ""
+echo "Test 21: refresh refuses a link whose target name ends in a newline"
+T21="$WORKDIR/t21"
+mkdir -p "$T21/root/lib/hooks" "$T21/root/lib/settings" "$T21/root/lib/agents" "$T21/project/.claude" "$T21/home"
+echo '{"hooks": {}}' > "$T21/root/lib/settings/settings.template.json"
+echo "# good" > "$T21/root/lib/agents/good.md"
+echo "decoy" > "$T21/root/lib/agents/big"
+(cd "$T21/root/lib/agents" && perl -e 'open(F, ">", "big\n") or die; print F "x" x (5*1048576); close F; symlink("big\n", "nl.md") or die;')
+out21="$(HOME="$T21/home" YAKOS_ROOT="$T21/root" YAKOS_LIB="$YAKOS_LIB" \
+    bash "$REFRESH_SH" --project "$T21/project" 2>&1 </dev/null || true)"
+ok21=1
+[ -L "$T21/home/.claude/agents/good.md" ] || { ok21=0; fail "good.md was not linked"; }
+if [ -e "$T21/home/.claude/agents/nl.md" ] || [ -L "$T21/home/.claude/agents/nl.md" ]; then
+    ok21=0; fail "nl.md (target ends in a newline, 5 MiB) was linked"
+fi
+case "$out21" in *"nl.md not linked"*) : ;; *) ok21=0; fail "no warning for nl.md" ;; esac
+[ "$ok21" = 1 ] && ok "a link to a name ending in a newline is judged by the real target"
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""

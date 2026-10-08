@@ -40,7 +40,9 @@ func agentFileFinding(path string, roots []string) string {
 	case agentscompose.ProblemTooLarge:
 		return fmt.Sprintf("file is larger than %d bytes; the Go dispatcher skips it", agentscompose.MaxAgentFileBytes)
 	}
-	data, err := os.ReadFile(path) //nolint:gosec // a regular file within the size cap, checked above
+	// Read through the hardened reader, not os.ReadFile: the inspection above and an
+	// open here are two steps, and the entry can change between them.
+	data, err := agentscompose.ReadAgentFileIn(path, roots)
 	if err != nil {
 		return ""
 	}

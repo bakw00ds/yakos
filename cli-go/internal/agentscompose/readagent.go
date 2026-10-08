@@ -72,3 +72,37 @@ func ReadExtendsTemplate(yakosRoot, project, id string) ([]byte, error) {
 	}
 	return ReadAgentFile(yakosRoot, project, filepath.Join(yakosRoot, "lib", "agents", id+".md"))
 }
+
+// ReadAgentFileIn is ReadAgentFile for a caller that holds the symlink roots and
+// not the framework and project paths: `yakos validate` walks a tree it was
+// given, and reads each file under the roots agentscompose.AgentFileRoots names
+// for that tree. The rules are the same ones, the open is the same race-free
+// open, and the read is bounded by MaxAgentFileBytes.
+func ReadAgentFileIn(path string, roots []string) ([]byte, error) {
+	data, skip, err := readAgentFile(path, fileRules{roots: roots, outside: AgentOutsideReason})
+	if err != nil {
+		return nil, err
+	}
+	if skip != "" {
+		return nil, fmt.Errorf("%w: %s", ErrRefused, skip)
+	}
+	return data, nil
+}
+
+// ReadRegularFile reads a markdown file whose directory the caller has already
+// chosen: a symlink may lead anywhere, but the target must be a regular file within
+// MaxAgentFileBytes, it is opened without blocking and without following a link
+// swapped in after the check, it must be the file that was checked, and the read is
+// bounded. It is what a pass that cannot say which roots apply (the frontmatter
+// and line-count passes shared by agents, skills and rules) reads with, instead of
+// a stat followed by os.ReadFile.
+func ReadRegularFile(path string) ([]byte, error) {
+	data, skip, err := readAgentFile(path, fileRules{anywhere: true})
+	if err != nil {
+		return nil, err
+	}
+	if skip != "" {
+		return nil, fmt.Errorf("%w: %s", ErrRefused, skip)
+	}
+	return data, nil
+}
