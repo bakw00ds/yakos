@@ -169,6 +169,24 @@ async function main() {
   assert(last.headers['X-CSRF-Token'] === 'TOK2', 'token not re-minted after a 403: ' + last.headers['X-CSRF-Token']);
   assert(texts(panel).join(' ').indexOf('No change') >= 0, 'unchanged result not shown');
 
+  // 4b. A same-tab change (or a re-mint) must not move the sha under the text:
+  // the box still holds the rules loaded at SHA1, so a save cites SHA1 (the server
+  // answers 409 once the policy has moved), never the fresher sha.
+  script['GET /api/models/write-session'] = { status: 200, body: { csrf_token: 'TOK2', step_up_method: 'password', policy_sha: 'SHA9', rules_yaml: '- {newer: 1}\n' } };
+  script['PUT /api/models/disable'] = { status: 200, body: { ok: true, changed: true, changes: [] } };
+  const boxText = find(panel, 'models-write-rules').value;
+  buttons(panel, 'Disable')[0].listeners.click();
+  await tick();
+  await tick();
+  assert(find(panel, 'models-write-rules').value === boxText, 'a refresh replaced the editor text');
+  inputs.find(function (i) { return i.type === 'checkbox'; }).checked = true;
+  script['PUT /api/router/policy'] = { status: 409, body: { error: 'changed', sha: 'SHA9' } };
+  buttons(panel, 'Save rules')[0].listeners.click();
+  await tick();
+  assert(calls.filter(function (c) { return c.path === '/api/router/policy'; }).pop().body.base_sha === 'SHA1', 'save cited a sha newer than its text');
+  assert(find(panel, 'models-write-rules').value === boxText, '409 replaced the editor text');
+  script['GET /api/models/write-session'] = { status: 200, body: { csrf_token: 'TOK2', step_up_method: 'password', policy_sha: 'SHA1', rules_yaml: '- {match: {agent: a}}\n' } };
+
   // 5. Rules: ticked box sends the YAML text and the sha it was loaded from.
   inputs.find(function (i) { return i.type === 'checkbox'; }).checked = true;
   script['PUT /api/router/policy'] = { status: 200, body: { ok: true, changed: true, changes: [] } };

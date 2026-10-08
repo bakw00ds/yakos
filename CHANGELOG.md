@@ -40,7 +40,9 @@ never holds a login: ADR-0010. Detailed entries follow.
   `GET /api/router/policy` and the overview; the tab says it lists router-policy
   pins only; the rules replace is a compare-and-swap on the policy sha (409 on a
   stale save); `yakos budget set` now writes a `config_changed` line
-  (`budget.set`). Reference: `docs/routing.md`, "Browser writes".
+  (`budget.set`). `yakos models pricing --billing` now prints one `ok:` line and
+  writes one audit line (it was two of each).
+  Reference: `docs/routing.md`, "Browser writes".
 - **flows: triggers follow-ups (K-172).** `yakos flows schedule enable|disable
   <workflow>` writes the 0600 schedules file atomically (it was hand-edited); the
   webhook secret may live in `~/.yakos-state/webhook-secrets/<secret_env>`

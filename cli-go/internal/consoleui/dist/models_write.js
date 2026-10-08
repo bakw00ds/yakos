@@ -114,8 +114,12 @@
       return call('GET', '/api/models/write-session').then(function (r) {
         if (!r.ok || typeof r.body.csrf_token !== 'string') { say('Could not start a write session.', true); return false; }
         csrf = r.body.csrf_token;
-        baseSha = typeof r.body.policy_sha === 'string' ? r.body.policy_sha : null;
-        if (fill && rulesBox) rulesBox.value = typeof r.body.rules_yaml === 'string' ? r.body.rules_yaml : '';
+        // The sha moves only together with the text it describes: taking a fresh sha
+        // without refilling the box would let stale text be saved over a newer policy.
+        if (fill) {
+          baseSha = typeof r.body.policy_sha === 'string' ? r.body.policy_sha : null;
+          if (rulesBox) rulesBox.value = typeof r.body.rules_yaml === 'string' ? r.body.rules_yaml : '';
+        }
         return true;
       });
     }
@@ -162,7 +166,7 @@
         if (!r) return;
         if (r.ok) {
           say(r.body.changed ? 'Saved.' : 'No change: already set.');
-          if (r.body.changed) refresh();
+          if (r.body.changed) refresh(op === 'policy'); // a rules save: the box becomes the server's text
         } else if (r.status === 409) {
           say('The policy changed since you loaded it. Click "Reload current rules" (your text is replaced), then redo the edit.', true);
         } else if (r.status === 401 && r.body.error === 'step_up_required') {
@@ -181,11 +185,11 @@
 
     // refresh reloads the read side after a change, rebuilds the selects from the new
     // overview (a save can add pins, aliases and prices) and reloads the editor's sha.
-    function refresh() {
+    function refresh(fillRules) {
       var done = typeof reload === 'function' ? reload() : null;
       Promise.resolve(done).then(function (ov) {
         if (ov && typeof ov === 'object') fillSelects(ov);
-        return load(false);
+        return load(!!fillRules);
       }).catch(function () {});
     }
 
