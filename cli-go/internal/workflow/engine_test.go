@@ -35,26 +35,37 @@ func newTestEngine(t *testing.T, fn workflow.EngineRunFn) (*workflow.Engine, str
 		WorkDir:   workDir,
 	}
 	workflow.SetEngineRunFn(eng, fn)
-	// Registered after the TempDir, so it runs before the directory is
-	// removed: a triggered run must not still be writing under workDir.
-	t.Cleanup(func() { settleTriggered(t, eng) })
+	// t.Cleanup is LIFO: registered after the TempDir, this runs before the
+	// directory is removed, so no run may still be writing under workDir.
+	t.Cleanup(func() { settleTriggered(t, eng, workDir) })
 	return eng, workDir
 }
 
-// settleTriggered blocks until no triggered or scheduled run of the test
-// workflow is in flight on eng. The engine marks a run inactive only after
-// Run returns (all state files written), and StartTriggered claims the slot
-// before it returns, so this is race-free after any Tick. On Windows an open
-// file under t.TempDir() fails the RemoveAll cleanup (K-172).
-func settleTriggered(t *testing.T, eng *workflow.Engine) {
+// settleTriggered waits (bounded) until every run goroutine on eng has
+// returned, then removes workDir with retries. On Windows a directory cannot be
+// removed while any file in it is open, and a just-closed file can stay
+// delete-pending briefly (scanner, indexer), so t.TempDir's single RemoveAll
+// can fail with "directory is not empty" (K-172). WaitIdle covers every
+// workflow name, not just "nightly".
+func settleTriggered(t *testing.T, eng *workflow.Engine, workDir string) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for eng.RunActive("nightly") {
-		if time.Now().After(deadline) {
-			t.Errorf("triggered run still active at cleanup")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := eng.WaitIdle(ctx); err != nil {
+		t.Errorf("runs still active at cleanup: %v", err)
+	}
+	removeAllRetry(workDir)
+}
+
+// removeAllRetry is os.RemoveAll with a bounded retry; the error is dropped
+// because t.TempDir's own cleanup reports a directory that still cannot go.
+func removeAllRetry(dir string) {
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if err := os.RemoveAll(dir); err == nil || time.Now().After(deadline) {
 			return
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 

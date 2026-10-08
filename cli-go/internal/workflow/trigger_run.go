@@ -84,6 +84,64 @@ func (e *Engine) RecordTriggerRefusal(name, source, reason string) {
 	e.appendTriggerLedger(triggerLedgerEntry{TS: time.Now().UTC(), Workflow: name, Source: source, Outcome: "refused", Reason: reason})
 }
 
+// runTracker counts live run executions (including the goroutine StartTriggered
+// spawns) so WaitIdle can block until every one has fully returned. It is a
+// counter plus a channel rather than a sync.WaitGroup because a WaitGroup
+// forbids Add concurrent with Wait when the counter is zero, which is exactly
+// the state a trigger can start a run from.
+type runTracker struct {
+	mu   sync.Mutex
+	n    int
+	idle chan struct{} // closed when n returns to zero; non-nil while n > 0
+}
+
+func (r *runTracker) begin() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.n == 0 {
+		r.idle = make(chan struct{})
+	}
+	r.n++
+}
+
+func (r *runTracker) end() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.n--
+	if r.n == 0 {
+		close(r.idle)
+	}
+}
+
+// ActiveRuns returns how many workflows have a run in flight, over all names.
+func (e *Engine) ActiveRuns() int {
+	e.trig.mu.Lock()
+	defer e.trig.mu.Unlock()
+	return len(e.trig.active)
+}
+
+// WaitIdle blocks until every run goroutine has returned (all file handles the
+// run held are closed) or ctx ends, in which case it returns ctx.Err(). A run
+// started while waiting is waited for too. On Windows a directory cannot be
+// removed while any file in it is open, so tests call this before TempDir
+// cleanup (K-172).
+func (e *Engine) WaitIdle(ctx context.Context) error {
+	for {
+		e.runs.mu.Lock()
+		if e.runs.n == 0 {
+			e.runs.mu.Unlock()
+			return nil
+		}
+		ch := e.runs.idle
+		e.runs.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 // RunActive reports whether a run of the named workflow is in flight, so a
 // caller can answer 409 before doing expensive work (the payload scan).
 func (e *Engine) RunActive(name string) bool {
@@ -173,7 +231,9 @@ func (e *Engine) StartTriggered(ctx context.Context, wf *Workflow, source, owner
 		}
 	}
 	e.appendTriggerLedger(triggerLedgerEntry{TS: time.Now().UTC(), Workflow: wf.Name, Source: source, Outcome: "started", RunID: runID})
+	e.runs.begin() // before the go statement, so WaitIdle cannot miss this run
 	go func() {
+		defer e.runs.end() // the very last thing: after done() and every handle closed
 		defer e.trig.done(wf.Name)
 		ctx := context.WithValue(ctx, surfaceKey{}, dispatch.SurfaceTrigger)
 		if _, err := e.Run(ctx, &cp, runID, ownerOpID, identity); err != nil {

@@ -134,7 +134,7 @@ func newTrigEnv(t *testing.T, block <-chan struct{}) *trigEnv {
 	// removed: no triggered run may still be writing under wDir (Windows
 	// fails the RemoveAll cleanup otherwise, K-172). The engine marks a run
 	// inactive only after Run has returned.
-	t.Cleanup(func() { settleTriggeredRuns(t, eng, "hooked") })
+	t.Cleanup(func() { settleTriggeredRuns(t, eng, wDir) })
 	srv := consoleui.MustNew(t, consoleui.Config{
 		Token: tk, KanbanBoardPath: t.TempDir() + "/kanban.md", KanbanProject: "test",
 		MetricsProjectDir: t.TempDir(), PerfWorkDir: t.TempDir(), Bus: bus, WorkDir: wDir,
@@ -175,19 +175,19 @@ func newTrigEnv(t *testing.T, block <-chan struct{}) *trigEnv {
 	return env
 }
 
-// settleTriggeredRuns waits until none of the named workflows has a run in
-// flight on eng.
-func settleTriggeredRuns(t *testing.T, eng *workflow.Engine, names ...string) {
+// settleTriggeredRuns waits (bounded) until every run goroutine on eng has
+// returned, then removes workDir with retries: Windows cannot remove a
+// directory with an open or delete-pending file in it (K-172).
+func settleTriggeredRuns(t *testing.T, eng *workflow.Engine, workDir string) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for _, n := range names {
-		for eng.RunActive(n) {
-			if time.Now().After(deadline) {
-				t.Errorf("run of %q still active at cleanup", n)
-				return
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := eng.WaitIdle(ctx); err != nil {
+		t.Errorf("runs still active at cleanup: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for os.RemoveAll(workDir) != nil && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
 	}
 }
 
