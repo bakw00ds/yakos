@@ -763,6 +763,9 @@ func Run(ctx context.Context, cfg Config) error {
 				consoleCfg.HooksEndpoint = &consoleui.HooksEndpoint{
 					Run: cfg.HooksRun, Known: cfg.HooksKnown,
 					NonceFile: filepath.Join(trusted, "hooks-endpoint-nonce"),
+					// The nonce is bound to the daemon's project: the IDE root
+					// (the repo behind .project-path), else the workspace.
+					ProjectDir: hooksProjectDir(effectiveIDERoot, cfg.WorkspaceRoot),
 				}
 			}
 		}
@@ -1418,4 +1421,12 @@ func listenConsole(addr string, networked bool) (net.Listener, error) {
 		}
 	}
 	return ln, nil
+}
+
+// hooksProjectDir picks the project the hooks endpoint's nonce is bound to.
+func hooksProjectDir(ideRoot, workspace string) string {
+	if ideRoot != "" {
+		return ideRoot
+	}
+	return workspace
 }

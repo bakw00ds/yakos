@@ -246,7 +246,7 @@ func runServe(yakosRoot string, args []string) {
 		Gateway:                        gateway,
 		GatewayPassthroughSubscription: gatewayPassthroughSubscription,
 		HooksRun: func(ctx context.Context, shape, name string, body []byte) hookio.Response {
-			return shaperun.Run(ctx, shape, name, body, shapeDeps(yakosRoot))
+			return shaperun.Run(ctx, shape, name, body, shapeDeps(yakosRoot, hookio.ProjectFrom(ctx)))
 		},
 		HooksKnown: shaperun.Known,
 	}

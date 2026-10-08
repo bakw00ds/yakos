@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -36,6 +37,35 @@ var renderBin = func() string {
 // jsonText is s as it appears inside a JSON string (backslashes doubled).
 func jsonText(s string) string { return strings.ReplaceAll(s, `\`, `\\`) }
 
+// commandOf returns the command of hook name in a rendered hooks file.
+func commandOf(t *testing.T, harness string, file []byte, name string) string {
+	t.Helper()
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(file, &doc); err != nil {
+		t.Fatal(err)
+	}
+	inner := doc["hooks"]
+	if harness == HarnessAgy {
+		inner = doc[agyKey]
+	}
+	var ev struct {
+		PreToolUse  []shapeGroup
+		PostToolUse []shapeGroup
+	}
+	if err := json.Unmarshal(inner, &ev); err != nil {
+		t.Fatal(err)
+	}
+	for _, g := range append(ev.PreToolUse, ev.PostToolUse...) {
+		for _, h := range g.Hooks {
+			if strings.Contains(h.Command, " "+name) {
+				return h.Command
+			}
+		}
+	}
+	t.Fatalf("no command for %s in %s", name, file)
+	return ""
+}
+
 func TestRenderShapeFileGoldenCommands(t *testing.T) {
 	for _, h := range []string{HarnessCodex, HarnessAgy} {
 		b, err := RenderShapeFile(h, renderBin)
@@ -47,9 +77,9 @@ func TestRenderShapeFileGoldenCommands(t *testing.T) {
 			t.Fatalf("%s: not byte-stable", h)
 		}
 		for _, name := range []string{"budget-guard", "path-allowlist", "secret-scan", "supervisor-stream"} {
-			want := `"command": "` + jsonText(renderBin) + ` hook run --shape ` + h + ` ` + name + `"`
-			if !strings.Contains(string(b), want) {
-				t.Errorf("%s: missing %s", h, want)
+			cmd := commandOf(t, h, b, name)
+			if !strings.Contains(cmd, "hook run --shape "+h+" "+name) || commandBinary(cmd) != renderBin {
+				t.Errorf("%s/%s: command %q does not run %s", h, name, cmd, renderBin)
 			}
 		}
 		if !json.Valid(b) || b[len(b)-1] != '\n' {
@@ -254,8 +284,8 @@ func TestInstallShapeWritesAbsoluteBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := os.ReadFile(p)
-	if !strings.Contains(string(got), `"command": "`+jsonText(bin)+` hook run --shape codex budget-guard"`) {
-		t.Errorf("absolute path missing:\n%s", got)
+	if c := commandOf(t, HarnessCodex, got, "budget-guard"); commandBinary(c) != bin {
+		t.Errorf("absolute path missing from %q (want %s)", c, bin)
 	}
 	for _, bad := range []string{"yakos", "./yakos", "bin/yakos", "../yakos"} {
 		if _, _, err := InstallShape(HarnessCodex, t.TempDir(), bad); err == nil {
@@ -271,8 +301,8 @@ func TestInstallShapeWritesAbsoluteBinary(t *testing.T) {
 	exe, _ := os.Executable()
 	exe, _ = filepath.EvalSymlinks(exe)
 	got2, _ := os.ReadFile(p2)
-	if !strings.Contains(string(got2), jsonText(exe)+" hook run --shape codex") {
-		t.Errorf("default binary is not the running executable %s:\n%s", exe, got2)
+	if c := commandOf(t, HarnessCodex, got2, "budget-guard"); commandBinary(c) != exe {
+		t.Errorf("default binary is not the running executable %s: %q", exe, c)
 	}
 }
 
@@ -426,6 +456,201 @@ func TestBinaryCharsOKIsOSAware(t *testing.T) {
 	} {
 		if got := binaryCharsOK(c.p, c.goos); got != c.want {
 			t.Errorf("binaryCharsOK(%q, %s) = %v, want %v", c.p, c.goos, got, c.want)
+		}
+	}
+}
+
+// K-170 (c): exact launcher text on Unix. A change here changes codex's hook
+// hash, so it must be deliberate.
+func TestShapeCommandGoldenUnix(t *testing.T) {
+	cases := []struct{ harness, name, event, want string }{
+		{"codex", "path-allowlist", "PreToolUse", `/bin/sh -c 'if case "$0" in /*) [ -f "$0" ] && [ -x "$0" ];; *) false;; esac; then "$0" hook run --shape codex path-allowlist; rc=$?; if [ $rc -eq 0 ] || [ $rc -eq 2 ]; then exit $rc; fi; fi; echo "yakOS: the hook binary is missing, not executable or failed to run; refusing the tool call" >&2; exit 2' /opt/yakos/bin/yakos`},
+		{"agy", "secret-scan", "PreToolUse", `/bin/sh -c 'if case "$0" in /*) [ -f "$0" ] && [ -x "$0" ];; *) false;; esac; then out=$("$0" hook run --shape agy secret-scan) && { printf "%s\n" "$out"; exit 0; }; fi; printf "%s\n" "{\"decision\":\"deny\",\"reason\":\"yakOS: the hook binary is missing, not executable or failed to run; refusing the tool call\"}"; exit 0' /opt/yakos/bin/yakos`},
+		{"codex", "supervisor-stream", "PostToolUse", `/bin/sh -c 'if case "$0" in /*) [ -f "$0" ] && [ -x "$0" ];; *) false;; esac; then exec "$0" hook run --shape codex supervisor-stream; fi; echo "yakOS: the hook binary is missing or not executable; this hook was skipped" >&2; exit 0' /opt/yakos/bin/yakos`},
+		{"agy", "supervisor-stream", "PostToolUse", `/bin/sh -c 'if case "$0" in /*) [ -f "$0" ] && [ -x "$0" ];; *) false;; esac; then exec "$0" hook run --shape agy supervisor-stream; fi; echo "yakOS: the hook binary is missing or not executable; this hook was skipped" >&2; printf "{}\n"; exit 0' /opt/yakos/bin/yakos`},
+	}
+	for _, c := range cases {
+		if got := shapeCommand("linux", c.harness, "/opt/yakos/bin/yakos", c.name, c.event); got != c.want {
+			t.Errorf("%s/%s:\n got %s\nwant %s", c.harness, c.name, got, c.want)
+		}
+		if got := commandBinary(c.want); got != "/opt/yakos/bin/yakos" {
+			t.Errorf("%s/%s: commandBinary = %q", c.harness, c.name, got)
+		}
+	}
+	// Windows has no /bin/sh: the bare absolute path, as before.
+	if got := shapeCommand("windows", "codex", `C:\y\yakos.exe`, "secret-scan", "PreToolUse"); got != `C:\y\yakos.exe hook run --shape codex secret-scan` {
+		t.Errorf("windows command = %q", got)
+	}
+	if got := commandBinary(`C:\y\yakos.exe hook run --shape codex secret-scan`); got != `C:\y\yakos.exe` {
+		t.Errorf("windows commandBinary = %q", got)
+	}
+}
+
+// runLauncher plays the harness: sh -c <command> with stdin, from an unrelated
+// cwd, and returns exit code, stdout and stderr.
+func runLauncher(t *testing.T, command, stdin string) (int, string, string) {
+	t.Helper()
+	sh := os.Getenv("YAKOS_TEST_SH") // e.g. /bin/dash: the launcher must be POSIX sh
+	if sh == "" {
+		sh = "sh"
+	}
+	cmd := exec.Command(sh, "-c", command) //nolint:gosec
+	cmd.Dir = t.TempDir()
+	cmd.Stdin = strings.NewReader(stdin)
+	var o, e bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &o, &e
+	err := cmd.Run()
+	code := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		code = ee.ExitCode()
+	} else if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	return code, o.String(), e.String()
+}
+
+// stubBin writes an executable shell script that stands in for yakos.
+func stubBin(t *testing.T, name, body string, mode os.FileMode) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), name)
+	if err := os.WriteFile(p, []byte("#!/bin/sh\n"+body+"\n"), mode); err != nil { //nolint:gosec
+		t.Fatal(err)
+	}
+	if err := os.Chmod(p, mode); err != nil {
+		t.Fatal(err)
+	}
+	r, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// K-170 (c): with the hook binary missing, not executable, a directory, or
+// crashing, a PreToolUse hook REFUSES in each harness's own deny shape; a
+// healthy binary's answer passes through unchanged; PostToolUse never blocks.
+func TestLauncherFailsClosedForBothHarnesses(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the launcher is a /bin/sh script; Windows keeps the bare command")
+	}
+	notExec := stubBin(t, "yakos", "exit 0", 0o644)
+	dirBin := t.TempDir()
+	missing := filepath.Join(t.TempDir(), "no-such-yakos")
+	crash127 := stubBin(t, "yakos", "exit 127", 0o755)
+	crash1 := stubBin(t, "yakos", "echo partial; exit 1", 0o755)
+	signalled := stubBin(t, "yakos", "kill -9 $$", 0o755)
+
+	isDeny := func(harness string, code int, out, errOut string) bool {
+		if harness == HarnessCodex {
+			return code == 2 && strings.Contains(errOut, "refusing the tool call")
+		}
+		var d struct{ Decision, Reason string }
+		return code == 0 && json.Unmarshal([]byte(out), &d) == nil && d.Decision == "deny" && strings.Contains(d.Reason, "refusing the tool call")
+	}
+	for _, harness := range []string{HarnessCodex, HarnessAgy} {
+		for name, bin := range map[string]string{"missing": missing, "not executable": notExec, "directory": dirBin, "exit 127": crash127, "exit 1": crash1, "killed": signalled} {
+			cmd := shapeCommand("linux", harness, bin, "path-allowlist", "PreToolUse")
+			code, out, errOut := runLauncher(t, cmd, "{}")
+			if !isDeny(harness, code, out, errOut) {
+				t.Errorf("%s/%s: not refused: exit %d stdout %q stderr %q", harness, name, code, out, errOut)
+			}
+			if harness == HarnessAgy && strings.Contains(out, "partial") {
+				t.Errorf("%s/%s: a crashing binary's partial output reached the harness: %q", harness, name, out)
+			}
+			// A telemetry hook never blocks when the binary cannot start, and
+			// says why it was skipped.
+			if name != "missing" && name != "not executable" && name != "directory" {
+				continue
+			}
+			post := shapeCommand("linux", harness, bin, "supervisor-stream", "PostToolUse")
+			pc, pout, perr := runLauncher(t, post, "{}")
+			if harness == HarnessCodex && pc != 0 || harness == HarnessAgy && (pc != 0 || strings.TrimSpace(pout) != "{}") {
+				t.Errorf("%s/%s: PostToolUse blocked or malformed: exit %d out %q", harness, name, pc, pout)
+			}
+			if name == "missing" && !strings.Contains(perr, "skipped") {
+				t.Errorf("%s: no skip notice: %q", harness, perr)
+			}
+		}
+	}
+
+	// A working binary is run with the right arguments and stdin, and its own
+	// allow (0), deny (2) or JSON answer is passed through untouched.
+	echo := stubBin(t, "yakos", `echo "args:$*"; cat >&2; exit ${STUB_EXIT:-0}`, 0o755)
+	cmd := shapeCommand("linux", HarnessCodex, echo, "secret-scan", "PreToolUse")
+	if code, out, errOut := runLauncher(t, cmd, "ENVELOPE"); code != 0 || out != "args:hook run --shape codex secret-scan\n" || errOut != "ENVELOPE" {
+		t.Errorf("codex passthrough: exit %d out %q err %q", code, out, errOut)
+	}
+	deny2 := stubBin(t, "yakos", `echo blocked >&2; exit 2`, 0o755)
+	if code, _, errOut := runLauncher(t, shapeCommand("linux", HarnessCodex, deny2, "secret-scan", "PreToolUse"), ""); code != 2 || errOut != "blocked\n" {
+		t.Errorf("codex deny passthrough: exit %d err %q", code, errOut)
+	}
+	agyAnswer := stubBin(t, "yakos", `echo '{"decision":"allow"}'`, 0o755)
+	if code, out, _ := runLauncher(t, shapeCommand("linux", HarnessAgy, agyAnswer, "secret-scan", "PreToolUse"), ""); code != 0 || out != "{\"decision\":\"allow\"}\n" {
+		t.Errorf("agy passthrough: exit %d out %q", code, out)
+	}
+}
+
+// The file Install writes carries the launcher, and a file Install wrote is
+// recognised again (binary parsed back, state current).
+func TestInstalledFileUsesLauncherAndRoundTrips(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("launcher is Unix-only")
+	}
+	bin := fakeBin(t)
+	for _, harness := range []string{HarnessCodex, HarnessAgy} {
+		dir := t.TempDir()
+		p, _, err := InstallShape(harness, dir, bin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw, _ := os.ReadFile(p)
+		for _, name := range []string{"budget-guard", "path-allowlist", "secret-scan"} {
+			if c := commandOf(t, harness, raw, name); !strings.HasPrefix(c, "/bin/sh -c '") || commandBinary(c) != bin {
+				t.Errorf("%s/%s: not a launcher for %s: %q", harness, name, bin, c)
+			}
+		}
+		in := InspectShape(harness, dir, bin)
+		if in.State != "current" || in.Binary != bin {
+			t.Errorf("%s: inspect = %+v", harness, in)
+		}
+		if err := os.Remove(bin); err != nil {
+			t.Fatal(err)
+		}
+		if in := InspectShape(harness, dir, bin); !in.BinaryMissing {
+			t.Errorf("%s: a deleted binary is not reported missing: %+v", harness, in)
+		}
+		bin = fakeBin(t)
+	}
+}
+
+// A hand-edited relative binary path would resolve against the harness cwd (a
+// project-controlled directory): the launcher refuses it even when it runs.
+func TestLauncherRefusesRelativeBinary(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix launcher")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "yakos"), []byte("#!/bin/sh\necho RAN > ran.marker\nexit 0\n"), 0o755); err != nil { //nolint:gosec
+		t.Fatal(err)
+	}
+	for _, harness := range []string{HarnessCodex, HarnessAgy} {
+		for _, rel := range []string{"yakos", "./yakos"} {
+			sh := os.Getenv("YAKOS_TEST_SH")
+			if sh == "" {
+				sh = "sh"
+			}
+			cmd := exec.Command(sh, "-c", shapeCommand("linux", harness, rel, "path-allowlist", "PreToolUse")) //nolint:gosec
+			cmd.Dir = dir
+			var o, e bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &o, &e
+			_ = cmd.Run()
+			if _, err := os.Stat(filepath.Join(dir, "ran.marker")); err == nil {
+				t.Fatalf("%s %q: the relative binary was run", harness, rel)
+			}
+			deny := harness == HarnessCodex && cmd.ProcessState.ExitCode() == 2 || harness == HarnessAgy && strings.Contains(o.String(), `"decision":"deny"`)
+			if !deny {
+				t.Errorf("%s %q: not refused: exit %d out %q err %q", harness, rel, cmd.ProcessState.ExitCode(), o.String(), e.String())
+			}
 		}
 	}
 }

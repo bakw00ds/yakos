@@ -128,7 +128,7 @@ func TestFakeCodexBlocksEnvWriteViaHooksJSON(t *testing.T) {
 		t.Fatalf("PreToolUse commands = %v", cmds)
 	}
 	for _, c := range cmds {
-		if !strings.HasPrefix(c, e.bin+" hook run --shape codex ") || !filepath.IsAbs(strings.Fields(c)[0]) {
+		if !strings.Contains(c, ` hook run --shape codex `) || !strings.HasSuffix(c, " "+e.bin) || !filepath.IsAbs(e.bin) {
 			t.Errorf("hook command is not the absolute yakos path: %q", c)
 		}
 	}
@@ -162,7 +162,7 @@ func TestFakeAgyBlocksEnvWriteViaHooksJSON(t *testing.T) {
 	raw, _ := os.ReadFile(path)
 	cmds := preCommands(t, raw, true)
 	for _, c := range cmds {
-		if !strings.HasPrefix(c, e.bin+" hook run --shape agy ") {
+		if !strings.Contains(c, ` hook run --shape agy `) || !strings.HasSuffix(c, " "+e.bin) {
 			t.Errorf("hook command is not the absolute yakos path: %q", c)
 		}
 	}
@@ -264,5 +264,148 @@ func TestFakeCodexWithoutClaudeProjectDirAppliesDispatchedAgentPolicy(t *testing
 		if code != tc.exit {
 			t.Errorf("agent %q: exit %d (want %d) out %q", tc.agent, code, tc.exit, out)
 		}
+	}
+}
+
+// copyBin copies the yakos binary to a fresh path so a test can delete or
+// chmod it.
+func copyBin(t *testing.T, src string) string {
+	t.Helper()
+	data, err := os.ReadFile(src) //nolint:gosec
+	if err != nil {
+		t.Fatal(err)
+	}
+	dst := filepath.Join(t.TempDir(), "yakos")
+	if err := os.WriteFile(dst, data, 0o755); err != nil { //nolint:gosec
+		t.Fatal(err)
+	}
+	return dst
+}
+
+// K-170 (c): the installed hooks.json names an absolute binary, and when that
+// binary is missing or not executable the harness's PreToolUse hook REFUSES
+// the tool call instead of failing open. Both harnesses, from a hostile cwd.
+func TestFakeHarnessesFailClosedWhenInstalledBinaryGone(t *testing.T) {
+	for _, harness := range []string{"codex", "agy"} {
+		for _, breakIt := range []string{"deleted", "not executable"} {
+			e := newSvcEnv(t)
+			bin := copyBin(t, e.bin)
+			dir := t.TempDir()
+			path, _, err := hooksinstall.InstallShape(harness, dir, bin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			raw, _ := os.ReadFile(path)
+			cmds := preCommands(t, raw, harness == "agy")
+			var payload []byte
+			if harness == "codex" {
+				payload, _ = json.Marshal(map[string]any{"session_id": "s", "cwd": e.work, "hook_event_name": "PreToolUse",
+					"tool_name": "Bash", "tool_input": map[string]any{"command": "ls"}})
+			} else {
+				payload, _ = json.Marshal(map[string]any{"conversationId": "c", "workspacePaths": []string{e.work},
+					"toolCall": map[string]any{"name": "run_command", "args": map[string]any{"CommandLine": "ls"}}})
+			}
+			// Baseline: the installed binary allows a benign call.
+			if out, code, _ := e.runCommands(t, cmds, payload); code != 0 || out != "" {
+				t.Fatalf("%s: benign call blocked while the binary is installed: exit %d %q", harness, code, out)
+			}
+			if breakIt == "deleted" {
+				err = os.Remove(bin)
+			} else {
+				err = os.Chmod(bin, 0o644)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, code, ran := e.runCommands(t, cmds, payload)
+			switch harness {
+			case "codex":
+				if code != 2 || !strings.Contains(out, "refusing the tool call") {
+					t.Errorf("codex/%s: not refused: exit %d %q", breakIt, code, out)
+				}
+			default:
+				var d struct{ Decision, Reason string }
+				if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &d); err != nil || d.Decision != "deny" || d.Reason == "" {
+					t.Errorf("agy/%s: want deny JSON, got %q (%v)", breakIt, out, err)
+				}
+			}
+			if ran != 1 {
+				t.Errorf("%s/%s: first hook should already refuse, ran %d", harness, breakIt, ran)
+			}
+		}
+	}
+}
+
+// K-170 (d): with CLAUDE_PROJECT_DIR unset the project comes from the
+// harness's absolute cwd / workspace, never from the hook process's cwd. An
+// envelope that names no usable directory is refused by the fail-closed hooks.
+func TestShapeWithoutClaudeProjectDirNeverUsesProcessCwd(t *testing.T) {
+	e := newSvcEnv(t)
+	var env []string
+	for _, kv := range e.env {
+		if !strings.HasPrefix(kv, "CLAUDE_PROJECT_DIR=") && !strings.HasPrefix(kv, "YAKOS_AGENT_TYPE=") {
+			env = append(env, kv)
+		}
+	}
+	e.env = append(env, "YAKOS_AGENT_TYPE=reviewer")
+	if err := os.MkdirAll(filepath.Join(e.work, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pol := `{"reviewer":{"deny":[".env"]}}`
+	if err := os.WriteFile(filepath.Join(e.work, ".claude", "path-allowlist.json"), []byte(pol), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	codexWrite := func(cwd any) []byte {
+		m := map[string]any{"session_id": "s", "hook_event_name": "PreToolUse", "tool_name": "Write",
+			"tool_input": map[string]any{"file_path": ".env", "content": "x"}}
+		if cwd != nil {
+			m["cwd"] = cwd
+		}
+		b, _ := json.Marshal(m)
+		return b
+	}
+	agyWrite := func(ws ...string) []byte {
+		b, _ := json.Marshal(map[string]any{"conversationId": "c", "workspacePaths": ws,
+			"toolCall": map[string]any{"name": "write_to_file", "args": map[string]any{"TargetFile": ".env", "CodeContent": "x"}}})
+		return b
+	}
+	cx := t.TempDir()
+	if _, _, err := hooksinstall.InstallShape("codex", cx, e.bin); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(hooksinstall.ShapeTarget("codex", cx))
+	codexCmds := preCommands(t, raw, false)
+	ws := t.TempDir()
+	if _, _, err := hooksinstall.InstallShape("agy", ws, e.bin); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = os.ReadFile(hooksinstall.ShapeTarget("agy", ws))
+	agyCmds := preCommands(t, raw, true)
+
+	for name, tc := range map[string]struct {
+		cmds    []string
+		payload []byte
+		agy     bool
+	}{
+		"codex absolute cwd, policy applies":     {codexCmds, codexWrite(e.work), false},
+		"codex no cwd":                           {codexCmds, codexWrite(nil), false},
+		"codex relative cwd":                     {codexCmds, codexWrite("proj"), false},
+		"codex empty cwd":                        {codexCmds, codexWrite(""), false},
+		"agy absolute workspace, policy applies": {agyCmds, agyWrite(e.work), true},
+		"agy no workspace":                       {agyCmds, agyWrite(), true},
+		"agy relative workspace":                 {agyCmds, agyWrite("proj"), true},
+	} {
+		out, code, _ := e.runCommands(t, tc.cmds, tc.payload)
+		blocked := code == 2 || strings.Contains(out, `"decision":"deny"`)
+		if !blocked {
+			t.Errorf("%s: .env write was allowed (exit %d, out %q); the hook process cwd must not stand in for the project", name, code, out)
+		}
+	}
+	// And a benign file in the right project is still allowed, so the denials
+	// above are about the project, not a blanket refusal.
+	ok, _ := json.Marshal(map[string]any{"session_id": "s", "hook_event_name": "PreToolUse", "tool_name": "Write", "cwd": e.work,
+		"tool_input": map[string]any{"file_path": "notes.txt", "content": "x"}})
+	if out, code, _ := e.runCommands(t, codexCmds, ok); code != 0 {
+		t.Errorf("benign write in the envelope's project blocked: exit %d %q", code, out)
 	}
 }
