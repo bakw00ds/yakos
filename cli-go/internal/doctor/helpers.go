@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/bakw00ds/yakos/internal/agentscompose"
 )
 
 // defaultLookPath wraps exec.LookPath for use when cfg.LookPath is nil.
@@ -255,8 +257,17 @@ func toolVersion(tool string) string {
 	return line
 }
 
-// countMarkdownFiles counts .md files in dir that are NOT in excludeNames.
-func countMarkdownFiles(dir string, excludeNames ...string) int {
+// countAgentFiles counts the .md files in dir that Compose would read as agents,
+// leaving out excludeNames. dir is the framework's lib/agents or the project's
+// .claude/agents. A symlink out of those directories, a file that is not regular
+// or is over the size cap, and every file of a project directory that is itself a
+// link are not counted: the count says what yakos start would inject, and
+// os.ReadDir plus a suffix test said what a hostile clone wanted it to say.
+func countAgentFiles(yakosRoot, project, dir string, excludeNames ...string) int {
+	if project != "" && dir == filepath.Join(project, ".claude", "agents") &&
+		agentscompose.InspectProjectDir(project, dir) != agentscompose.DirOK {
+		return 0
+	}
 	excludeSet := make(map[string]bool, len(excludeNames))
 	for _, n := range excludeNames {
 		excludeSet[n] = true
@@ -265,11 +276,16 @@ func countMarkdownFiles(dir string, excludeNames ...string) int {
 	if err != nil {
 		return 0
 	}
+	roots := agentscompose.AgentFileRoots(yakosRoot, project)
 	n := 0
 	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") && !excludeSet[e.Name()] {
-			n++
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") || excludeSet[e.Name()] {
+			continue
 		}
+		if p, err := agentscompose.InspectAgentFile(filepath.Join(dir, e.Name()), roots); err != nil || p != agentscompose.ProblemNone {
+			continue
+		}
+		n++
 	}
 	return n
 }
@@ -341,9 +357,14 @@ func hasActiveBypass(path string) bool {
 	return false
 }
 
-// auditAgents checks .md files in agentsDir for YAML frontmatter declaring
-// a "tools:" key. Returns (agentCount, missingTools, emptyTools).
-func auditAgents(agentsDir string) (agentCount, missingTools, emptyTools int) {
+// auditAgents checks the project's .claude/agents/*.md for YAML frontmatter
+// declaring a "tools:" key. Every file is read through agentscompose.ReadAgentFile,
+// the reader Compose uses, so a link out of the agent directories, a FIFO, a file
+// over the size cap and a linked agents directory are refused, not read. Returns
+// (agentCount, missingTools, emptyTools, refused); refused counts the files and
+// directories that were left unread for that reason.
+func auditAgents(yakosRoot, project string) (agentCount, missingTools, emptyTools, refused int) {
+	agentsDir := filepath.Join(project, ".claude", "agents")
 	entries, err := os.ReadDir(agentsDir)
 	if err != nil {
 		return
@@ -352,9 +373,11 @@ func auditAgents(agentsDir string) (agentCount, missingTools, emptyTools int) {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
 			continue
 		}
-		path := filepath.Join(agentsDir, e.Name())
-		data, rerr := os.ReadFile(path) //nolint:gosec
+		data, rerr := agentscompose.ReadAgentFile(yakosRoot, project, filepath.Join(agentsDir, e.Name()))
 		if rerr != nil {
+			if errors.Is(rerr, agentscompose.ErrRefused) {
+				refused++
+			}
 			continue
 		}
 		agentCount++

@@ -25,6 +25,16 @@ never holds a login: ADR-0010. Detailed entries follow.
   the Anthropic gateway (K-151), Flows triggers (K-152), the Models & Providers
   tab and policy writers (K-153), the REPL (K-154).
 
+- **fix: agent-file readers use the roster reader, and the feed scan cannot be
+  hung by a FIFO (K-167, K-171).** `yakos doctor`, `yakos validate` and
+  `yakos refresh` no longer open an agent file with a plain read: a symlink out
+  of `lib/agents` or `.claude/agents`, a file over 4 MiB, a FIFO, and a linked
+  project agents directory are refused, as Compose refuses them. `yakos
+  refresh` links only such files into `~/.claude/agents`. The feed scan's
+  findings and pending files are opened non-blocking and the pending file is
+  read through a 1 MiB cap. Docs: interactive panes and plain-text runtimes are
+  not scanned.
+
 - **docs: ADR-0010, the runtime-matrix rewrite and the routing map (K-155).**
   ADR-0010 records harness-native routing, the vendor-policy facts it rests on
   with dates, and the one assumption no source settles (spawning the unmodified

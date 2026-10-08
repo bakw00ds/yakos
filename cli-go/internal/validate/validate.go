@@ -425,7 +425,7 @@ func countLines(path string) int {
 	if !readableAgentFile(path) {
 		return 0
 	}
-	data, err := os.ReadFile(path)
+	data, err := agentscompose.ReadRegularFile(path)
 	if err != nil {
 		return 0
 	}
@@ -468,7 +468,13 @@ func checkPlaybookReferences(cfg Config, r *Result, w io.Writer, base string) {
 			if !strings.HasSuffix(de.Name(), ".md") || !readable {
 				return nil
 			}
-			data, readErr := os.ReadFile(p)
+			var data []byte
+			var readErr error
+			if isAgents {
+				data, readErr = agentscompose.ReadAgentFileIn(p, agentRoots)
+			} else {
+				data, readErr = agentscompose.ReadRegularFile(p)
+			}
 			if readErr != nil {
 				return nil
 			}
@@ -815,7 +821,7 @@ func checkSkillMDSections(cfg Config, r *Result, w io.Writer) {
 		if de.Name() != "SKILL.md" {
 			return nil
 		}
-		data, readErr := os.ReadFile(p)
+		data, readErr := agentscompose.ReadRegularFile(p)
 		if readErr != nil {
 			return nil
 		}
@@ -847,7 +853,7 @@ func checkAgentMDSections(cfg Config, r *Result, w io.Writer) {
 		if name == "lead-template.md" || !readableAgentEntry(p, agentRoots) {
 			return nil
 		}
-		data, readErr := os.ReadFile(p)
+		data, readErr := agentscompose.ReadAgentFileIn(p, agentRoots)
 		if readErr != nil {
 			return nil
 		}

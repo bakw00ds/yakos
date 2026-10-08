@@ -8,9 +8,9 @@ package validate
 import (
 	"bytes"
 	"fmt"
-	"os"
 	"strings"
 
+	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"gopkg.in/yaml.v3"
 )
 
@@ -28,7 +28,7 @@ func parseFrontmatter(path string) (map[string]any, error) {
 		// file would never end. checkAgentEnums reports such an agent file.
 		return nil, fmt.Errorf("read error: not a regular file within the size cap")
 	}
-	data, err := os.ReadFile(path)
+	data, err := agentscompose.ReadRegularFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read error: %w", err)
 	}

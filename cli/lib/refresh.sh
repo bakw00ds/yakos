@@ -594,6 +594,38 @@ _resolve_agents_source_root() {
     AGENTS_ROOT="$canonical"
 }
 
+# _agent_src_ok FILE AGENTS_DIR: true when FILE is something the Go roster reader
+# reads: a regular file within 4 MiB (MaxAgentFileBytes), or a symlink that ends at
+# one inside AGENTS_DIR. ~/.claude/agents is global, so nothing else is linked
+# into it (mirrors InspectAgentFile; internal/refresh/symlinks.go).
+_agent_src_ok() {
+    local f="$1" dir="$2" hops=0 target base rdir realdir size
+    realdir="$(CDPATH='' cd -P -- "$dir" 2>/dev/null && pwd -P)" || return 1
+    if [ -L "$f" ]; then
+        # Resolve by hand: readlink -f is not on stock macOS.
+        while [ -L "$f" ]; do
+            hops=$((hops + 1))
+            [ "$hops" -le 40 ] || return 1
+            target="$(readlink -- "$f")" || return 1
+            case "$target" in
+                /*) f="$target" ;;
+                *) f="$(dirname -- "$f")/$target" ;;
+            esac
+        done
+        [ -f "$f" ] || return 1
+        base="$(basename -- "$f")"
+        rdir="$(CDPATH='' cd -P -- "$(dirname -- "$f")" 2>/dev/null && pwd -P)" || return 1
+        case "$rdir/" in
+            "$realdir"/*) : ;;
+            *) return 1 ;;
+        esac
+        f="$rdir/$base"
+    fi
+    [ -f "$f" ] || return 1
+    size="$(wc -c < "$f" 2>/dev/null | tr -d '[:space:]')"
+    [ -n "$size" ] && [ "$size" -le 4194304 ]
+}
+
 _sync_agents() {
     local agents_src agents_dst="$HOME/.claude/agents"
 
@@ -620,6 +652,11 @@ _sync_agents() {
             *) continue ;;
         esac
         dst="$agents_dst/$rel"
+        if ! _agent_src_ok "$src" "$agents_src"; then
+            printf '    [warn] agents: %s not linked: not a regular file within the size cap, or a symlink out of lib/agents\n' "$rel"
+            A_WARN=$((A_WARN + 1))
+            continue
+        fi
         if [ ! -e "$dst" ] && [ ! -L "$dst" ]; then
             # NEW
             if [ "$DRY_RUN" = "1" ]; then

@@ -40,6 +40,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/bakw00ds/yakos/internal/agentscompose"
 	"github.com/bakw00ds/yakos/internal/binver"
 	"github.com/bakw00ds/yakos/internal/passthrough"
 	"io"
@@ -1003,12 +1004,15 @@ func (r *runner) parseProbeFile(probeFile string) {
 // project agent counts without invoking the bash compose function.
 func (r *runner) checkAgentProjection() {
 	fwAgentsDir := filepath.Join(r.yakosRoot, "lib", "agents")
-	fwCount := countMarkdownFiles(fwAgentsDir, "README.md", "lead-template.md")
+	fwCount := countAgentFiles(r.yakosRoot, "", fwAgentsDir, "README.md", "lead-template.md")
 
 	projCount := 0
 	projAgentsDir := filepath.Join(r.cfg.ProjectPath, ".claude", "agents")
 	if _, err := os.Stat(projAgentsDir); err == nil {
-		projCount = countMarkdownFiles(projAgentsDir, "README.md")
+		projCount = countAgentFiles(r.yakosRoot, r.cfg.ProjectPath, projAgentsDir, "README.md")
+		if agentscompose.InspectProjectDir(r.cfg.ProjectPath, projAgentsDir) != agentscompose.DirOK {
+			r.warn(SectionRuntimeProbe, "project .claude/agents not read: %s", agentscompose.DirLinkReason)
+		}
 	}
 
 	total := fwCount + projCount
@@ -1157,7 +1161,10 @@ func (r *runner) checkProduction() {
 	if _, err := os.Stat(agentsDir); os.IsNotExist(err) {
 		pwarn("no .claude/agents/ in project (framework agents only)")
 	} else {
-		agentCount, missingTools, emptyTools := auditAgents(agentsDir)
+		agentCount, missingTools, emptyTools, refused := auditAgents(r.yakosRoot, projectPath)
+		if refused > 0 {
+			pwarn("%d project agent file(s) or directories not read (symlink out of the agent directories, not a regular file, over %d bytes, or a linked directory)", refused, agentscompose.MaxAgentFileBytes)
+		}
 		if agentCount == 0 {
 			pwarn("no project agents in .claude/agents/ (using framework only)")
 		} else {

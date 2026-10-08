@@ -16,7 +16,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/bakw00ds/yakos/internal/agentscompose"
 )
+
+// agentSrcRefusal is what is said of a lib/agents entry that is not linked. The
+// bash twin prints the same words.
+const agentSrcRefusal = "not a regular file within the size cap, or a symlink out of lib/agents"
 
 // syncAgents ensures ~/.claude/agents/ symlinks point to lib/agents/*.md.
 // Returns an AgentPhaseReport describing what was done (or would be done in dryRun).
@@ -46,6 +52,7 @@ func syncAgents(yakosRoot, home string, dryRun bool, w io.Writer) (AgentPhaseRep
 		return rpt, fmt.Errorf("reading agents src %s: %w", agentsSrc, err)
 	}
 
+	roots := agentscompose.AgentFileRoots(agentsRoot, "")
 	for _, e := range entries {
 		if e.IsDir() {
 			continue
@@ -61,6 +68,18 @@ func syncAgents(yakosRoot, home string, dryRun bool, w io.Writer) (AgentPhaseRep
 
 		srcPath := filepath.Join(agentsSrc, name)
 		dstPath := filepath.Join(agentsDst, name)
+
+		// ~/.claude/agents is global: every project and session on the machine
+		// loads whatever is linked there. So link only what Compose would read from
+		// lib/agents (a regular file within the size cap, or a link that stays inside
+		// lib/agents), never a link to some other file, a FIFO or a device that a
+		// tree with a hostile entry left behind. cli/lib/refresh.sh _agent_src_ok
+		// mirrors this.
+		if p, ierr := agentscompose.InspectAgentFile(srcPath, roots); ierr != nil || p != agentscompose.ProblemNone {
+			_, _ = fmt.Fprintf(w, "    [warn] agents: %s not linked: %s\n", name, agentSrcRefusal)
+			rpt.Warns++
+			continue
+		}
 
 		// Check current state of dst.
 		linfo, err := os.Lstat(dstPath)

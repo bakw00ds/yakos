@@ -773,6 +773,37 @@ else
 fi
 
 # ===========================================================================
+# Test 19 (K-167): ~/.claude/agents is global, so only what the roster reader
+# reads from lib/agents is linked: not a link out of lib/agents, not a file over
+# 4 MiB, not a FIFO, not a dangling link. Mirrors TestSyncAgents_DoesNotLinkWhatComposeRefuses.
+# ===========================================================================
+echo ""
+echo "Test 19: refresh links only agents the roster reader would read"
+T19="$WORKDIR/t19"
+mkdir -p "$T19/root/lib/hooks" "$T19/root/lib/settings" "$T19/root/lib/agents" "$T19/project/.claude" "$T19/home"
+echo '{"hooks": {}}' > "$T19/root/lib/settings/settings.template.json"
+echo "# good" > "$T19/root/lib/agents/good.md"
+ln -s good.md "$T19/root/lib/agents/alias.md"
+echo "secret" > "$T19/outside.md"
+ln -s "$T19/outside.md" "$T19/root/lib/agents/leak.md"
+ln -s "$T19/nowhere" "$T19/root/lib/agents/dangling.md"
+dd if=/dev/zero of="$T19/root/lib/agents/huge.md" bs=1048576 count=5 2>/dev/null
+mkfifo "$T19/root/lib/agents/pipe.md" 2>/dev/null || true
+out19="$(HOME="$T19/home" YAKOS_ROOT="$T19/root" YAKOS_LIB="$YAKOS_LIB" \
+    bash "$REFRESH_SH" --project "$T19/project" 2>&1 </dev/null || true)"
+ok19=1
+for n in good alias; do
+    [ -L "$T19/home/.claude/agents/$n.md" ] || { ok19=0; fail "$n.md was not linked"; }
+done
+for n in leak dangling huge pipe; do
+    if [ -e "$T19/home/.claude/agents/$n.md" ] || [ -L "$T19/home/.claude/agents/$n.md" ]; then
+        ok19=0; fail "$n.md was linked into the global agents directory"
+    fi
+    case "$out19" in *"$n.md not linked"*) : ;; *) ok19=0; fail "no warning for $n.md" ;; esac
+done
+[ "$ok19" = 1 ] && ok "only readable agents linked; refused ones warned"
+
+# ===========================================================================
 # Summary
 # ===========================================================================
 echo ""
