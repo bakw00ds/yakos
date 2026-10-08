@@ -194,6 +194,13 @@ link_files_in() {
         [ -n "$src" ] || continue
         local rel="${src#$src_root/}"
         local dst="$dst_root/$rel"
+        # ~/.claude/agents is global: link only what the Go roster reader reads
+        # (find -type f already leaves out links and FIFOs; this caps the size).
+        if [ "$sub" = "agents" ] && [ "$(wc -c < "$src" 2>/dev/null | tr -d '[:space:]')" -gt 4194304 ]; then
+            ct_log "skip: agents/$rel not linked: larger than 4194304 bytes"
+            skip_count=$((skip_count + 1))
+            continue
+        fi
         mkdir -p "$(dirname -- "$dst")"
 
         if [ -L "$dst" ]; then

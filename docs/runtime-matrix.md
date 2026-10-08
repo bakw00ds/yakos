@@ -574,15 +574,28 @@ path (live) and the one-shot path (after the run, report-only).
   the parser drops everything past 256 KiB first. There is no encoding
   normalisation: newline or NBSP between words, homoglyphs, a zero-width
   character inside a word, short base64 and HTML entities evade the scanner.
-  Prose-only runtimes (`Plain` events) are not scanned. An assistant `text`
-  event is kill-eligible under `kill_on_critical` like a `tool_result`.
+  Prose-only runtimes (`Plain` events) are not scanned: a runtime that prints
+  plain text has no structured events for the scanner to look at, so it gets no
+  findings and no `kill_on_critical`. Interactive panes are not scanned either:
+  a resumed codex or agy console pane runs through `ResumeEngine`
+  (`internal/interactive`), which does not pass through the dispatch stream
+  the scan hangs on, so its output is neither scanned nor kill-eligible. The scan
+  covers `yakos dispatch` and the streaming console path only. An assistant
+  `text` event is kill-eligible under `kill_on_critical` like a `tool_result`: a
+  model that writes a critical pattern into its own reply can cancel its own run,
+  and so can any page it quotes.
 - **Findings need a work directory**, resolved from the dispatch request's
   project path, not the daemon's environment: `<project>/work/current` with
   `YAKOS_INPLACE_WORK=1`, else `$HOME/agent-control/<project name>/work/current`
   (`YAKOS_WORK_DIR` applies only when `YAKOS_PROJECT_NAME` names that same
   project). Without one the scan still counts findings into the ledger. The
   pending and findings files are opened without following links and are written
-  only if they are regular files.
+  only if they are regular files. In in-place work mode the model can write to
+  that directory, so the open is also non-blocking: an entry swapped for a FIFO
+  between the check and the open fails the write at once and cannot hang the
+  stream. The pending file is read back to trim it through a cap of its newest
+  1 MiB (a real file is under 100 KiB); a file past the cap is cut to its newest
+  100 lines, so it shrinks instead of being read whole.
 
 ## Soft-degrade rules
 

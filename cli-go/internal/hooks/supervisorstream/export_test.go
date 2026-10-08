@@ -28,3 +28,10 @@ func SetLockBudgetForTest(d time.Duration) func() {
 	lockBudget = d
 	return func() { lockBudget = old }
 }
+
+// SetBeforeOpenHookForTest runs fn between the Lstat and the open of the findings
+// and pending files; the returned func clears it.
+func SetBeforeOpenHookForTest(fn func(path string)) func() {
+	beforeOpenHook = fn
+	return func() { beforeOpenHook = nil }
+}
