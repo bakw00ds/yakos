@@ -117,18 +117,37 @@ func newHooksHandler(ep *HooksEndpoint, addr string) (http.Handler, error) {
 	return dashauth.RequireLocalHost(addr, http.HandlerFunc(h.serve)), nil
 }
 
-// resolveDir cleans dir and resolves its symlinks. A path that does not exist
-// is compared lexically (Clean only), so a missing directory can never be
-// "within" the bound project through a link.
+// resolveDir resolves the symlinks of the longest existing prefix of dir and
+// appends the rest, so a link inside the project cannot be hidden behind a
+// component that does not exist yet ("P/link-out/missing"). A path with a ".."
+// component is refused: the OS would apply it to a link's target, which a
+// lexical Clean cannot see.
 func resolveDir(dir string) (string, error) {
-	c := filepath.Clean(dir)
-	if r, err := filepath.EvalSymlinks(c); err == nil {
-		return r, nil
+	for _, c := range strings.FieldsFunc(dir, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if c == ".." {
+			return "", errors.New("parent component")
+		}
 	}
-	if _, err := os.Stat(c); err == nil {
-		return "", errors.New("unresolvable")
+	p := filepath.Clean(dir)
+	var rest []string
+	for {
+		r, err := filepath.EvalSymlinks(p)
+		if err == nil {
+			for i := len(rest) - 1; i >= 0; i-- {
+				r = filepath.Join(r, rest[i])
+			}
+			return r, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return "", err
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return "", err
+		}
+		rest = append(rest, filepath.Base(p))
+		p = parent
 	}
-	return c, nil
 }
 
 // withinProject reports whether dir is the bound project or inside it.

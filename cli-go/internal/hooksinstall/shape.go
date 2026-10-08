@@ -103,7 +103,8 @@ const agyKey = "yakos"
 // Fail-closed launcher (K-170 c). A harness whose hook command cannot start
 // fails OPEN (codex proven, agy never ruled out): the call proceeds ungated.
 // So on Unix the command is a tiny /bin/sh launcher that takes the absolute
-// binary as $0 and refuses the tool call when that file is missing, is not an
+// binary as $0 and refuses the tool call when that path is not absolute (a hand-edited
+// relative path would resolve against the harness cwd), is missing, is not an
 // executable regular file, or exits with anything but its own allow (0) or
 // deny (2) status. The refusal is rendered in the harness's own deny shape.
 // PostToolUse hooks are telemetry: a missing binary there only skips them.
@@ -128,15 +129,15 @@ func shapeCommand(goos, harness, binary, name, event string) string {
 	switch {
 	case event == "PreToolUse" && harness == HarnessAgy:
 		// agy denies in stdout JSON and always exits 0.
-		script = `if [ -f "$0" ] && [ -x "$0" ]; then out=$("$0" ` + run + `) && { printf "%s\n" "$out"; exit 0; }; fi; ` +
+		script = `if case "$0" in /*) [ -f "$0" ] && [ -x "$0" ];; *) false;; esac; then out=$("$0" ` + run + `) && { printf "%s\n" "$out"; exit 0; }; fi; ` +
 			`printf "%s\n" "{\"decision\":\"deny\",\"reason\":\"` + denyMsg + `\"}"; exit 0`
 	case event == "PreToolUse":
-		script = `if [ -f "$0" ] && [ -x "$0" ]; then "$0" ` + run + `; rc=$?; if [ $rc -eq 0 ] || [ $rc -eq 2 ]; then exit $rc; fi; fi; ` +
+		script = `if case "$0" in /*) [ -f "$0" ] && [ -x "$0" ];; *) false;; esac; then "$0" ` + run + `; rc=$?; if [ $rc -eq 0 ] || [ $rc -eq 2 ]; then exit $rc; fi; fi; ` +
 			`echo "` + denyMsg + `" >&2; exit 2`
 	case harness == HarnessAgy:
-		script = `if [ -f "$0" ] && [ -x "$0" ]; then exec "$0" ` + run + `; fi; echo "` + skipMsg + `" >&2; printf "{}\n"; exit 0`
+		script = `if case "$0" in /*) [ -f "$0" ] && [ -x "$0" ];; *) false;; esac; then exec "$0" ` + run + `; fi; echo "` + skipMsg + `" >&2; printf "{}\n"; exit 0`
 	default:
-		script = `if [ -f "$0" ] && [ -x "$0" ]; then exec "$0" ` + run + `; fi; echo "` + skipMsg + `" >&2; exit 0`
+		script = `if case "$0" in /*) [ -f "$0" ] && [ -x "$0" ];; *) false;; esac; then exec "$0" ` + run + `; fi; echo "` + skipMsg + `" >&2; exit 0`
 	}
 	return "/bin/sh -c '" + script + launcherEnd + binary
 }
