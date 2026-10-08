@@ -138,12 +138,12 @@ func requireBinaries(t *testing.T) parityEnv {
 	return e
 }
 
-// toolDir links every command of the usual bin directories except timeout and
-// gtimeout into one directory, which becomes the whole PATH after the stubs.
-// cli/lib/dispatch.sh runs its adapter through ct_timeout; with GNU timeout on
-// PATH (Linux) that fails ("failed to run command 'yk_rt_dispatch'", exit 127,
-// before any runtime starts) and no argv is recorded. macOS has neither, and
-// ct_timeout then runs the command directly, which is the behavior we compare.
+// toolDir links every command of the usual bin directories into one directory,
+// which becomes the whole PATH after the stubs. timeout and gtimeout are linked
+// too: cli/lib/dispatch.sh used to run its adapter function through ct_timeout,
+// which fails with GNU timeout on PATH (exit 127, K-169), and the oracle ran
+// untimed because they were stripped. The deadline is now shell-native, so the
+// oracle runs as it does on a Linux or coreutils host.
 func toolDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -154,9 +154,6 @@ func toolDir(t *testing.T) string {
 		}
 		for _, en := range ents {
 			n := en.Name()
-			if n == "timeout" || n == "gtimeout" {
-				continue
-			}
 			if _, err := os.Lstat(filepath.Join(dir, n)); err == nil {
 				continue
 			}
