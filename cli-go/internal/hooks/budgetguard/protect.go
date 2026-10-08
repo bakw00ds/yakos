@@ -35,10 +35,12 @@ var (
 	// K-176 (sec-362 F1): enable pins a workflow sha and turns on cron and
 	// webhook triggers, i.e. persistent unattended agent runs.
 	flowsSchedRE  = regexp.MustCompile(`yakos[^[:space:]]*[[:space:]]+flows[[:space:]]+schedule[[:space:]]+(enable|disable)([[:space:]]|$)`)
-	budgetFilesRE = regexp.MustCompile(`budget-(policy\.yml|spend\.json|resets\.json)|budget\.lock|dispatch-log[^[:space:]/]*\.ndjson`)
-	budgetBaseRE  = regexp.MustCompile(`^(budget-(policy\.yml|spend\.json|resets\.json)|budget\.lock|dispatch-log[^[:space:]/]*\.ndjson)$`)
-	// K-176: the Write and Edit tools can change the two K-153 policy files.
-	policyBaseRE = regexp.MustCompile(`^(router-policy\.yml|model-registry\.yml)$`)
+	budgetFilesRE = regexp.MustCompile(`(?i)budget-(policy\.yml|spend\.json|resets\.json)|budget\.lock|dispatch-log[^[:space:]/]*\.ndjson|router-policy\.yml|model-registry\.yml`)
+	budgetBaseRE  = regexp.MustCompile(`(?i)^(budget-(policy\.yml|spend\.json|resets\.json)|budget\.lock|dispatch-log[^[:space:]/]*\.ndjson)$`)
+	// K-176: the two K-153 policy files, matched case-insensitively (a
+	// case-insensitive filesystem opens a mixed-case name as the real file) in
+	// Write/Edit base names and, via budgetFilesRE, in Bash text.
+	policyBaseRE = regexp.MustCompile(`(?i)^(router-policy\.yml|model-registry\.yml)$`)
 	// readOnlyRE is the only exemption: a single-line read command with no
 	// shell metacharacters.
 	readOnlyRE = regexp.MustCompile("^[[:space:]]*(cat|head|tail|less|more|ls|stat|wc|grep|jq|file)[[:space:]][^;&|><$`()]*$")

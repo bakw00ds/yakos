@@ -124,7 +124,11 @@ never holds a login: ADR-0010. Detailed entries follow.
   hook (both twins, exit 2, no `hook-bypass.md` scope) now refuses a Bash tool
   call that runs `yakos models enable|disable|alias|pin|pricing`,
   `yakos router policy set` or `yakos flows schedule enable|disable`, and a
-  Write or Edit of `router-policy.yml` or `model-registry.yml`. Reads
+  Write or Edit of `router-policy.yml` or `model-registry.yml`, and a Bash
+  command that names either file (redirect, append, `sed -i`, `cp`, `tee`,
+  heredoc, `ln -s`; a single-line `cat` read passes). File names match without
+  regard to case in both the Write/Edit and the Bash arm, for the budget state
+  files too. Reads
   (`models list|show|probe`, `router policy get`) pass. A backslash-newline
   continuation is joined before matching. The `config_changed` audit line gained
   `actor` (`operator` or `agent`), `agent` and `session_id`; they are labels from

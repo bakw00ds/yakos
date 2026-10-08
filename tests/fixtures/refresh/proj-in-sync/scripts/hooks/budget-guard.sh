@@ -94,7 +94,9 @@ command -v jq >/dev/null 2>&1 || exit 0
 # continuation is joined before matching (K-176), as the shell itself does.
 # The audit `actor` label of a write is advisory, not a boundary.
 _bg_files='budget-(policy\.yml|spend\.json|resets\.json)|budget\.lock|dispatch-log[^[:space:]/]*\.ndjson'
-# K-176: the Write/Edit tools can change the two K-153 policy files directly.
+# K-176: the two K-153 policy files. Matched in Write/Edit base names and in
+# Bash text (redirect, sed -i, cp, tee, heredoc, ln -s), case-insensitively:
+# a case-insensitive filesystem opens a mixed-case name as the real file.
 _bg_policy_files='router-policy\.yml|model-registry\.yml'
 _bg_tool="$(hi_tool)"
 _bg_hit=""
@@ -127,7 +129,7 @@ case "$_bg_tool" in
             # K-176 (sec-362 F1): enable pins a workflow sha and turns on its
             # cron/webhook triggers, i.e. persistent unattended agent runs.
             _bg_hit="yakos flows schedule enable|disable"
-        elif printf '%s\n' "$_bg_cmd" | grep -Eq "$_bg_files"; then
+        elif printf '%s\n' "$_bg_cmd" | grep -Eiq "$_bg_files|$_bg_policy_files"; then
             # Only a single-line, metacharacter-free read command is exempt.
             case "$_bg_cmd" in
                 *$'\n'*) _bg_hit="budget state file" ;;
@@ -143,9 +145,9 @@ case "$_bg_tool" in
         ;;
     Write|Edit|MultiEdit|NotebookEdit)
         _bg_path="$(hi_file_path)"
-        if printf '%s\n' "${_bg_path##*/}" | grep -Eq "^($_bg_files)\$"; then
+        if printf '%s\n' "${_bg_path##*/}" | grep -Eiq "^($_bg_files)\$"; then
             _bg_hit="budget state file"
-        elif printf '%s\n' "${_bg_path##*/}" | grep -Eq "^($_bg_policy_files)\$"; then
+        elif printf '%s\n' "${_bg_path##*/}" | grep -Eiq "^($_bg_policy_files)\$"; then
             _bg_hit="routing policy file"
         fi
         ;;

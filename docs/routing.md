@@ -671,7 +671,14 @@ Policy is written from a terminal:
   project and without a `.yakos.yml`, with no `hook-bypass.md` scope (an agent
   can write that file). It also refuses a Write or Edit of `router-policy.yml` or
   `model-registry.yml` (matched on the base name, so a `..` or a symlinked parent
-  in the path does not help). `models list|show|probe` and
+  in the path does not help; the match ignores case, because a case-insensitive
+  filesystem opens `Router-Policy.yml` as the real file). A Bash command that
+  names either file, such as a redirect, append, `sed -i`, `cp`, `tee`, heredoc
+  or `ln -s`, is refused the same way as one that names the budget state files;
+  only a single-line `cat`, `head`, `tail`, `less`, `more`, `ls`, `stat`, `wc`,
+  `grep`, `jq` or `file` with no shell metacharacters passes. A commit message
+  that names these files therefore needs `git commit -F <file>`, the cost
+  already accepted for the budget files. `models list|show|probe` and
   `router policy get|explain` pass. Matching is on the command text, with
   backslash-newline continuations joined and then quotes and backslashes removed,
   like the budget commands. The operator runs the writers from their own shell.
