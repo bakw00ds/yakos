@@ -244,11 +244,15 @@ exec "$(PATH="$REALPATH" command -v sleep)" "$@"
 EOF_SHIM
 chmod +x "$TMP/shim7/sleep"
 start=$SECONDS
+# The lower bound is taken from before the hook starts: the watchdog's 2 s begins when the
+# hook forks the CLI, but the fake CLI stamps cli.start only after perl has started (a
+# loaded runner: 100-200 ms), so killed - cli.start can read 1.8 s for a correct 2 s watchdog.
+perl -MTime::HiRes=time -e 'printf "%.3f\n", time' > "$sb/hook.start"
 env PATH="$TMP/shim7:$PATH" REALPATH="$PATH" SLEEPLOG="$sb/sleeps" YAKOS_DISPATCH_LOG="$sb/state" YAKOS_CLI="$sb/bin/fakeyakos" YAKOS_WORK_DIR="$sb/work" CLAUDE_PROJECT_DIR="$sb" \
     "${BASH:-bash}" "$HOOK" < "$TMP/benign.json" >/dev/null 2>>"$sb/hook.stderr"; rc=$?
 elapsed=$((SECONDS - start)); settle
 [ "$rc" = 0 ] && [ "$elapsed" -le $((base + 12)) ] && ok "(7) bash a hung budget CLI cannot stall the hook (${elapsed}s; ${base}s with a healthy CLI)" || bad "(7) bash hook took ${elapsed}s rc=$rc (${base}s with a healthy CLI)"
-if [ -f "$sb/cli.start" ] && [ -f "$sb/cli.killed" ] && awk -v s="$(cat "$sb/cli.start")" -v k="$(cat "$sb/cli.killed")" 'BEGIN { d = k - s; exit !(d >= 1.9 && d <= 8) }'; then
+if [ -f "$sb/cli.start" ] && [ -f "$sb/cli.killed" ] && [ -f "$sb/hook.start" ] && awk -v h="$(cat "$sb/hook.start")" -v s="$(cat "$sb/cli.start")" -v k="$(cat "$sb/cli.killed")" 'BEGIN { exit !(k - h >= 1.95 && k - s <= 8) }'; then
     ok "(7) bash the watchdog ended the hung CLI after $(awk -v s="$(cat "$sb/cli.start")" -v k="$(cat "$sb/cli.killed")" 'BEGIN { printf "%.1f", k - s }') s of wall clock"
 else bad "(7) bash the hung CLI was not killed by the watchdog at ~2 s (start=$(cat "$sb/cli.start" 2>/dev/null) killed=$(cat "$sb/cli.killed" 2>/dev/null))"; fi
 polls="$(grep -c '^0\.05$' "$sb/sleeps" 2>/dev/null || true)"
