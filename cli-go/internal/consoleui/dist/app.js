@@ -1265,6 +1265,8 @@
     // K-148: feed one SSE event to a pane / build one message element.
     handleSSE: function(pane, ev) { withRegisteredPane(pane, function(id) { _handleSSEEventForPane(ev, ev.session_id || '', id, pane); }); },
     buildMessageElement: buildMessageElement,
+    // K-173: run the real transcript restore for a pane (fetch is the caller's stub).
+    loadTranscript: function(pane) { withRegisteredPane(pane, loadTranscriptForPane); },
   };
 
   // ---- Phase 3: openAttachPane ------------------------------------------------
@@ -3375,9 +3377,14 @@
           msgs.push({ role: 'user', text: e.text || '', ts: e.ts, sessionId: e.session_id });
         } else if (e.role === 'assistant') {
           msgs.push({ role: 'assistant', text: e.text || '', ts: e.ts, sessionId: e.session_id, streaming: false });
-        } else if (e.role === 'route') {
-          const rm = window.YakChatRouting && window.YakChatRouting.fromTranscript(e);
-          if (rm) msgs.push(rm);
+        } else if (e.role === 'tool_use' && e.tool_name === 'TodoWrite') {
+          // K-173: the checklist widget, latest wins, as the live stream shows it.
+          const items = _parseTodoInput(e.text || '');
+          const prev = msgs.filter((m) => m.role === 'todo_write' && m.sessionId === e.session_id).pop();
+          if (prev) { prev.items = items; prev.ts = e.ts; }
+          else msgs.push({ role: 'todo_write', items: items, ts: e.ts, sessionId: e.session_id });
+        } else if (window.YakChatRouting && window.YakChatRouting.applyTranscript(msgs, e)) {
+          // K-148 / K-173: route chips, handoff banners, thinking blocks, tool cards.
         } else if (e.role === 'summary') {
           msgs.push({
             role: 'summary',

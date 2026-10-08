@@ -105,3 +105,22 @@ func TestRunStream_SensitiveRefusedWritesEvent(t *testing.T) {
 		t.Error("the refusal event carries request text")
 	}
 }
+
+// Framework-authored text (the console's knowledge pack) is scanned for secret
+// shapes only: a credential-path name in it is no reason, a credential is, and
+// the same path name in the task or in Extra still is (K-173).
+func TestClassifyRequestSO_SecretOnlyIgnoresPathNames(t *testing.T) {
+	prose := "the release job reads ~/.ssh/" + "id_rsa and ." + "env.production"
+	if class, why := classifyRequestSO("", chainInput{}, nil, "go", nil, []string{prose}, nil); class != "default" {
+		t.Errorf("path prose in secretOnly: %s (%s), want default", class, why)
+	}
+	if class, why := classifyRequestSO("", chainInput{}, nil, "go", nil, []string{"key: AKIA" + "IOSFODNN7EXAMPLE"}, nil); class != "sensitive" || why != "secret-pattern" {
+		t.Errorf("secret in secretOnly: %s (%s), want sensitive/secret-pattern", class, why)
+	}
+	if class, _ := classifyRequestSO("", chainInput{}, nil, prose, nil, nil, nil); class != "sensitive" {
+		t.Errorf("path in the task: %s, want sensitive", class)
+	}
+	if class, _ := classifyRequestSO("", chainInput{}, nil, "go", []string{prose}, nil, nil); class != "sensitive" {
+		t.Errorf("path in Extra: %s, want sensitive", class)
+	}
+}
