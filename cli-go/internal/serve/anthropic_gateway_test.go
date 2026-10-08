@@ -10,7 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bakw00ds/yakos/internal/gateway/anthropic"
 	"github.com/bakw00ds/yakos/internal/routerpolicy"
+	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
 func TestAnthropicGatewayOffByDefault(t *testing.T) {
@@ -42,11 +44,18 @@ func TestAnthropicGatewayOffByDefault(t *testing.T) {
 // subscription token. It stops with ctx.
 func TestStartAnthropicGatewayServesAndStops(t *testing.T) {
 	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("YAKOS_DISPATCH_LOG", "")
+	t.Setenv("HOME", t.TempDir())
 	addr := freePort(t)
 	errCh := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
-	if err := startAnthropicGateway(ctx, Config{GatewayAddr: addr}, errCh); err != nil {
-		t.Fatal(err)
+	bound, err := startAnthropicGateway(ctx, Config{GatewayAddr: addr}, errCh)
+	if err != nil || bound != addr {
+		t.Fatalf("startAnthropicGateway = %q, %v; want the bound %q", bound, err, addr)
+	}
+	tok, err := anthropic.ReadToken(statepath.Dir())
+	if err != nil {
+		t.Fatalf("no gateway token was minted: %v", err)
 	}
 	post := func(host, origin string, hdr map[string]string) (int, string) {
 		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+"/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4-5"}`))
@@ -79,11 +88,18 @@ func TestStartAnthropicGatewayServesAndStops(t *testing.T) {
 	if st, _ := post("", "https://evil.example", nil); st != 403 {
 		t.Errorf("foreign Origin: %d", st)
 	}
-	if st, body := post("", "", nil); st != 401 || !strings.Contains(body, "authentication_error") {
-		t.Errorf("no credential: %d %s", st, body)
+	if st, body := post("", "", nil); st != 401 || !strings.Contains(body, "gateway token") {
+		t.Errorf("no gateway token: %d %s", st, body)
 	}
-	if st, _ := post("", "", map[string]string{"Authorization": "Bearer sk-ant-oat01-x"}); st != 403 {
-		t.Errorf("subscription token: %d", st)
+	if st, _ := post("", "", map[string]string{"Authorization": "Bearer sk-ant-oat01-x"}); st != 401 {
+		t.Errorf("subscription token without the gateway token: %d", st)
+	}
+	gw := map[string]string{"Authorization": "Bearer " + tok}
+	if st, body := post("", "", gw); st != 401 || !strings.Contains(body, "ANTHROPIC_API_KEY") {
+		t.Errorf("gateway token, no operator key: %d %s", st, body)
+	}
+	if st, _ := post("", "", map[string]string{anthropic.TokenHeader: tok, "Authorization": "Bearer sk-ant-oat01-x"}); st != 403 {
+		t.Errorf("subscription token with the gateway token: %d", st)
 	}
 	cancel()
 	select {
@@ -97,8 +113,10 @@ func TestStartAnthropicGatewayServesAndStops(t *testing.T) {
 }
 
 func TestStartAnthropicGatewayRefusesNonLoopback(t *testing.T) {
+	t.Setenv("YAKOS_DISPATCH_LOG", "")
+	t.Setenv("HOME", t.TempDir())
 	errCh := make(chan error, 1)
-	if err := startAnthropicGateway(context.Background(), Config{GatewayAddr: "0.0.0.0:7897"}, errCh); err == nil {
+	if _, err := startAnthropicGateway(context.Background(), Config{GatewayAddr: "0.0.0.0:7897"}, errCh); err == nil {
 		t.Fatal("bound a wildcard address")
 	}
 }

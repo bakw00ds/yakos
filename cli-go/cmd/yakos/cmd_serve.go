@@ -642,11 +642,15 @@ Flags:
   --gateway                 Serve the Anthropic pass-through gateway (/v1/messages,
                             /v1/messages/count_tokens, /v1/models) on 127.0.0.1:7897
                             for a routed 'yakos start'. Loopback only, forwards to
-                            api.anthropic.com only. Same as anthropic_gateway: true in
-                            ~/.yakos-state/router-policy.yml. See docs/adr/ADR-0011.md.
+                            api.anthropic.com only, needs the gateway token in
+                            ~/.yakos-state/gateway-token on every request and
+                            ANTHROPIC_API_KEY in this environment. Same as
+                            anthropic_gateway: true in ~/.yakos-state/router-policy.yml.
+                            See docs/adr/ADR-0011.md.
   --gateway-passthrough-subscription
                             Let a subscription OAuth token (sk-ant-oat*) through the
-                            gateway. Refused with 403 by default; read ADR-0011 first.
+                            gateway, sent with the gateway token in X-Yakos-Gateway-Token.
+                            Refused with 403 by default; read ADR-0011 first.
   --perf-addr <addr>        Standalone performance dashboard address (default 127.0.0.1:7895).
                             Only used when --no-console is set.
   --no-perf                 Disable the standalone performance dashboard.

@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Anthropic pass-through gateway on 127.0.0.1:7897 (K-151, ADR-0011).** Off
+  by default. `yakos serve --gateway` (or `anthropic_gateway: true` in the
+  trusted `~/.yakos-state/router-policy.yml`) serves `/v1/messages`,
+  `/v1/messages/count_tokens` and `/v1/models` and forwards them to
+  `api.anthropic.com` only, streaming SSE as it arrives. `yakos start --routed`
+  (claude only) launches Claude Code with `ANTHROPIC_BASE_URL`,
+  `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` and `ANTHROPIC_AUTH_TOKEN` set and
+  `ANTHROPIC_API_KEY` removed from the child. Every gateway request must carry
+  a gateway token (`Authorization: Bearer`, 32 random bytes in
+  `~/.yakos-state/gateway-token`, 0600, minted on first `serve --gateway`);
+  without it the answer is 401 and nothing reaches Anthropic. The gateway holds
+  the operator's `ANTHROPIC_API_KEY` and attaches it upstream. Before a routed
+  launch `yakos start` checks over the daemon's owner-only socket that the
+  gateway on 7897 is this workspace's daemon's, and refuses otherwise. A
+  subscription OAuth credential (`sk-ant-oat` anywhere in a credential) is
+  refused with 403 unless `--gateway-passthrough-subscription` is given, and
+  then it needs the gateway token in `X-Yakos-Gateway-Token`. Request bodies
+  are bounded (32 MiB each, 128 MiB in total, 30 s to deliver, 64 in flight).
+  A `subagent` request can be moved to the Claude id `gateway_classes` names;
+  no other class is selectable from a header. Each request writes a
+  `gateway_request` ledger event (ids, status, token counts and `duration_s`;
+  no body, header or credential). `yakos.version` gained an additive
+  `gateway_addr` field.
+
 ### Changed
 
 - **`yakos start` opens a yakOS REPL by default (K-154, ADR-0012).** Under

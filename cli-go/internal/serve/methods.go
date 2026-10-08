@@ -97,6 +97,9 @@ type versionResult struct {
 	// Instance is the per-boot nonce; the console serves the same value at
 	// GET /api/instance so a client can tie the TCP port to this process.
 	Instance string `json:"instance,omitempty"`
+	// GatewayAddr is the address the Anthropic gateway (K-151) is listening on,
+	// empty when it is off. `yakos start --routed` checks it before launching.
+	GatewayAddr string `json:"gateway_addr,omitempty"`
 }
 
 // handleVersion returns a handler that reads the VERSION file and returns
@@ -121,6 +124,8 @@ func handleVersion(cfg Config) jsonrpc.Handler {
 			Workspace:   cfg.WorkspaceRoot,
 			ConsoleAddr: cfg.boundConsole,
 			Instance:    cfg.instance,
+
+			GatewayAddr: cfg.boundGateway,
 		}, nil
 	}
 }

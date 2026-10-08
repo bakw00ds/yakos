@@ -5,10 +5,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -84,6 +87,7 @@ func TestSSEIsNotBuffered(t *testing.T) {
 	go func() {
 		req, _ := http.NewRequest("POST", base+"/v1/messages", strings.NewReader(msgBody))
 		req.Header.Set("x-api-key", "k")
+		req.Header.Set("Authorization", "Bearer "+testToken)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
 			res <- result{err: err}
@@ -135,6 +139,7 @@ func TestTruncatedUpstreamAbortsClient(t *testing.T) {
 	base, led, _ := startGW(t, up, nil)
 	req, _ := http.NewRequest("POST", base+"/v1/messages", strings.NewReader(msgBody))
 	req.Header.Set("x-api-key", "k")
+	req.Header.Set("Authorization", "Bearer "+testToken)
 	resp, err := http.DefaultClient.Do(req)
 	if err == nil {
 		defer resp.Body.Close()
@@ -162,7 +167,7 @@ func TestHeaderPassthroughGolden(t *testing.T) {
 	})
 	base, _, _ := startGW(t, up, nil)
 	hdr := map[string]string{
-		"x-api-key": "k", "anthropic-version": "2023-06-01", "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14",
+		"authorization": "Bearer " + testToken, "x-api-key": "k", "anthropic-version": "2023-06-01", "anthropic-beta": "claude-code-20250219,interleaved-thinking-2025-05-14",
 		"user-agent": "claude-cli/2.1.293", "x-app": "cli", "x-stainless-lang": "js", "x-claude-code-request-class": "main",
 		"x-claude-code-agent-type": "main", "x-claude-code-session-id": "s1", "accept-encoding": "gzip, br", "content-type": "application/json",
 		"connection": "keep-alive, X-Hop-Named", "x-hop-named": "gone", "keep-alive": "timeout=5", "proxy-authorization": "Basic zzz",
@@ -318,7 +323,7 @@ func TestModelsListKeepsClaudeIDsOnly(t *testing.T) {
 		_, _ = w.Write(fixture(t, "models.json"))
 	})
 	base, _, _ := startGW(t, up, nil)
-	st, h, got := do(t, "GET", base+"/v1/models?limit=50", nil, map[string]string{"x-api-key": "k", "accept-encoding": "gzip"})
+	st, h, got := do(t, "GET", base+"/v1/models?limit=50", nil, map[string]string{"authorization": "Bearer " + testToken, "x-api-key": "k", "accept-encoding": "gzip"})
 	if st != 200 {
 		t.Fatal(st)
 	}
@@ -352,26 +357,31 @@ func TestModelsErrorAndGarbage(t *testing.T) {
 		_, _ = io.WriteString(w, `{"type":"error","error":{"type":"authentication_error","message":"invalid x-api-key"}}`)
 	})
 	base, _, _ := startGW(t, up, nil)
-	st, _, got := do(t, "GET", base+"/v1/models", nil, map[string]string{"x-api-key": "k"})
+	st, _, got := do(t, "GET", base+"/v1/models", nil, map[string]string{"authorization": "Bearer " + testToken, "x-api-key": "k"})
 	if st != 401 || !strings.Contains(string(got), "invalid x-api-key") {
 		t.Errorf("%d %s", st, got)
 	}
 	up2 := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) { _, _ = io.WriteString(w, `<html>`) })
 	base2, _, _ := startGW(t, up2, nil)
-	if st, _, _ := do(t, "GET", base2+"/v1/models", nil, map[string]string{"x-api-key": "k"}); st != 502 {
+	if st, _, _ := do(t, "GET", base2+"/v1/models", nil, map[string]string{"authorization": "Bearer " + testToken, "x-api-key": "k"}); st != 502 {
 		t.Errorf("garbage list: %d, want 502", st)
 	}
 }
 
 func TestOAuthRefusalAndFlag(t *testing.T) {
 	const tok = "sk-ant-oat01-SECRETSUBSCRIPTIONTOKEN"
+	gw := "Bearer " + testToken
 	refused := []map[string]string{
-		{"authorization": "Bearer " + tok},
-		{"authorization": "bearer " + tok},
-		{"x-api-key": tok},
-		{"authorization": "Bearer sk-ant-OAT01-upper"},
-		{"authorization": "Bearer sk-ant-api03-fine", "anthropic-beta": "oauth-2025-04-20"},
-		{"x-api-key": "sk-ant-api03-fine", "authorization": "Bearer " + tok},
+		{"authorization": "Bearer " + tok, "x-yakos-gateway-token": testToken},
+		{"authorization": "bearer " + tok, "x-yakos-gateway-token": testToken},
+		{"x-api-key": tok, "authorization": gw},
+		{"authorization": "Bearer sk-ant-OAT01-upper", "x-yakos-gateway-token": testToken},
+		{"authorization": "Bearer sk-ant-api03-fine", "anthropic-beta": "oauth-2025-04-20", "x-yakos-gateway-token": testToken},
+		{"x-api-key": "sk-ant-api03-fine", "authorization": "Bearer " + tok, "x-yakos-gateway-token": testToken},
+		// Spellings a prefix test misses: the token sits after other text.
+		{"authorization": "Bearer\t" + tok, "x-yakos-gateway-token": testToken},
+		{"authorization": "Bearer Bearer " + tok, "x-yakos-gateway-token": testToken},
+		{"x-api-key": "x " + tok, "authorization": gw},
 	}
 	for i, h := range refused {
 		up := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) { _, _ = io.WriteString(w, "{}") })
@@ -387,49 +397,216 @@ func TestOAuthRefusalAndFlag(t *testing.T) {
 			t.Errorf("case %d: ledger %+v", i, e)
 		}
 	}
-	// With the flag the bearer is forwarded verbatim, once.
+	// With the flag the bearer is forwarded verbatim, once, and the gateway
+	// token that rode in the second header is not.
 	up := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) { _, _ = io.WriteString(w, "{}") })
-	base, led, _ := startGW(t, up, func(c *Config) { c.PassthroughSubscription = true })
-	st, _, _ := do(t, "POST", base+"/v1/messages", []byte(msgBody), map[string]string{"authorization": "Bearer " + tok, "anthropic-beta": "oauth-2025-04-20"})
-	if st != 200 || up.hits()[0].hdr.Get("Authorization") != "Bearer "+tok || up.hits()[0].hdr.Get("X-Api-Key") != "" {
-		t.Errorf("flag on: status %d hdr %v", st, up.hits()[0].hdr)
+	base, led, _ := startGW(t, up, func(c *Config) { c.PassthroughSubscription = true; c.APIKey = "sk-ant-api03-OPERATOR" })
+	st, _, _ := do(t, "POST", base+"/v1/messages", []byte(msgBody), map[string]string{"authorization": "Bearer " + tok, "x-yakos-gateway-token": testToken, "anthropic-beta": "oauth-2025-04-20"})
+	h0 := up.hits()[0].hdr
+	if st != 200 || h0.Get("Authorization") != "Bearer "+tok || h0.Get("X-Api-Key") != "" || h0.Get("X-Yakos-Gateway-Token") != "" {
+		t.Errorf("flag on: status %d hdr %v", st, h0)
 	}
 	if e := led.last(t); e.Billing != "subscription" {
 		t.Errorf("ledger %+v", e)
 	}
-	// A non-oat bearer (ANTHROPIC_AUTH_TOKEN style) passes without the flag.
-	up3 := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) { _, _ = io.WriteString(w, "{}") })
-	base3, _, _ := startGW(t, up3, nil)
-	if st, _, _ := do(t, "POST", base3+"/v1/messages", []byte(msgBody), map[string]string{"authorization": "Bearer proxy-token"}); st != 200 {
-		t.Errorf("plain bearer refused: %d", st)
+	// The OAuth token without the gateway token is refused even with the flag:
+	// nothing reaches upstream.
+	if st, _, _ := do(t, "POST", base+"/v1/messages", []byte(msgBody), map[string]string{"authorization": "Bearer " + tok}); st != 401 || len(up.hits()) != 1 {
+		t.Errorf("flag on, no gateway token: status %d, hits %d", st, len(up.hits()))
+	}
+	// The gateway token in Authorization next to an OAuth x-api-key: the token
+	// is still not forwarded.
+	do(t, "POST", base+"/v1/messages", []byte(msgBody), map[string]string{"x-api-key": tok, "authorization": "Bearer " + testToken})
+	if got := up.hits()[1].hdr; got.Get("Authorization") != "" || got.Get("X-Api-Key") != tok {
+		t.Errorf("oauth x-api-key: upstream saw %v", got)
 	}
 }
 
-func TestOperatorKeyOnlyWhenClientSendsNone(t *testing.T) {
+// Without the gateway token nothing is forwarded and the operator key is never
+// attached, on every route.
+func TestGatewayTokenRequiredOnEveryRoute(t *testing.T) {
+	const opKey = "sk-ant-api03-OPERATORFAKEKEY"
 	up := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) { _, _ = io.WriteString(w, "{}") })
-	base, led, _ := startGW(t, up, func(c *Config) { c.APIKey = "sk-ant-api03-OPERATOR" })
-	do(t, "POST", base+"/v1/messages", []byte(msgBody), map[string]string{"content-type": "application/json"})
+	base, led, _ := startGW(t, up, func(c *Config) { c.APIKey = opKey })
+	wrong := "Bearer " + strings.Repeat("0", 64)
+	hdrs := []map[string]string{
+		nil,
+		{"content-type": "application/json"},
+		{"x-api-key": "sk-ant-api03-CLIENT"},
+		{"authorization": wrong},
+		{"authorization": "Bearer"},
+		{"authorization": testToken}, // no scheme
+		{"x-yakos-gateway-token": strings.Repeat("0", 64)},
+		{"x-yakos-gateway-token": testToken[:63]},
+		{"authorization": "Basic " + testToken},
+	}
+	routes := []struct{ method, path string }{{"POST", "/v1/messages"}, {"POST", "/v1/messages/count_tokens"}, {"GET", "/v1/models"}}
+	for _, rt := range routes {
+		for i, h := range hdrs {
+			st, _, body := do(t, rt.method, base+rt.path, []byte(msgBody), h)
+			if st != 401 || !strings.Contains(string(body), "authentication_error") || strings.Contains(string(body), opKey) {
+				t.Errorf("%s %s case %d: %d %s", rt.method, rt.path, i, st, body)
+			}
+		}
+	}
+	if n := len(up.hits()); n != 0 {
+		t.Fatalf("%d requests reached the upstream without the gateway token", n)
+	}
+	if led.count() != 0 {
+		t.Errorf("unauthenticated requests wrote %d ledger events", led.count())
+	}
+	// With the token, on each route, the upstream gets the operator key and no
+	// trace of the token.
+	for _, rt := range routes {
+		if st, _, _ := do(t, rt.method, base+rt.path, []byte(msgBody), map[string]string{"authorization": "Bearer " + testToken}); st != 200 && rt.path != "/v1/models" {
+			t.Errorf("%s: %d", rt.path, st)
+		}
+	}
+	for i, r := range up.hits() {
+		if r.hdr.Get("X-Api-Key") != opKey || r.hdr.Get("Authorization") != "" || r.hdr.Get("X-Yakos-Gateway-Token") != "" {
+			t.Errorf("hit %d upstream headers %v", i, r.hdr)
+		}
+	}
+	if len(up.hits()) != 3 {
+		t.Errorf("upstream hits %d, want 3", len(up.hits()))
+	}
+}
+
+func TestNewRequiresToken(t *testing.T) {
+	for _, tok := range []string{"", "short", strings.Repeat("a", 31)} {
+		if _, err := New(Config{GatewayToken: tok}); err == nil {
+			t.Errorf("New accepted token %q", tok)
+		}
+	}
+}
+
+func TestOperatorKeyUnlessClientSendsXAPIKey(t *testing.T) {
+	gw := map[string]string{"authorization": "Bearer " + testToken}
+	up := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) { _, _ = io.WriteString(w, "{}") })
+	base, _, _ := startGW(t, up, func(c *Config) { c.APIKey = "sk-ant-api03-OPERATOR" })
+	do(t, "POST", base+"/v1/messages", []byte(msgBody), gw)
 	if got := up.hits()[0].hdr.Get("X-Api-Key"); got != "sk-ant-api03-OPERATOR" {
 		t.Errorf("no client key: upstream saw %q", got)
 	}
-	do(t, "POST", base+"/v1/messages", []byte(msgBody), map[string]string{"x-api-key": "sk-ant-api03-CLIENT"})
-	if got := up.hits()[1].hdr.Get("X-Api-Key"); got != "sk-ant-api03-CLIENT" {
-		t.Errorf("client key replaced: %q", got)
+	do(t, "POST", base+"/v1/messages", []byte(msgBody), map[string]string{"authorization": gw["authorization"], "x-api-key": "sk-ant-api03-CLIENT"})
+	if got := up.hits()[1].hdr; got.Get("X-Api-Key") != "sk-ant-api03-CLIENT" || got.Get("Authorization") != "" {
+		t.Errorf("client key: %v", got)
 	}
-	do(t, "POST", base+"/v1/messages", []byte(msgBody), map[string]string{"authorization": "Bearer proxy"})
-	if h := up.hits()[2].hdr; h.Get("X-Api-Key") != "" || h.Get("Authorization") != "Bearer proxy" {
-		t.Errorf("operator key added beside a bearer: %v", h)
-	}
-	_ = led
 
 	up2 := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) { _, _ = io.WriteString(w, "{}") })
 	base2, led2, _ := startGW(t, up2, nil)
-	st, _, body := do(t, "POST", base2+"/v1/messages", []byte(msgBody), nil)
+	st, _, body := do(t, "POST", base2+"/v1/messages", []byte(msgBody), gw)
 	if st != 401 || len(up2.hits()) != 0 || !strings.Contains(string(body), "authentication_error") {
 		t.Errorf("no credential anywhere: %d %s", st, body)
 	}
 	if e := led2.last(t); e.Refused != "no_credential" {
 		t.Errorf("ledger %+v", e)
+	}
+}
+
+// Stalled bodies must not hold the in-flight slots past the body deadline.
+func TestStalledBodiesDoNotExhaustSlots(t *testing.T) {
+	up := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) { _, _ = io.WriteString(w, "{}") })
+	base, _, addr := startGW(t, up, func(c *Config) { c.bodyTimeout = 400 * time.Millisecond; c.APIKey = "sk-ant-api03-OP" })
+	var conns []net.Conn
+	for i := 0; i < maxInflight; i++ {
+		c, err := net.Dial("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		conns = append(conns, c)
+		fmt.Fprintf(c, "POST /v1/messages HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Length: 1000000\r\n\r\nx", addr, testToken)
+	}
+	defer func() {
+		for _, c := range conns {
+			_ = c.Close()
+		}
+	}()
+	time.Sleep(150 * time.Millisecond) // all 64 are inside the body read
+	if st, _, _ := do(t, "POST", base+"/v1/messages", []byte(msgBody), apiKeyHdr); st != 429 {
+		t.Fatalf("with 64 stalled bodies the 65th got %d, want 429", st)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		st, _, _ := do(t, "POST", base+"/v1/messages", []byte(msgBody), apiKeyHdr)
+		if st == 200 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("slots never freed after the body deadline (last status %d)", st)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// The total of reserved body bytes is bounded across requests.
+func TestBodyBudgetBoundsTotal(t *testing.T) {
+	up := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) { _, _ = io.WriteString(w, "{}") })
+	base, led, addr := startGW(t, up, func(c *Config) {
+		c.bodyBudget = 1000
+		c.maxBody = 800
+		c.bodyTimeout = 3 * time.Second
+		c.APIKey = "sk-ant-api03-OP"
+	})
+	c, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fmt.Fprintf(c, "POST /v1/messages HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Length: 700\r\n\r\nx", addr, testToken)
+	time.Sleep(150 * time.Millisecond)
+	big := []byte(`{"model":"claude-sonnet-4-5","pad":"` + strings.Repeat("a", 400) + `"}`)
+	st, _, _ := do(t, "POST", base+"/v1/messages", big, apiKeyHdr)
+	if st != 429 {
+		t.Fatalf("second body over the budget got %d, want 429", st)
+	}
+	if e := led.last(t); e.Refused != "gateway_busy" {
+		t.Errorf("ledger %+v", e)
+	}
+	// A request that fits is still served; after the first one ends its share is freed.
+	if st, _, _ := do(t, "POST", base+"/v1/messages", []byte(msgBody), apiKeyHdr); st != 200 {
+		t.Errorf("small request: %d", st)
+	}
+	_ = c.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if st, _, _ := do(t, "POST", base+"/v1/messages", big, apiKeyHdr); st == 200 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the budget share was never released")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// Only the documented subagent class may select a rewrite from a header.
+func TestOnlySubagentClassIsHeaderSelectable(t *testing.T) {
+	table := func() routerpolicy.GatewayClasses {
+		return routerpolicy.GatewayClasses{
+			{Class: "opus", Model: "claude-opus-4-1"},
+			{Class: "sonnet", Model: "claude-sonnet-4-5"},
+			{Class: "haiku", Model: "claude-haiku-4-5"},
+			{Class: "subagent", Model: "claude-haiku-4-5"},
+		}
+	}
+	body := `{"model":"claude-sonnet-4-5-20250929","messages":[]}`
+	for _, c := range []struct {
+		hdr  map[string]string
+		want bool
+	}{
+		{map[string]string{"x-claude-code-request-class": "opus"}, false},
+		{map[string]string{"x-claude-code-request-class": "haiku"}, false},
+		{map[string]string{"x-claude-code-agent-type": "sonnet"}, false},
+		{map[string]string{"x-claude-code-request-class": "subagent"}, true},
+	} {
+		up := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) { _, _ = io.WriteString(w, "{}") })
+		base, _, _ := startGW(t, up, func(cfg *Config) { cfg.Classes = table })
+		do(t, "POST", base+"/v1/messages", []byte(body), withHdr(c.hdr))
+		got := string(up.hits()[0].body)
+		if (got != body) != c.want {
+			t.Errorf("%v: rewritten=%v, want %v (%s)", c.hdr, got != body, c.want, got)
+		}
 	}
 }
 
@@ -523,12 +700,12 @@ func TestSensitiveGuardBeforeNonPrimaryUpstream(t *testing.T) {
 
 func TestLoopbackHostOriginNegatives(t *testing.T) {
 	for _, a := range []string{"0.0.0.0:7897", "192.168.1.5:7897", ":7897", "example.com:7897", "127.0.0.1", "[::]:7897"} {
-		if _, err := New(Config{Addr: a}); err == nil {
+		if _, err := New(Config{Addr: a, GatewayToken: testToken}); err == nil {
 			t.Errorf("New accepted %q", a)
 		}
 	}
 	for _, a := range []string{"", "127.0.0.1:7897", "localhost:7897", "[::1]:7897"} {
-		if _, err := New(Config{Addr: a}); err != nil {
+		if _, err := New(Config{Addr: a, GatewayToken: testToken}); err != nil {
 			t.Errorf("New(%q): %v", a, err)
 		}
 	}
@@ -553,6 +730,7 @@ func TestLoopbackHostOriginNegatives(t *testing.T) {
 	for _, c := range cases {
 		req, _ := http.NewRequest("POST", base+"/v1/messages", strings.NewReader(msgBody))
 		req.Header.Set("x-api-key", "k")
+		req.Header.Set("Authorization", "Bearer "+testToken)
 		for k, v := range c.hdr {
 			req.Header.Set(k, v)
 		}
@@ -648,7 +826,7 @@ func TestInflightCap(t *testing.T) {
 }
 
 func TestProductionUpstreamIsPinned(t *testing.T) {
-	s, err := New(Config{})
+	s, err := New(Config{GatewayToken: testToken})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -657,5 +835,37 @@ func TestProductionUpstreamIsPinned(t *testing.T) {
 	}
 	if s.cfg.route("claude-x") != (Upstream{Kind: KindAnthropic, Primary: true}) {
 		t.Error("default route is not the primary upstream")
+	}
+}
+
+// The ledger's duration_s is the request's own duration, not the microseconds
+// between building the Account and writing the line.
+func TestLedgerDurationIsTheRequests(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("YAKOS_DISPATCH_LOG", dir)
+	up := newUpstream(t, func(w http.ResponseWriter, _ *http.Request, _ []byte) {
+		time.Sleep(250 * time.Millisecond)
+		_, _ = io.WriteString(w, "{}")
+	})
+	base, _, _ := startGW(t, up, func(c *Config) { c.Ledger = nil })
+	if st, _, _ := do(t, "POST", base+"/v1/messages", []byte(msgBody), apiKeyHdr); st != 200 {
+		t.Fatal(st)
+	}
+	var d float64
+	for i := 0; i < 100 && d == 0; i++ {
+		entries, _ := os.ReadDir(dir)
+		for _, e := range entries {
+			b, _ := os.ReadFile(filepath.Join(dir, e.Name()))
+			for _, line := range bytes.Split(bytes.TrimSpace(b), []byte("\n")) {
+				var m map[string]any
+				if json.Unmarshal(line, &m) == nil && m["type"] == "gateway_request" {
+					d, _ = m["duration_s"].(float64)
+				}
+			}
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if d < 0.2 || d > 5 {
+		t.Errorf("duration_s = %v, want about 0.25", d)
 	}
 }

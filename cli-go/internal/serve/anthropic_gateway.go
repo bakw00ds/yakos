@@ -3,9 +3,13 @@ package serve
 // anthropic_gateway.go: starts the Anthropic pass-through gateway (K-151) when
 // the operator turned it on, with `yakos serve --gateway` or `anthropic_gateway:
 // true` in the trusted ~/.yakos-state/router-policy.yml. A project .yakos.yml
-// cannot enable it. Off otherwise: nothing binds. The gateway holds no yakOS
-// credential; the only secret it touches is the operator's ANTHROPIC_API_KEY,
-// read from the daemon's environment here and handed to the proxy as a value.
+// cannot enable it. Off otherwise: nothing binds. The gateway checks a yakOS
+// gateway token (~/.yakos-state/gateway-token, minted here on first start) on
+// every request; the only other secret it touches is the operator's
+// ANTHROPIC_API_KEY, read from the daemon's environment here and handed to the
+// proxy as a value. The bound address is reported over the daemon's owner-only
+// socket (yakos.version) so `yakos start --routed` can prove the listener is
+// this daemon's before it sends anything.
 
 import (
 	"context"
@@ -17,6 +21,7 @@ import (
 
 	"github.com/bakw00ds/yakos/internal/gateway/anthropic"
 	"github.com/bakw00ds/yakos/internal/routerpolicy"
+	"github.com/bakw00ds/yakos/internal/statepath"
 )
 
 // anthropicGatewayEnabled says whether the gateway should start: the flag, or
@@ -64,8 +69,14 @@ func classTable(policyDir string) func() routerpolicy.GatewayClasses {
 
 // startAnthropicGateway binds the gateway and serves it in the background. A
 // failed bind is a loud warning and the daemon continues without it.
-func startAnthropicGateway(ctx context.Context, cfg Config, errCh chan error) error {
+func startAnthropicGateway(ctx context.Context, cfg Config, errCh chan error) (string, error) {
+	tok, err := anthropic.LoadOrCreateToken(statepath.Dir())
+	if err != nil {
+		close(errCh)
+		return "", fmt.Errorf("serve: anthropic gateway: %w", err)
+	}
 	srv, err := anthropic.New(anthropic.Config{
+		GatewayToken:            tok,
 		Addr:                    cfg.GatewayAddr,
 		PassthroughSubscription: cfg.GatewayPassthroughSubscription,
 		APIKey:                  os.Getenv("ANTHROPIC_API_KEY"),
@@ -73,7 +84,7 @@ func startAnthropicGateway(ctx context.Context, cfg Config, errCh chan error) er
 	})
 	if err != nil {
 		close(errCh)
-		return fmt.Errorf("serve: anthropic gateway: %w", err)
+		return "", fmt.Errorf("serve: anthropic gateway: %w", err)
 	}
 	ln, err := srv.Listen()
 	if err != nil {
@@ -81,12 +92,12 @@ func startAnthropicGateway(ctx context.Context, cfg Config, errCh chan error) er
 		slog.Error("serve: " + msg)
 		fmt.Fprintln(os.Stderr, "yakos serve: WARNING: "+msg)
 		close(errCh)
-		return nil
+		return "", nil
 	}
 	fmt.Fprintf(os.Stderr, "yakos serve: anthropic gateway: http://%s (launch claude through it with the routed flag of yakos start)\n", ln.Addr())
 	if cfg.GatewayPassthroughSubscription {
 		fmt.Fprintln(os.Stderr, "yakos serve: WARNING: --gateway-passthrough-subscription: subscription OAuth tokens are forwarded through the gateway (see ADR-0011)")
 	}
 	go func() { errCh <- srv.ServeListener(ctx, ln) }()
-	return nil
+	return ln.Addr().String(), nil
 }

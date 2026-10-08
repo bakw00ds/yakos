@@ -150,6 +150,9 @@ type Config struct {
 	// bound ("" when the console is off or failed to bind).
 	instance     string
 	boundConsole string
+	// boundGateway is the Anthropic gateway's bound address, "" when it is off
+	// or could not bind. Reported through yakos.version.
+	boundGateway string
 
 	// ConsoleExternalHosts is the list of host[:port] values that browsers use to
 	// reach the console when ConsoleBind is a wildcard or non-loopback address.
@@ -1005,9 +1008,11 @@ func Run(ctx context.Context, cfg Config) error {
 	// Anthropic pass-through gateway (K-151): off unless asked for.
 	anthropicErrCh := make(chan error, 1)
 	if anthropicGatewayEnabled(cfg.Gateway, cfg.GatewayPolicyDir) {
-		if err := startAnthropicGateway(ctx, cfg, anthropicErrCh); err != nil {
+		addr, err := startAnthropicGateway(ctx, cfg, anthropicErrCh)
+		if err != nil {
 			return err
 		}
+		cfg.boundGateway = addr
 	} else {
 		close(anthropicErrCh)
 	}

@@ -193,8 +193,13 @@ type Config struct {
 	Direct bool
 
 	// Routed (--routed, K-151) points the claude child at the local Anthropic
-	// gateway: ANTHROPIC_BASE_URL and the hint-header switch, nothing else.
+	// gateway: ANTHROPIC_BASE_URL, the hint-header switch and the gateway token
+	// (as ANTHROPIC_AUTH_TOKEN); the operator's ANTHROPIC_API_KEY is removed.
 	Routed bool
+	// RoutedToken is the gateway token handed to the child as
+	// ANTHROPIC_AUTH_TOKEN. The caller reads it from the state dir after it has
+	// verified the gateway; it is never printed or logged.
+	RoutedToken string
 
 	// DaemonAutoSpawn, when true, tells the banner that runStart has already
 	// (or will imminently) spawn a background daemon before calling start.Run.
@@ -1153,7 +1158,7 @@ func buildExecArgs(runtime, projectRepo, permMode string, agentCount int, cfg Co
 	if cfg.Routed {
 		var note string
 		var err error
-		if execEnv, note, err = applyRouted(runtime, execEnv); err != nil {
+		if execEnv, note, err = applyRouted(runtime, execEnv, cfg.RoutedToken); err != nil {
 			return "", nil, nil, err
 		}
 		if note != "" && cfg.ErrWriter != nil {
@@ -1350,9 +1355,12 @@ Terminal sharing (ADR-0008 Phase 1):
 Routing:
     --routed              Point claude at the local Anthropic gateway
                           (http://127.0.0.1:7897) and turn on its request-class
-                          hint headers. Sets ANTHROPIC_BASE_URL and
-                          CLAUDE_CODE_GATEWAY_HINT_HEADERS=1 in the child only.
-                          Needs the gateway running (see 'yakos serve --help'). claude only.
+                          hint headers. In the child only: sets ANTHROPIC_BASE_URL,
+                          CLAUDE_CODE_GATEWAY_HINT_HEADERS=1 and ANTHROPIC_AUTH_TOKEN
+                          (the gateway token) and removes ANTHROPIC_API_KEY.
+                          Refuses to launch unless this directory's daemon runs the
+                          gateway on that address (see 'yakos serve --help').
+                          Uses the vendor TUI, not the REPL. claude only.
 
 Inspection:
     --dry-run             Print what would be exec'd; exit 0.

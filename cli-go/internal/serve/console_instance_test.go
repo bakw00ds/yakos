@@ -163,3 +163,28 @@ func TestRun_RequireConsoleExitsOnBindFailure(t *testing.T) {
 		t.Fatalf("Run = %v, want a console bind error naming %s", err, held.Addr())
 	}
 }
+
+// K-151 fix: yakos.version reports the Anthropic gateway's bound address, and
+// only when it is bound, so `yakos start --routed` can tell this daemon's
+// gateway from a squatter on the port.
+func TestVersion_ReportsBoundGateway(t *testing.T) {
+	t.Setenv("YAKOS_DISPATCH_LOG", "")
+	addr := freeAddr(t)
+	info, _ := startDaemon(t, serve.Config{ConsoleAddr: freeAddr(t), Gateway: true, GatewayAddr: addr})
+	if info.GatewayAddr != addr {
+		t.Fatalf("gateway_addr %q, want the bound %q", info.GatewayAddr, addr)
+	}
+	off, _ := startDaemon(t, serve.Config{ConsoleAddr: freeAddr(t), GatewayPolicyDir: t.TempDir()})
+	if off.GatewayAddr != "" {
+		t.Fatalf("gateway off but gateway_addr %q", off.GatewayAddr)
+	}
+	held, err := net.Listen("tcp", "127.0.0.1:0") // a squatter holds the port
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close() //nolint:errcheck
+	lost, _ := startDaemon(t, serve.Config{ConsoleAddr: freeAddr(t), Gateway: true, GatewayAddr: held.Addr().String()})
+	if lost.GatewayAddr != "" {
+		t.Fatalf("bind failed but gateway_addr %q", lost.GatewayAddr)
+	}
+}

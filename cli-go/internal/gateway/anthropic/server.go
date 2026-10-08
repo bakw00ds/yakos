@@ -12,11 +12,12 @@
 //   - One upstream, api.anthropic.com over TLS, pinned in code. No redirect is
 //     followed, so a credential can never be replayed to another host. A
 //     registry billing=local slot is represented as a type only (Upstream.Kind).
-//   - The client's own credential (x-api-key or Authorization) is forwarded on
-//     that one request and nowhere else: never logged, stored, or reused. A
-//     request without one gets the operator's ANTHROPIC_API_KEY. A subscription
-//     OAuth token (sk-ant-oat*) is refused with 403 unless the operator started
-//     the gateway with --gateway-passthrough-subscription.
+//   - The gateway token is stripped and never forwarded. The upstream gets the
+//     operator's ANTHROPIC_API_KEY as x-api-key (or the x-api-key the client
+//     sent). A subscription OAuth credential (sk-ant-oat anywhere in a
+//     credential value) is refused with 403 unless the operator started the
+//     gateway with --gateway-passthrough-subscription; then the bearer is
+//     forwarded on its own request, with the gateway token in TokenHeader.
 //   - Request and response headers pass verbatim (hop-by-hop headers excepted),
 //     SSE is flushed as it arrives with its ping frames, and error bodies are
 //     the upstream's own. Bodies are byte-identical unless a gateway_classes
@@ -24,8 +25,10 @@
 //   - Route metadata never enters a prompt: the only request change is the
 //     `model` value, and only on a class match (rule:cache-stability).
 //
-// Auth: loopback plus the client's Anthropic credential; there is no yakOS
-// bearer, because Claude Code can present only an Anthropic one. Idempotency:
+// Auth: every request must carry the gateway token (token.go) as
+// `Authorization: Bearer <token>`, which Claude Code sends from
+// ANTHROPIC_AUTH_TOKEN; without it the answer is 401 and nothing reaches the
+// upstream. Idempotency:
 // a proxied POST is exactly as idempotent as Anthropic's own endpoint; the
 // gateway never retries. Rate limit: a fixed in-flight cap (maxInflight).
 package anthropic
@@ -40,6 +43,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/bakw00ds/yakos/internal/dashauth"
@@ -55,9 +59,18 @@ const UpstreamHost = "api.anthropic.com"
 
 // Limits.
 const (
-	// MaxBodyBytes caps a request body (a long conversation with images).
+	// MaxBodyBytes caps a request body. 32 MiB is Anthropic's own request-size
+	// limit, so a smaller cap would refuse sessions the API accepts.
 	MaxBodyBytes = 32 << 20
 	maxInflight  = 64
+	// BodyBudget caps the body bytes held at once across all requests; with the
+	// per-request cap it bounds the gateway's request memory: at most BodyBudget
+	// of reserved bodies, each read into a buffer that is at most that size
+	// (the rewrite splice copies one body once), so about 2 x BodyBudget = 256 MiB
+	// in the worst case, not 64 x 32 MiB x 2.
+	BodyBudget = 128 << 20
+	// BodyTimeout is the absolute time a client has to deliver a request body.
+	BodyTimeout = 30 * time.Second
 )
 
 // Upstream kinds. KindLocal is the registry billing=local slot: a type only,
@@ -85,6 +98,9 @@ type Config struct {
 	APIKey string
 	// Classes returns the validated gateway_classes table (K-141). Nil means none.
 	Classes func() routerpolicy.GatewayClasses
+	// GatewayToken is the secret a client must present (Authorization: Bearer,
+	// or TokenHeader). Required: New refuses an empty one. Never logged.
+	GatewayToken string
 	// Ledger receives one event per request. Nil writes gateway_request through
 	// a dispatch.Account.
 	Ledger func(dispatch.GatewayEvent)
@@ -95,6 +111,9 @@ type Config struct {
 	baseURL   *url.URL
 	route     func(model string) Upstream
 	maxBody   int64
+	// bodyTimeout and bodyBudget default to BodyTimeout and BodyBudget.
+	bodyTimeout time.Duration
+	bodyBudget  int64
 }
 
 // Server is the gateway.
@@ -107,6 +126,7 @@ type Server struct {
 	mux     http.Handler
 	httpSrv *http.Server
 	sem     chan struct{}
+	budget  atomic.Int64
 }
 
 // New validates cfg and builds the Server. It does not listen.
@@ -140,6 +160,15 @@ func New(cfg Config) (*Server, error) {
 	if cfg.maxBody <= 0 {
 		cfg.maxBody = MaxBodyBytes
 	}
+	if cfg.bodyTimeout <= 0 {
+		cfg.bodyTimeout = BodyTimeout
+	}
+	if cfg.bodyBudget <= 0 {
+		cfg.bodyBudget = BodyBudget
+	}
+	if len(cfg.GatewayToken) < 32 {
+		return nil, errors.New("anthropic gateway: a gateway token of at least 32 characters is required")
+	}
 	if cfg.Ledger == nil {
 		cfg.Ledger = writeLedger
 	}
@@ -171,7 +200,13 @@ func New(cfg Config) (*Server, error) {
 }
 
 func writeLedger(ev dispatch.GatewayEvent) {
-	dispatch.NewAccount(dispatch.Request{AgentName: "anthropic-gateway", Surface: dispatch.SurfaceAnthropicGateway}).Gateway(ev)
+	req := dispatch.Request{AgentName: "anthropic-gateway", Surface: dispatch.SurfaceAnthropicGateway}
+	if ev.Started.IsZero() {
+		dispatch.NewAccount(req).Gateway(ev)
+		return
+	}
+	// The Account is built at write time, so it must be told when the request began.
+	dispatch.NewAccountAt(req, ev.Started).Gateway(ev)
 }
 
 // Handler returns the full handler (Host and Origin checks included).

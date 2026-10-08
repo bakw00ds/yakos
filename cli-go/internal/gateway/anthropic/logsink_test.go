@@ -26,7 +26,8 @@ func TestLogSink_NoCredentialOrBodyAnywhere(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("YAKOS_DISPATCH_LOG", dir)
 
-	secrets := []string{"SECRETKEYONE", "SECRETBEARERTWO", "sk-ant-oat01-SECRETOAUTHTHREE", "SECRETOPERATORFOUR"}
+	secrets := []string{"SECRETKEYONE", "SECRETBEARERTWO", "sk-ant-oat01-SECRETOAUTHTHREE", "SECRETOPERATORFOUR", testToken}
+	gwBearer := "Bearer " + testToken
 	const prompt = "PROMPTMARK summarize the private design doc"
 	body := `{"model":"claude-opus-4-5","messages":[{"role":"user","content":"` + prompt + `"}]}`
 	classes := func() routerpolicy.GatewayClasses {
@@ -59,22 +60,25 @@ func TestLogSink_NoCredentialOrBodyAnywhere(t *testing.T) {
 		return base
 	}
 	base := mk(up, nil)
+	collect(do(t, "POST", base+"/v1/messages", []byte(body), map[string]string{"x-api-key": secrets[0], "authorization": gwBearer}))
+	collect(do(t, "POST", base+"/v1/messages", []byte(body), map[string]string{"authorization": gwBearer, "x-claude-code-request-class": "subagent"}))
+	// Wrong or missing gateway token: the offered values must not be echoed or logged.
+	collect(do(t, "POST", base+"/v1/messages", []byte(body), map[string]string{"authorization": "Bearer " + secrets[1], "x-api-key": secrets[0]}))
 	collect(do(t, "POST", base+"/v1/messages", []byte(body), map[string]string{"x-api-key": secrets[0]}))
-	collect(do(t, "POST", base+"/v1/messages", []byte(body), map[string]string{"authorization": "Bearer " + secrets[1], "x-claude-code-request-class": "subagent"}))
-	collect(do(t, "POST", base+"/v1/messages", []byte(body), map[string]string{"authorization": "Bearer " + secrets[2]}))
-	collect(do(t, "POST", base+"/v1/messages", []byte(body), nil)) // operator key injected
-	collect(do(t, "GET", base+"/v1/models", nil, map[string]string{"x-api-key": secrets[0]}))
-	collect(do(t, "POST", base+"/v1/messages", []byte(body), map[string]string{"origin": "https://evil.example", "x-api-key": secrets[0]}))
+	collect(do(t, "POST", base+"/v1/messages", []byte(body), map[string]string{"authorization": "Bearer " + secrets[2], TokenHeader: testToken}))
+	collect(do(t, "POST", base+"/v1/messages", []byte(body), map[string]string{"authorization": gwBearer})) // operator key injected
+	collect(do(t, "GET", base+"/v1/models", nil, map[string]string{"x-api-key": secrets[0], "authorization": gwBearer}))
+	collect(do(t, "POST", base+"/v1/messages", []byte(body), map[string]string{"origin": "https://evil.example", "x-api-key": secrets[0], "authorization": gwBearer}))
 	flagged := mk(up, func(c *Config) { c.PassthroughSubscription = true })
-	collect(do(t, "POST", flagged+"/v1/messages", []byte(body), map[string]string{"authorization": "Bearer " + secrets[2]}))
+	collect(do(t, "POST", flagged+"/v1/messages", []byte(body), map[string]string{"authorization": "Bearer " + secrets[2], TokenHeader: testToken}))
 	downUp := newUpstream(t, func(http.ResponseWriter, *http.Request, []byte) {})
 	downURL := downUp.srv.URL
 	downUp.srv.Close()
 	down := mk(downUp, nil)
-	collect(do(t, "POST", down+"/v1/messages", []byte(body), map[string]string{"x-api-key": secrets[0]}))
+	collect(do(t, "POST", down+"/v1/messages", []byte(body), map[string]string{"x-api-key": secrets[0], "authorization": gwBearer}))
 	// A sensitive refusal.
 	sens := mk(up, func(c *Config) { c.route = func(string) Upstream { return Upstream{Kind: "other"} } })
-	collect(do(t, "POST", sens+"/v1/messages", []byte(`{"model":"claude-opus-4-5","messages":[{"role":"user","content":"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA1234567890abcdef\n-----END RSA PRIVATE KEY-----"}]}`), map[string]string{"x-api-key": secrets[0]}))
+	collect(do(t, "POST", sens+"/v1/messages", []byte(`{"model":"claude-opus-4-5","messages":[{"role":"user","content":"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA1234567890abcdef\n-----END RSA PRIVATE KEY-----"}]}`), map[string]string{"x-api-key": secrets[0], "authorization": gwBearer}))
 
 	var ledger []byte
 	entries, _ := os.ReadDir(dir)

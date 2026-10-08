@@ -27,6 +27,9 @@ type GatewayEvent struct {
 	OutputTokens int64
 	CacheRead    int64
 	CacheCreate  int64
+	// Started is when the request arrived; the ledger line's duration_s is the
+	// time since. Zero means "now" (a duration of 0, omitted).
+	Started time.Time
 }
 
 type gatewayLine struct {

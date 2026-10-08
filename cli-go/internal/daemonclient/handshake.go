@@ -36,6 +36,8 @@ type VersionInfo struct {
 	ConsoleAddr string `json:"console_addr,omitempty"`
 	// Instance is the daemon's per-boot nonce (see serve.versionResult).
 	Instance string `json:"instance,omitempty"`
+	// GatewayAddr is the Anthropic gateway's bound address ("" when off).
+	GatewayAddr string `json:"gateway_addr,omitempty"`
 }
 
 // ErrStaleDaemon is returned by Check when the connected daemon's build id

@@ -142,11 +142,17 @@ func requestClass(h http.Header) string {
 	return ""
 }
 
+// hintSelectable are the classes a request header may select (ADR-0011): the
+// header values are client-chosen text, so only the one documented class can
+// trigger a rewrite. Other table entries (opus, sonnet, ...) are tier aliases
+// for Claude Code's own environment, never header-selected.
+var hintSelectable = map[string]bool{"subagent": true}
+
 // planModel returns the model to send for modelIn under class, or modelIn
 // itself when no rewrite applies. A rewrite needs: a known class, a table entry
 // for it whose model is a concrete Claude id, and a Claude model coming in.
 func (s *Server) planModel(class, modelIn string) string {
-	if class == "" || s.cfg.Classes == nil || !claudeModelRe.MatchString(modelIn) {
+	if !hintSelectable[class] || s.cfg.Classes == nil || !claudeModelRe.MatchString(modelIn) {
 		return modelIn
 	}
 	for _, c := range s.cfg.Classes() {

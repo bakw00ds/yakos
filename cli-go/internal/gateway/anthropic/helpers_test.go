@@ -99,7 +99,7 @@ func startGW(t *testing.T, up *fakeUpstream, mut func(*Config)) (string, *ledger
 	t.Helper()
 	led := &ledgerSink{}
 	addr := freeAddr(t)
-	cfg := Config{Addr: addr, Ledger: led.add}
+	cfg := Config{Addr: addr, Ledger: led.add, GatewayToken: testToken}
 	if up != nil {
 		u, _ := url.Parse(up.srv.URL)
 		cfg.baseURL = u
@@ -152,7 +152,10 @@ func fixture(t *testing.T, name string) []byte {
 	return b
 }
 
-var apiKeyHdr = map[string]string{"x-api-key": "sk-ant-api03-TESTKEY", "anthropic-version": "2023-06-01", "content-type": "application/json"}
+// testToken is the gateway token every test gateway is configured with.
+const testToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+var apiKeyHdr = map[string]string{"authorization": "Bearer " + testToken, "x-api-key": "sk-ant-api03-TESTKEY", "anthropic-version": "2023-06-01", "content-type": "application/json"}
 
 func withHdr(extra map[string]string) map[string]string {
 	m := map[string]string{}

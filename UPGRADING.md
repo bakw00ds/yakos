@@ -6,6 +6,32 @@ current release, what survives, and how to fully uninstall when needed.
 This doc is the **upgrade authority** — `yakos --help`, README, and
 CHANGELOG point here. Last updated for v0.39.
 
+## Unreleased: the Anthropic gateway and `yakos start --routed` (K-151)
+
+New and optional; nothing changes until you turn it on.
+
+- `yakos serve --gateway` serves the pass-through gateway on `127.0.0.1:7897`
+  (flag `--gateway-passthrough-subscription` lets a subscription OAuth token
+  through; leave it off unless you have read ADR-0011). The policy key
+  `anthropic_gateway: true` in `~/.yakos-state/router-policy.yml` does the same
+  as the first flag. A project `.yakos.yml` cannot turn it on.
+- The daemon needs `ANTHROPIC_API_KEY` in its environment; the gateway attaches
+  it to upstream requests.
+- On first start the daemon creates `~/.yakos-state/gateway-token` (0600). To
+  rotate it, delete the file and restart `yakos serve --gateway`; start a new
+  `yakos start --routed` afterwards.
+- `yakos start --routed` (Claude only) sets `ANTHROPIC_BASE_URL`,
+  `CLAUDE_CODE_GATEWAY_HINT_HEADERS=1` and `ANTHROPIC_AUTH_TOKEN=<gateway token>`
+  in the Claude Code child and removes `ANTHROPIC_API_KEY` and any own
+  `ANTHROPIC_AUTH_TOKEN` from it. It refuses to launch unless the daemon of the
+  current directory reports the gateway bound on 7897, so run it from the
+  directory where `yakos serve --gateway` runs. It always uses the vendor TUI,
+  not the REPL.
+- If port 7897 is taken by another program the gateway stays off and says so;
+  `--routed` then refuses. Free the port and restart the daemon.
+- Anything else that calls the gateway needs the token as
+  `Authorization: Bearer <token>`; without it the reply is 401.
+
 ## Unreleased: `yakos start` opens the yakOS REPL (K-154)
 
 With `YAKOS_IMPL=go`, `yakos start` on a terminal now opens the yakOS REPL

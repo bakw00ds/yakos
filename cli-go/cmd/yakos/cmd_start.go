@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"github.com/bakw00ds/yakos/internal/jsonrpc"
 	"github.com/bakw00ds/yakos/internal/mtls"
 	"github.com/bakw00ds/yakos/internal/start"
+	"github.com/bakw00ds/yakos/internal/statepath"
 	"github.com/bakw00ds/yakos/internal/version"
 )
 
@@ -316,7 +318,7 @@ func runStart(yakosRoot string, args []string) {
 	}
 	if wantREPL(replGate{
 		native: native, runtime: runtime, noREPL: noREPL, dryRun: dryRun, printAgents: printAgents,
-		printEnv: printEnv, shareTerminal: shareTerminal, direct: direct, cont: continueSession,
+		printEnv: printEnv, routed: routed, shareTerminal: shareTerminal, direct: direct, cont: continueSession,
 		fork: fork, ide: ide, bare: bare, strictMCP: strictMCP, resume: resume, passthrough: passthrough,
 		daemonFlags: networkedFromFlags(networked, consoleBind) || consoleBindProvided || consoleExternalHostProvided,
 	}, stdinIsTerminal()) {
@@ -586,7 +588,17 @@ func runStart(yakosRoot string, args []string) {
 	}
 
 	if routed && !dryRun && !printAgents && !printEnv && !noREPL {
-		warnIfGatewayDown(os.Stderr)
+		wd, werr := os.Getwd()
+		if werr != nil {
+			fmt.Fprintln(os.Stderr, "start: --routed refused: could not resolve the working directory")
+			os.Exit(1)
+		}
+		tok, verr := verifyRoutedGateway(context.Background(), wd, statepath.Dir())
+		if verr != nil {
+			fmt.Fprintf(os.Stderr, "start: --routed refused: %v\n", verr)
+			os.Exit(1)
+		}
+		cfg.RoutedToken = tok
 	}
 	banner, err := start.Run(cfg)
 	if err != nil {
@@ -701,16 +713,4 @@ func splitStartTerminator(args []string, fs *cliflag.Set) (head, tail []string) 
 		}
 	}
 	return args, nil
-}
-
-// warnIfGatewayDown says so when nothing listens on the gateway port, so a
-// --routed launch does not fail later with an opaque connection error.
-func warnIfGatewayDown(w io.Writer) {
-	addr := strings.TrimPrefix(start.RoutedBaseURL, "http://")
-	c, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
-	if err != nil {
-		fmt.Fprintf(w, "start: warning: nothing is listening on %s; start the gateway (yakos serve, gateway flag) or claude will fail to reach the API\n", addr)
-		return
-	}
-	_ = c.Close()
 }

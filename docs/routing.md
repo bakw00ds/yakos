@@ -612,7 +612,12 @@ Present in the binary but **not mapped**, because they are not documented:
 `ANTHROPIC_SMALL_FAST_MODEL` (the old name of the haiku knob),
 `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, `CLAUDE_CODE_AUTO_MODE_MODEL`,
 `CLAUDE_CODE_BG_CLASSIFIER_MODEL`. Compaction, workflow and main-model-by-class
-have no documented knob and wait for the gateway hint headers (K-151).
+have no documented knob and wait for the gateway hint headers (K-151). The
+gateway that reads them is `yakos serve --gateway` with `yakos start --routed`;
+its trust boundary, credential model and limits are in
+[ADR-0011](adr/ADR-0011.md). Of the classes in this table only `subagent` can be
+selected by a request header; `opus`, `sonnet`, `haiku` and `fable` stay
+environment aliases.
 
 ### Rules
 
