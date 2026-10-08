@@ -172,6 +172,13 @@ func runBudget(args []string) {
 		// recorded is refused (as for the model and router writers, K-153), then
 		// record one config_changed line whatever the writes did to the file.
 		//
+		// Validate first, so a bad request is refused for its own reason whatever
+		// state the log is in (the same order as the model and router writers).
+		if err := budget.CheckSet(pos[0], usd, len(pos) == 2, tokens, tokensArg != "", budget.Window(window), maxModel); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		//
 		// The policy lives where the budget code looks for it (YAKOS_DISPATCH_LOG
 		// can relocate it), but the audit line always goes to the home log: a
 		// project can set that variable, and a change must not be recordable

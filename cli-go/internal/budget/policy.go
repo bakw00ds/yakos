@@ -298,6 +298,29 @@ func SetLimit(stateDir, agent string, usd float64, w Window) error {
 	})
 }
 
+// CheckSet runs the validation SetLimit, SetTokenLimit and SetMaxModel run, without
+// writing, so a caller can refuse a bad request before it opens an audit log. A
+// limit that is not being set is passed as hasUSD/hasTokens false; tier "" is no
+// ceiling change.
+func CheckSet(agent string, usd float64, hasUSD bool, tokens int64, hasTokens bool, w Window, tier string) error {
+	if err := ValidateAgent(agent); err != nil {
+		return err
+	}
+	if hasUSD && !validLimitUSD(usd) {
+		return fmt.Errorf("budget: limit must be 0 (off) or a number of dollars from %v to %v", minLimitUSD, maxLimitUSD)
+	}
+	if hasTokens && (tokens < 0 || tokens > maxTokenLimit) {
+		return fmt.Errorf("budget: token limit must be between 0 and %d", maxTokenLimit)
+	}
+	if w != "" && w != Monthly && w != Lifetime {
+		return fmt.Errorf("budget: window must be %s or %s", Monthly, Lifetime)
+	}
+	if tier != "" && modelRank[tier] == 0 {
+		return fmt.Errorf("budget: max model must be haiku, sonnet, opus or fable")
+	}
+	return nil
+}
+
 // windowOrCurrent returns w, or, when w is empty, the window agent counts in now
 // (its policy entry's, else the global default's, else monthly). The set
 // functions store the result explicitly, as they always have, so a policy file

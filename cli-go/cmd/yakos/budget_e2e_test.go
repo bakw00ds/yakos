@@ -37,11 +37,12 @@ func TestBudgetHelperMain(t *testing.T) {
 func runYakos(t *testing.T, state string, env []string, args ...string) (int, string) {
 	t.Helper()
 	b, _ := json.Marshal(args)
+	home := t.TempDir()
 	cmd := exec.Command(os.Args[0], "-test.run=^TestBudgetHelperMain$")
 	cmd.Env = append([]string{
 		"YAKOS_TEST_MAIN_ARGS=" + string(b),
 		"YAKOS_DISPATCH_LOG=" + state,
-		"HOME=" + t.TempDir(),
+		"HOME=" + home, "USERPROFILE=" + home, // Windows reads the profile dir, not HOME
 		"PATH=" + t.TempDir(),
 	}, env...)
 	var out bytes.Buffer

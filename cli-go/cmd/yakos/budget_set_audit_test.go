@@ -135,17 +135,57 @@ func TestBudgetSetRefusedWhenTheLogCannotBeOpened(t *testing.T) {
 	}
 }
 
-// A set that fails after a first write still records what it wrote.
-func TestBudgetSetRecordsAPartialWrite(t *testing.T) {
+// A set with a bad part writes none of it: the dollar limit does not land when
+// the --max-model beside it is refused, and nothing is recorded.
+func TestBudgetSetWithABadPartWritesNothing(t *testing.T) {
 	home, override := t.TempDir(), t.TempDir()
 	state := filepath.Join(home, ".yakos-state")
-	// The dollar limit lands; the model ceiling is not a tier, so the set fails.
 	code, _ := runInHome(t, home, override, "budget", "set", "backend", "12", "--max-model", "no-such-tier")
 	if code == 0 {
 		t.Fatal("a bad --max-model was accepted")
 	}
-	lines := configLines(t, state)
-	if len(lines) != 1 || lines[0]["policy_sha_after"] != fileSHA(t, budget.PolicyPath(override)) {
-		t.Errorf("a written limit went unrecorded: %v", lines)
+	if _, err := os.Stat(budget.PolicyPath(override)); err == nil {
+		t.Error("the dollar limit was written although the ceiling was refused")
+	}
+	if n := len(configLines(t, state)); n != 0 {
+		t.Errorf("%d audit lines for a refused set", n)
+	}
+}
+
+// A bad request is refused for its own reason before the audit log is touched:
+// the floor test must name the floor even when the log cannot be opened.
+func TestBudgetSetValidatesBeforeOpeningTheLog(t *testing.T) {
+	home := t.TempDir()
+	state := filepath.Join(home, ".yakos-state")
+	if err := os.MkdirAll(statepath.DispatchLogIn(state), 0o700); err != nil { // unopenable log
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"budget", "set", "backend", "0.009"},
+		{"budget", "set", "backend", "--tokens", "-5"},
+		{"budget", "set", "backend", "5", "--window", "weekly"},
+		{"budget", "set", "backend", "5", "--max-model", "no-such-tier"},
+	} {
+		code, out := runInHome(t, home, t.TempDir(), args...)
+		if code != 1 || strings.Contains(out, "dispatch log") || !strings.Contains(out, "budget") {
+			t.Errorf("%v = %d %q; want the validation error, not the log's", args, code, out)
+		}
+	}
+}
+
+// A fresh scratch state: no .yakos-state directory and no log yet. The audit
+// opens (creating both), the write lands and one line is recorded.
+func TestBudgetSetAuditWorksOnAFreshStateDir(t *testing.T) {
+	home := t.TempDir()
+	state := filepath.Join(home, ".yakos-state")
+	if _, err := os.Stat(state); err == nil {
+		t.Fatal("fixture is not fresh")
+	}
+	override := t.TempDir()
+	if code, out := runInHome(t, home, override, "budget", "set", "backend", "--tokens", "5m"); code != 0 {
+		t.Fatalf("set on a fresh state dir: %d %s", code, out)
+	}
+	if n := len(configLines(t, state)); n != 1 {
+		t.Errorf("%d config_changed lines on a fresh state dir, want 1", n)
 	}
 }
