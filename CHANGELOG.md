@@ -7,9 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.63.0.1] — 2026-10-13
+
+Patch release: `scripts/install.sh` works again on macOS (BSD sed), and three
+GitHub Actions dependencies move to their latest patch versions.
+
 ### Fixed
 
 - `scripts/install.sh` no longer fails on macOS with `URL rejected: Malformed input`: the latest-release tag is now parsed with POSIX sed (BSD sed lacks the GNU `\?` used before) and validated as a version before it reaches a URL.
+
+### Build
+
+- GitHub Actions bumps: `actions/upload-artifact` 7.0.1 to 7.0.2 (#376), `actions/download-artifact` 8.0.1 to 8.0.2 (#373), `github/codeql-action` 4.38.2 to 4.38.3 (#377) together with its dependabot group.
+
+### Known issues
+
+- The `govulncheck` CI job is red on main for GO-2026-6617 in `golang.org/x/net` v0.58.0. The fix needs a Go 1.26 toolchain bump across five workflows and is tracked as K-180; this release ships without it.
 
 ## [0.63.0.0] — 2026-10-08
 
