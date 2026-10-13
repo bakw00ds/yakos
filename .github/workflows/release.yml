@@ -112,7 +112,7 @@ jobs:
           sha256sum "${ASSET}" > "${ASSET}.sha256"
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         with:
           name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
@@ -227,7 +227,7 @@ jobs:
 
       - name: Re-upload signed macOS binaries
         if: steps.sign.outputs.signed == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         with:
           name: binary-darwin-arm64
           path: dist/yakos-*-darwin-arm64*
@@ -236,7 +236,7 @@ jobs:
 
       - name: Re-upload signed macOS binaries (amd64)
         if: steps.sign.outputs.signed == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         with:
           name: binary-darwin-amd64
           path: dist/yakos-*-darwin-amd64*
@@ -324,7 +324,7 @@ jobs:
 
       - name: Re-upload signed Windows binary
         if: steps.sign.outputs.signed == 'true'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         with:
           name: binary-windows-amd64
           path: dist/yakos-*-windows-amd64*
