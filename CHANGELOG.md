@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `scripts/install.sh` no longer fails on macOS with `URL rejected: Malformed input`: the latest-release tag is now parsed with POSIX sed (BSD sed lacks the GNU `\?` used before) and validated as a version before it reaches a URL.
+
 ## [0.63.0.0] — 2026-10-08
 
 Minor release: the multi-harness router program lands in full (K-139 to K-156).

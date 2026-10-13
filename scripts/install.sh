@@ -193,15 +193,26 @@ INSTALL_PATH="${PREFIX}/yakos${BINARY_SUFFIX}"
 
 resolve_latest_version() {
     # Query the GitHub releases API for the latest release tag.
+    # POSIX sed only: no \? or \+ (GNU extensions that BSD sed on macOS
+    # treats literally, which once spliced the whole JSON line into the URL).
     _latest="$(curl -fsSL "${GITHUB_API}/releases/latest" \
         | grep '"tag_name"' \
         | head -1 \
-        | sed 's/.*"tag_name": *"v\?\([^"]*\)".*/\1/')"
+        | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p')"
+    _latest="${_latest#v}"
     if [ -z "${_latest}" ]; then
         echo "install.sh: could not resolve latest release from GitHub API." >&2
         echo "Pass --version <X> to install a specific version." >&2
         exit 1
     fi
+    # Never splice an unparsed API line into a download URL.
+    case "${_latest}" in
+        *[!0-9.]* | .* | *. | *..*)
+            echo "install.sh: unexpected release tag from GitHub API: ${_latest}" >&2
+            echo "Pass --version <X> to install a specific version." >&2
+            exit 1
+            ;;
+    esac
     echo "${_latest}"
 }
 
