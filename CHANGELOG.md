@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- Bump `golang.org/x/net` v0.58.0 to v0.60.0 for GO-2026-6617
+  (CVE-2026-97032): a malicious HTTP/2 client can crash a Go HTTP/2 server by
+  changing SETTINGS_HEADER_TABLE_SIZE while a response is encoded, a race on
+  the HPACK encoder. govulncheck gates CI. The module now requires Go 1.26.0
+  (`go.mod`), and x/crypto, x/sys, x/term and x/text move with it.
+
 ## [0.63.0.0] — 2026-10-08
 
 Minor release: the multi-harness router program lands in full (K-139 to K-156).
