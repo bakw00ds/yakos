@@ -232,6 +232,9 @@ jobs:
           dash scripts/install.sh --help
           dash scripts/uninstall-yakos-go.sh --help
 
+      - name: install.sh latest-tag parse (platform sed)
+        run: bash tests/run-install-tag-parse-test.sh
+
   gateway-protocol:
     # The OpenAI-compatible endpoint's wire contract (K-150): models list, chat
     # completions (stream and not), auth/Host/Origin negatives, conversation
