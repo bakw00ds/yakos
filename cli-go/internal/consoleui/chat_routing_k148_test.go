@@ -161,8 +161,19 @@ func routeOf(t *testing.T, ev map[string]any) map[string]any {
 	return r
 }
 
-// The route is the first event of the turn, before any token, and says where the
-// router sent it and who decided.
+// openingRoute asserts the turn opens as every one-shot turn does: the user's
+// own turn (K-1, the frame every viewer shows live), then the route, in the
+// order the transcript persists them; it returns the route.
+func openingRoute(t *testing.T, frames []map[string]any) map[string]any {
+	t.Helper()
+	if got := types(frames); len(got) < 2 || got[0] != "user" || got[1] != "route" {
+		t.Fatalf("turn opens %v, want user then route", got)
+	}
+	return routeOf(t, frames[1])
+}
+
+// The turn opens with the user's turn and then the route, before any token; the
+// route says where the router sent it and who decided.
 func TestK148_RouteEventComesBeforeTheFirstToken(t *testing.T) {
 	k := newK148(t)
 	frames, st := k.turn("s-route-1", "conv-route-1", "hello", nil)
@@ -170,15 +181,15 @@ func TestK148_RouteEventComesBeforeTheFirstToken(t *testing.T) {
 		t.Fatalf("status %d", st)
 	}
 	got := types(frames)
-	if got[0] != "route" {
-		t.Fatalf("first event = %v, want route first", got)
+	if got[0] != "user" || got[1] != "route" {
+		t.Fatalf("events = %v, want user then route first", got)
 	}
 	for i, ty := range got {
-		if ty == "token" && i == 0 {
+		if ty == "token" && i < 2 {
 			t.Fatalf("a token preceded the route: %v", got)
 		}
 	}
-	r := routeOf(t, frames[0])
+	r := routeOf(t, frames[1])
 	if r["runtime"] != "claude" || r["pinned"] != "router" || r["rule_id"] != "R0" || r["reason"] == "" {
 		t.Errorf("route = %v", r)
 	}
@@ -201,11 +212,11 @@ func TestK148_RouteEventComesBeforeTheFirstToken(t *testing.T) {
 func TestK148_OverrideBeatsThePaneSelection(t *testing.T) {
 	k := newK148(t)
 	frames, _ := k.turn("s-pane", "conv-pane", "q", map[string]any{"runtime": "claude", "model": "sonnet"})
-	if r := routeOf(t, frames[0]); r["runtime"] != "claude" || r["pinned"] != "pane" {
+	if r := openingRoute(t, frames); r["runtime"] != "claude" || r["pinned"] != "pane" {
 		t.Errorf("pane route = %v", r)
 	}
 	frames, _ = k.turn("s-ovr", "conv-ovr", "q", map[string]any{"runtime": "claude", "model": "sonnet", "overrideRuntime": "codex"})
-	r := routeOf(t, frames[0])
+	r := openingRoute(t, frames)
 	if r["runtime"] != "codex" || r["pinned"] != "override" {
 		t.Fatalf("override route = %v", r)
 	}
@@ -302,17 +313,18 @@ func TestK148_EachRuntimeResumesItsOwnNativeSession(t *testing.T) {
 }
 
 // Moving the conversation to another runtime appends the digest to that turn,
-// announces it after the route, and does not repeat on the next turn.
+// announces it after the user turn and the route, and does not repeat on the
+// next turn.
 func TestK148_RuntimeSwitchCarriesADigest(t *testing.T) {
 	k := newK148(t)
 	const conv = "conv-handoff"
 	k.turn("s-h1", conv, "what is the capital of France", map[string]any{"runtime": "claude"})
 	frames, _ := k.turn("s-h2", conv, "and its population", map[string]any{"runtime": "claude", "overrideRuntime": "codex"})
 	got := types(frames)
-	if got[0] != "route" || got[1] != "handoff" {
-		t.Fatalf("events = %v, want route then handoff first", got)
+	if len(got) < 3 || got[0] != "user" || got[1] != "route" || got[2] != "handoff" {
+		t.Fatalf("events = %v, want user, route then handoff first", got)
 	}
-	h, _ := frames[1]["handoff"].(map[string]any)
+	h, _ := frames[2]["handoff"].(map[string]any)
 	if h["from"] != "claude" || h["to"] != "codex" || h["turns"].(float64) < 2 || h["digest_bytes"].(float64) <= 0 {
 		t.Errorf("handoff = %v", h)
 	}
@@ -725,7 +737,7 @@ func TestK148_SensitiveRequestRefusesTheOverride(t *testing.T) {
 	if st != http.StatusAccepted {
 		t.Fatalf("status %d", st)
 	}
-	r := routeOf(t, frames[0])
+	r := openingRoute(t, frames)
 	if r["runtime"] != "claude" || r["override_refused"] != "codex" || r["pinned"] != "router" {
 		t.Errorf("route = %v", r)
 	}
@@ -745,7 +757,7 @@ func TestK148_SensitiveRequestRefusesTheOverride(t *testing.T) {
 	}
 	// An honoured override carries no notice.
 	frames, _ = k.turn("s-ov-ok", "conv-ov-ok", "plain words", map[string]any{"overrideRuntime": "codex"})
-	if r := routeOf(t, frames[0]); r["override_refused"] != nil || r["pinned"] != "override" {
+	if r := openingRoute(t, frames); r["override_refused"] != nil || r["pinned"] != "override" {
 		t.Errorf("honoured override route = %v", r)
 	}
 }

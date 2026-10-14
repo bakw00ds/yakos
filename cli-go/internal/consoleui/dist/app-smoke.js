@@ -691,6 +691,83 @@ function routingTest() {
 }
 try { routingTest(); } catch (e) { rtFail(String(e && e.stack || e)); }
 
+
+// ── user turns on the stream: the typing pane dedupes its echo, every other viewer appends ──
+function ueFail(m) { process.stderr.write('FAIL: chat-user-event: ' + m + '\n'); process.exit(1); }
+function userEventTest() {
+  var cp = global.__yakosChatPanes;
+  if (!cp) ueFail('window.__yakosChatPanes not exposed');
+  function same(what, got, want) {
+    if (JSON.stringify(got) !== JSON.stringify(want)) ueFail(what + ': got ' + JSON.stringify(got) + ', want ' + JSON.stringify(want));
+  }
+  function roles(p) { return p.messages.map(function(m) { return m.role + ':' + m.text; }); }
+
+  // The typing pane: its optimistic echo (as typed, @prefix and all) is confirmed
+  // by the server's event (stored text, prefix stripped); nothing is added and the
+  // echo keeps its own ts.
+  var typing = cp.makePane('ue-typing', 'conv-ue');
+  typing.messages.push({ role: 'user', text: '@codex fix it', ts: 'echo-ts', sessionId: 's1', echo: true });
+  cp.handleSSE(typing, { type: 'user', session_id: 's1', conversation_id: 'conv-ue', ts: 'srv-ts', text: 'fix it' });
+  same('typing pane: echo confirmed, not duplicated', roles(typing), ['user:@codex fix it']);
+  same('typing pane: echo ts kept, flag cleared', [typing.messages[0].ts, typing.messages[0].echo], ['echo-ts', false]);
+  // The reply then streams under the confirmed turn.
+  cp.handleSSE(typing, { type: 'token', session_id: 's1', ts: 't', text: 'done' });
+  same('typing pane: reply follows', roles(typing), ['user:@codex fix it', 'assistant:done']);
+
+  // A follow-up's echo has no sessionId (activeSessionId is cleared at each
+  // summary) while the server's event names the hub session: still one turn.
+  typing.messages.push({ role: 'user', text: 'again', ts: 'echo-2', sessionId: '', echo: true });
+  cp.handleSSE(typing, { type: 'user', session_id: 's1', conversation_id: 'conv-ue', ts: 'srv-2', text: 'again' });
+  same('follow-up echo without a sessionId is confirmed', roles(typing), ['user:@codex fix it', 'assistant:done', 'user:again']);
+
+  // A confirmed echo is not matched twice: a second user event is a new turn.
+  cp.handleSSE(typing, { type: 'user', session_id: 's1', conversation_id: 'conv-ue', ts: 'srv-3', text: 'again' });
+  same('a second identical turn is appended', roles(typing).length, 4);
+
+  // On a follow-up the server announces the route before the user turn, so the
+  // route chip lands after the echo; the user event still confirms that echo.
+  typing.messages.push({ role: 'user', text: 'third', ts: 'echo-3', sessionId: '', echo: true });
+  cp.handleSSE(typing, { type: 'route', session_id: 's1', ts: 'r', route: { runtime: 'claude', model: 'sonnet', reason: 'pane', pinned: 'pane' } });
+  var beforeThird = roles(typing).length;
+  cp.handleSSE(typing, { type: 'user', session_id: 's1', conversation_id: 'conv-ue', ts: 'srv-4', text: 'third' });
+  same('echo behind the route chip is confirmed, not duplicated', [roles(typing).length, typing.messages[beforeThird - 2].echo], [beforeThird, false]);
+
+  // A watcher (IDE mirror, second tab, watch pane): no echo, so the turn is appended
+  // with the server's text and ts, then the reply.
+  var watcher = cp.makePane('ue-watch', 'conv-ue');
+  cp.handleSSE(watcher, { type: 'user', session_id: 's1', conversation_id: 'conv-ue', ts: 'srv-ts', text: 'fix it' });
+  cp.handleSSE(watcher, { type: 'token', session_id: 's1', ts: 't', text: 'done' });
+  same('watcher: user turn then reply', roles(watcher), ['user:fix it', 'assistant:done']);
+  same('watcher: server ts and session kept', [watcher.messages[0].ts, watcher.messages[0].sessionId], ['srv-ts', 's1']);
+
+  // A legacy echo without the flag still dedupes on sessionId + text ...
+  var legacy = cp.makePane('ue-legacy', 'conv-ue');
+  legacy.messages.push({ role: 'user', text: 'hello', ts: 'e', sessionId: 's2' });
+  cp.handleSSE(legacy, { type: 'user', session_id: 's2', ts: 's', text: 'hello' });
+  same('legacy echo: same session and text dedupes', roles(legacy), ['user:hello']);
+  // ... but a different text or session is another turn.
+  cp.handleSSE(legacy, { type: 'user', session_id: 's2', ts: 's', text: 'other' });
+  cp.handleSSE(legacy, { type: 'user', session_id: 's3', ts: 's', text: 'other' });
+  same('legacy echo: different text or session appends', roles(legacy), ['user:hello', 'user:other', 'user:other']);
+
+  // The real send path flags its echo so the server's event can confirm it.
+  var posted = 0, realFetch = global.fetch, realGet = document.getElementById;
+  global.fetch = function() { posted++; return Promise.resolve({ ok: true, status: 202, headers: { get: function() { return null; } } }); };
+  document.getElementById = function(id) { return /^pane-input-/.test(id) ? { value: 'typed turn' } : null; };
+  try {
+    var sp = cp.makePane('ue-send', 'conv-ue-send');
+    cp.sendPaneMessage(sp);
+    clearInterval(sp.elapsedTimer);
+    same('send path flags the echo', [posted, sp.messages[0].role, sp.messages[0].echo], [1, 'user', true]);
+    cp.handleSSE(sp, { type: 'user', session_id: sp.messages[0].sessionId, conversation_id: 'conv-ue-send', ts: 'srv', text: 'typed turn' });
+    same('send path echo confirmed by the server event', roles(sp), ['user:typed turn']);
+  } finally {
+    global.fetch = realFetch;
+    document.getElementById = realGet;
+  }
+}
+try { userEventTest(); } catch (e) { ueFail(String(e && e.stack || e)); }
+
 Promise.resolve(global.__k173Replay).then(treeRescanTest).then(function() {
   process.stdout.write(
     'PASS: app.js loaded without error; data-theme="' + _themeAttr +

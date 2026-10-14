@@ -132,7 +132,10 @@ func TestStructuredQuestions_StartWithoutAPIKeyIsSurfacedAndNothingIsSpawned(t *
 	// 1. The live SSE error frame.
 	select {
 	case ev := <-frames:
-		if ev.Type == "route" { // K-148: every turn opens with where it was routed
+		if ev.Type == "user" { // K-1: the user's turn is announced to every viewer first
+			ev = <-frames
+		}
+		if ev.Type == "route" { // K-148: then where it was routed
 			ev = <-frames
 		}
 		if ev.Type != "error" {

@@ -1516,7 +1516,33 @@
   // _handleSSEEventForPane applies a single SSE event to one pane.
   // Called by handleSSEEvent for each pane in the fan-out Set.
   function _handleSSEEventForPane(ev, sessionId, paneId, pane) {
-    if (ev.type === 'token') {
+    if (ev.type === 'user') {
+      // A user turn as the server stored it, sent to every viewer of the
+      // conversation the moment it is written. The typing pane already shows
+      // its own optimistic echo (flagged echo:true, its ts kept, its text as
+      // typed - an @runtime prefix is stripped server-side), so the trailing
+      // echo for this turn is confirmed rather than duplicated. A follow-up's
+      // echo carries no sessionId (activeSessionId is cleared at each summary),
+      // which is why the match is the echo flag, not the id alone. On a
+      // follow-up the server announces the route before the user turn, so the
+      // echo may sit behind this turn's route chip or handoff banner; those are
+      // skipped to find it. Watch panes, IDE mirrors and second tabs hold no
+      // echo and append the turn.
+      const msgs = pane.messages;
+      let at = msgs.length - 1;
+      while (at >= 0 && (msgs[at].role === 'route' || msgs[at].role === 'handoff')) at--;
+      const last = at >= 0 ? msgs[at] : null;
+      const echoed = last && last.role === 'user' &&
+        ((last.echo && (!last.sessionId || last.sessionId === sessionId)) ||
+         (last.sessionId === sessionId && last.text === (ev.text || '')));
+      if (echoed) {
+        last.echo = false;
+        return;
+      }
+      msgs.push({ role: 'user', text: ev.text || '', ts: ev.ts, sessionId });
+      renderPaneMessages(paneId);
+      if (pane.autoScroll) scrollPaneToBottom(paneId);
+    } else if (ev.type === 'token') {
       // Append token text to the last streaming message, or start a new one.
       const msgs = pane.messages;
       const last = msgs[msgs.length - 1];
@@ -3493,8 +3519,9 @@
       pane.costSoFar = null;
       pane.startedAt = new Date();
 
-      // Optimistic user message render.
-      pane.messages.push({ role: 'user', text: task, ts: new Date().toISOString(), sessionId: pane.activeSessionId || '' });
+      // Optimistic user message render; echo:true lets the server's 'user'
+      // event for this turn confirm it instead of adding a second copy.
+      pane.messages.push({ role: 'user', text: task, ts: new Date().toISOString(), sessionId: pane.activeSessionId || '', echo: true });
       if (textarea) textarea.value = '';
 
       renderPaneHeader(paneId);
@@ -3639,8 +3666,9 @@
     if (!conversationToPaneIds.has(pane.conversationId)) conversationToPaneIds.set(pane.conversationId, new Set());
     conversationToPaneIds.get(pane.conversationId).add(paneId);
 
-    // Append user message immediately (optimistic).
-    pane.messages.push({ role: 'user', text: typed, ts: new Date().toISOString(), sessionId });
+    // Append user message immediately (optimistic). echo:true lets the server's
+    // 'user' event for this turn confirm it instead of adding a second copy.
+    pane.messages.push({ role: 'user', text: typed, ts: new Date().toISOString(), sessionId, echo: true });
     if (textarea) textarea.value = '';
 
     renderPaneHeader(paneId);
