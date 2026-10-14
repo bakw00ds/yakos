@@ -5,16 +5,22 @@ package consoleui_test
 //
 // Before: the server wrote the user turn to the transcript file only; the typing
 // pane showed its own optimistic echo and every other viewer of the conversation
-// (watch pane, IDE mirror, second tab, a turn posted by `yakos dispatch`) saw the
-// agent's replies but not the user's text until a reload re-fetched the
-// transcript. Now each write site also routes a "user" hub event, under the
-// same owner-only / shared rule as the reply's token events.
+// (watch pane, IDE mirror, second tab, a turn posted from the REPL via
+// `yakos start`) saw the agent's replies but not the user's text until a reload
+// re-fetched the transcript. Now each write site also routes a "user" hub
+// event, under the same owner-only / shared rule as the reply's token events.
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/bakw00ds/yakos/internal/consoleui"
+	"github.com/bakw00ds/yakos/internal/dispatch"
 )
 
 // turnFrames reads frames until the turn's summary and returns them all, the
@@ -152,7 +158,8 @@ func TestChatUserTurn_InteractiveSendStreamsUserEventOnTheConversationSession(t 
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("send: %d", resp.StatusCode)
 	}
-	second := ofType(turnFrames(t, alice, "follow-up turn"), "user")
+	followUp := turnFrames(t, alice, "follow-up turn")
+	second := ofType(followUp, "user")
 	if len(second) != 1 {
 		t.Fatalf("want exactly one user frame for the follow-up, got %d: %v", len(second), second)
 	}
@@ -162,6 +169,63 @@ func TestChatUserTurn_InteractiveSendStreamsUserEventOnTheConversationSession(t 
 	}
 	if ts, _ := u["ts"].(string); ts == "" {
 		t.Errorf("follow-up user frame has no ts: %v", u)
+	}
+	// The follow-up's user turn precedes the reply's first token, as on a
+	// one-shot turn: the frame is routed after the engine accepts the send but
+	// before its reply reaches the stream.
+	userAt, tokenAt := -1, -1
+	for i, ev := range followUp {
+		if ev["type"] == "user" && userAt < 0 {
+			userAt = i
+		}
+		if ev["type"] == "token" && tokenAt < 0 {
+			tokenAt = i
+		}
+	}
+	if tokenAt < 0 {
+		t.Fatalf("follow-up turn produced no token frame: %v", followUp)
+	}
+	if userAt > tokenAt {
+		t.Errorf("follow-up user frame at %d arrived after the first token at %d: %v", userAt, tokenAt, followUp)
+	}
+}
+
+// An oversized one-shot turn (over dispatch.MaxTaskBytes) is refused with 400
+// before anything happens: no transcript entry is written and no user frame is
+// announced, so a watcher is not shown a turn RunStream would have refused.
+func TestChatUserTurn_OversizedDispatchIsRefusedBeforeItIsStoredOrAnnounced(t *testing.T) {
+	s := newLedgerServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	alice := s.sseFrames(t, ctx, "alice")
+	time.Sleep(100 * time.Millisecond)
+
+	resp := s.post(t, "/api/chat/dispatch", map[string]any{
+		"agent": "claude", "runtime": "claude", "task": strings.Repeat("x", dispatch.MaxTaskBytes+1),
+		"sessionId": "sess-user-big", "operatorId": "alice", "conversationId": "conv-user-big",
+	})
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("oversized dispatch: %d, want 400 (body %q)", resp.StatusCode, body)
+	}
+	if !strings.Contains(string(body), "text exceeds maximum size") {
+		t.Errorf("oversized dispatch body = %q; want the size message", body)
+	}
+	if got := drainUserFrames(alice, 300*time.Millisecond); len(got) != 0 {
+		t.Errorf("an oversized dispatch announced a user turn: %v", got)
+	}
+	tr := get(t, s.ts.URL+"/api/chat/transcript?conversationId=conv-user-big&operatorId=alice", s.tok)
+	defer tr.Body.Close()
+	var entries []consoleui.TranscriptEntry
+	if err := json.NewDecoder(tr.Body).Decode(&entries); err != nil {
+		t.Fatalf("transcript decode: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("an oversized dispatch wrote %d transcript entries: %v", len(entries), entries)
+	}
+	if n := s.launchCount(t); n != 0 {
+		t.Errorf("an oversized dispatch launched the runtime %d times", n)
 	}
 }
 

@@ -590,6 +590,13 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "task is required", http.StatusBadRequest)
 		return
 	}
+	// Same bound as /api/chat/send. Checked here, before the transcript Append
+	// and the user frame, so an oversized turn is neither stored nor announced
+	// to the conversation's viewers before RunStream would refuse it.
+	if len(req.Task) > dispatch.MaxTaskBytes {
+		http.Error(w, fmt.Sprintf("text exceeds maximum size (%d bytes; limit %d)", len(req.Task), dispatch.MaxTaskBytes), http.StatusBadRequest)
+		return
+	}
 	if strings.TrimSpace(req.SessionID) == "" {
 		http.Error(w, "sessionId is required", http.StatusBadRequest)
 		return
@@ -2090,8 +2097,9 @@ func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
 // emitUserTurn sends the user turn just written to the transcript to every
 // viewer of the conversation's stream. The typing pane already shows its own
 // echo and dedupes this; a watch pane, an IDE mirror, a second tab or a viewer
-// of a turn posted by `yakos dispatch` would otherwise not see the user's text
-// until a reload re-fetched the transcript. Routed through ChatHub.Route like
+// of a turn posted from the REPL (`yakos start`) would otherwise not see the
+// user's text until a reload re-fetched the transcript. Routed through
+// ChatHub.Route like
 // token events: the owner's connections, or everyone's when the session is
 // shared. text is the task as stored, not as typed (any @runtime prefix is
 // already stripped), so the live view matches the reload.

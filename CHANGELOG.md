@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Console chat streams each user turn to every viewer of the conversation (K-1): a watch/interject pane, an IDE mirror, a second tab or a viewer of a turn posted by `yakos dispatch` saw the agent's replies live but the operator's text only after a reload. The server now routes a `user` SSE frame when it writes the turn to the transcript (owner-only, or everyone when the session is shared); the typing pane confirms its own echo instead of showing the turn twice. A turn now opens `user`, `route`, the order the transcript persists.
+- Console chat streams each user turn to every viewer of the conversation (K-1): a watch/interject pane, an IDE mirror, a second tab or a viewer of a turn posted from the REPL (`yakos start`) saw the agent's replies live but the operator's text only after a reload. The server now routes a `user` SSE frame when it writes the turn to the transcript (owner-only, or everyone when the session is shared); the typing pane confirms its own echo instead of showing the turn twice. A turn now opens `user`, `route`, the order the transcript persists.
 
 ## [0.63.0.1] — 2026-10-13
 

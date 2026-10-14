@@ -1520,7 +1520,7 @@
       // A user turn as the server stored it, sent to every viewer of the
       // conversation the moment it is written. The typing pane already shows
       // its own optimistic echo (flagged echo:true, its ts kept, its text as
-      // typed - an @runtime prefix is stripped server-side), so the trailing
+      // typed - buildDispatchBody strips an @runtime prefix client-side), so the trailing
       // echo for this turn is confirmed rather than duplicated. A follow-up's
       // echo carries no sessionId (activeSessionId is cleared at each summary),
       // which is why the match is the echo flag, not the id alone. On a
