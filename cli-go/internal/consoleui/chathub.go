@@ -98,13 +98,19 @@ type SSEEvent struct {
 	// across turns.  Populated on every chat SSE frame.
 	ConversationID string `json:"conversation_id,omitempty"`
 
-	// Type is "token" | "summary" | "ping" | "tool_use" | "tool_result" | "error" | "thinking".
+	// Type is "token" | "summary" | "ping" | "tool_use" | "tool_result" | "error" | "thinking" | "user".
 	// "error" is emitted by the dispatch goroutine when RunStream returns a
 	// non-cancel error, so the client UI can show an error instead of hanging.
 	// "thinking" carries an incremental extended-thinking delta (see Thinking field).
+	// "user" announces a user turn the moment it is written to the transcript, so
+	// every viewer of the conversation (watch pane, IDE mirror, second tab) shows
+	// it live instead of only after a transcript reload; the typing pane, which
+	// already echoed the text, dedupes it. Routed like token events (owner-only,
+	// or every operator when the session is shared).
 	Type string `json:"type"`
 
-	// Text is the token text (Type=="token") or full text (Type=="summary").
+	// Text is the token text (Type=="token"), the full text (Type=="summary")
+	// or the user's turn as stored in the transcript (Type=="user").
 	Text string `json:"text,omitempty"`
 
 	// Thinking is an incremental extended-thinking delta (Type=="thinking").
@@ -177,8 +183,9 @@ type SSEEvent struct {
 	// Delivered OWNER-PRIVATE (same rule as AskToolUseID).
 	AskQuestionsJSON string `json:"ask_questions_json,omitempty"`
 
-	// Route is set on Type=="route", the first event of a turn: where the router
-	// sent it and why (K-148). Persisted as a transcript "route" turn.
+	// Route is set on Type=="route", the first event of a turn after its "user"
+	// frame: where the router sent it and why (K-148). Persisted as a transcript
+	// "route" turn, in that same order (user, route).
 	Route *routeView `json:"route,omitempty"`
 
 	// Handoff is set on Type=="handoff": the operator moved the conversation to
@@ -253,11 +260,11 @@ var errTooManySharedConversations = errors.New("chathub: shared conversation cap
 // All exported methods are safe for concurrent use.
 type ChatHub struct {
 	mu                sync.Mutex
-	conns             map[string][]*sseConn              // operatorID → list of connections
-	connByID          map[string]*sseConn                // connID → conn (for Unregister)
-	sessions          map[string]sessionEntry            // sessionID → entry
-	conversationShare map[string]conversationShareEntry  // conversationID → stable share state
-	totalConns        int                                // M3: global SSE connection count across all operators
+	conns             map[string][]*sseConn             // operatorID → list of connections
+	connByID          map[string]*sseConn               // connID → conn (for Unregister)
+	sessions          map[string]sessionEntry           // sessionID → entry
+	conversationShare map[string]conversationShareEntry // conversationID → stable share state
+	totalConns        int                               // M3: global SSE connection count across all operators
 }
 
 // NewChatHub allocates an empty hub.
@@ -561,6 +568,31 @@ func (h *ChatHub) ConversationForSession(sessionID string) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.sessions[sessionID].conversationID
+}
+
+// SessionForConversation returns the live hub session bound to conversationID
+// and owned by ownerOperatorID, and whether one exists. It is the session the
+// conversation's reply events ride, so an event about the conversation that
+// arrives without a session of its own (a follow-up turn on /api/chat/send,
+// which the console posts without a sessionId) can be routed to the same
+// viewers. preferred wins when it is one of the matches; otherwise the lowest
+// sessionID is taken so the choice is deterministic.
+func (h *ChatHub) SessionForConversation(conversationID, ownerOperatorID, preferred string) (string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	best := ""
+	for sid, e := range h.sessions {
+		if e.conversationID != conversationID || e.ownerOperatorID != ownerOperatorID {
+			continue
+		}
+		if sid == preferred {
+			return sid, true
+		}
+		if best == "" || sid < best {
+			best = sid
+		}
+	}
+	return best, best != ""
 }
 
 // IsConversationShared returns true when conversationID is shared.

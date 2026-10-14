@@ -587,10 +587,13 @@ transcript and user-turn text; none of it enters a system prompt,
   runtime) and applies them over the pane's selects. The pane's model is dropped
   unless the override names the same runtime. A live interactive pane refuses an
   override: its engine is one runtime.
-- **Route event.** The first event of a one-shot turn is `route` (runtime,
-  provider, model, rule id, reason, class, `fallback_from`, and `pinned`:
-  `override`, `pane` or `router`). `dispatch.Params.EmitRoute` turns it on, so a
-  transport that forwards every chunk (gRPC) sees no new frame. It is persisted as
+- **Route event.** A one-shot turn opens with the `user` event (the operator's
+  turn as stored, sent to every viewer of the conversation, K-1) and then
+  `route` (runtime, provider, model, rule id, reason, class, `fallback_from`,
+  and `pinned`: `override`, `pane` or `router`), before any token; the transcript
+  persists them in the same order (`user`, `route`). `dispatch.Params.EmitRoute`
+  turns it on, so a transport that forwards every chunk (gRPC) sees no new
+  frame. It is persisted as
   a transcript turn with role `route` (`runtime`, `model`, `text` = reason,
   `rule_id`, `fallback_from`, `pinned`); the schema only grew, and a reader that
   does not know the role skips the line. The console shows it as the "why this
@@ -628,8 +631,10 @@ transcript and user-turn text; none of it enters a system prompt,
   turn as the first turn: the pane's one decision, repeated, never a new one. It
   goes out before the frame, only for the pane's owner, so a refused send from
   anyone else writes nothing; a send the engine then refuses as in flight (409)
-  leaves one extra chip. An SDK pane (structured questions) skips the CLI and
-  sign-in probe, because its engine is a sidecar on `ANTHROPIC_API_KEY`, and so
+  leaves one extra chip. The `user` event for a follow-up goes out after the
+  frame is delivered (a refused send announces nothing), so on a follow-up it
+  follows the `route` event, again in the transcript's order. An SDK pane
+  (structured questions) skips the CLI and sign-in probe, because its engine is a sidecar on `ANTHROPIC_API_KEY`, and so
   the router's model checks run for it exactly as for a CLI pane: a model the
   project's `router.disable_models` lists, or one the agent's `max_model` ceiling
   cannot rank, is refused with the same error frame, and a model above the

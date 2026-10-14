@@ -590,6 +590,13 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "task is required", http.StatusBadRequest)
 		return
 	}
+	// Same bound as /api/chat/send. Checked here, before the transcript Append
+	// and the user frame, so an oversized turn is neither stored nor announced
+	// to the conversation's viewers before RunStream would refuse it.
+	if len(req.Task) > dispatch.MaxTaskBytes {
+		http.Error(w, fmt.Sprintf("text exceeds maximum size (%d bytes; limit %d)", len(req.Task), dispatch.MaxTaskBytes), http.StatusBadRequest)
+		return
+	}
 	if strings.TrimSpace(req.SessionID) == "" {
 		http.Error(w, "sessionId is required", http.StatusBadRequest)
 		return
@@ -767,7 +774,8 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 	handoffDigest, handoffInfo := ch.planHandoff(conversationID, capturedOperatorID, runtimeName,
 		routePinned != "router", len(req.Task))
 
-	// Append the user turn to the transcript.
+	// Append the user turn to the transcript, then announce it on the stream so
+	// every other viewer of the conversation shows it live.
 	_ = ch.transcripts.Append(TranscriptEntry{
 		SessionID:      dispReq.SessionID,
 		ConversationID: conversationID,
@@ -777,6 +785,7 @@ func (ch *chatHandlers) handleChatDispatch(w http.ResponseWriter, r *http.Reques
 		Runtime:        runtimeName,
 		Model:          modelName,
 	})
+	ch.emitUserTurn(dispReq.SessionID, conversationID, dispReq.Task)
 
 	// Capture the resolved identity for the goroutine.
 	capturedIdentityForGoroutine := capturedIdentity
@@ -2024,7 +2033,9 @@ func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A follow-up turn announces the pane's route again (K-173), the way every
-	// one-shot turn opens with one. The router decided once, at the first turn;
+	// one-shot turn opens with one (after its user frame, K-1; here the route
+	// precedes the user frame, as the transcript order below does). The router
+	// decided once, at the first turn;
 	// this repeats that decision, it does not make a new one. It goes out before
 	// the frame so it precedes the reply, and only for the pane's owner, so a
 	// non-owner's refused send writes nothing to the owner's transcript. A send
@@ -2073,8 +2084,33 @@ func (ch *chatHandlers) handleChatSend(w http.ResponseWriter, r *http.Request) {
 		Role:           RoleUser,
 		Text:           req.Text,
 	})
+	// The console posts follow-ups without a sessionId; the turn's reply rides
+	// the hub session the conversation was started on, so the user turn goes
+	// out on that same session (same viewers, same owner/shared rule).
+	if sid, ok := ch.hub.SessionForConversation(req.ConversationID, effectiveOperatorID, req.SessionID); ok {
+		ch.emitUserTurn(sid, req.ConversationID, req.Text)
+	}
 
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// emitUserTurn sends the user turn just written to the transcript to every
+// viewer of the conversation's stream. The typing pane already shows its own
+// echo and dedupes this; a watch pane, an IDE mirror, a second tab or a viewer
+// of a turn posted from the REPL (`yakos start`) would otherwise not see the
+// user's text until a reload re-fetched the transcript. Routed through
+// ChatHub.Route like
+// token events: the owner's connections, or everyone's when the session is
+// shared. text is the task as stored, not as typed (any @runtime prefix is
+// already stripped), so the live view matches the reload.
+func (ch *chatHandlers) emitUserTurn(sessionID, conversationID, text string) {
+	ch.hub.Route(SSEEvent{
+		SessionID:      sessionID,
+		ConversationID: conversationID,
+		Type:           "user",
+		Text:           text,
+		TS:             time.Now().UTC().Format(time.RFC3339Nano),
+	})
 }
 
 // ---- POST /api/chat/answer -------------------------------------------------
