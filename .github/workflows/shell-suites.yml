@@ -214,7 +214,7 @@ jobs:
         run: if ! command -v jq >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y jq python3; fi
 
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           go-version: '1.25'
           cache-dependency-path: cli-go/go.sum
@@ -290,7 +290,7 @@ jobs:
         run: if ! command -v jq >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y jq python3; fi
 
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5  # v7.1.0
         with:
           go-version: '1.25'
           cache-dependency-path: cli-go/go.sum
